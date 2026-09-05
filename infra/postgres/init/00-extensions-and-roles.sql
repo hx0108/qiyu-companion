@@ -21,9 +21,13 @@ ALTER ROLE qiyu_app SET timezone TO 'UTC';
 -- The Docker bootstrap owner is the only login used for local development.
 -- It must explicitly assume the non-owner application role for every API
 -- transaction; otherwise a table owner would bypass FORCE RLS.
+-- 幂等：bootstrap 用户恰为 qiyu_app 本身（如显式以应用角色初始化）时跳过
+-- 自我成员授权；该场景下 qiyu_app 需为可登录角色且具备建库建角色权限。
 DO $$
 BEGIN
-  EXECUTE format('GRANT qiyu_app TO %I', current_user);
+  IF current_user <> 'qiyu_app' THEN
+    EXECUTE format('GRANT qiyu_app TO %I', current_user);
+  END IF;
 END
 $$;
 

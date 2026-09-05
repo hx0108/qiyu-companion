@@ -73,6 +73,94 @@ class QwenAdapter {
       }
     }
   }
+
+  // 技术设计 7.5 的流式形态：供应商 token 不直接透传——Adapter 按句号/换行/
+  // 长度上限把 token 累积为句级片段，逐片段回调 onFragment（上层在此执行输出
+  // 审核与权限门禁，通过才允许下发 SSE）。onFragment 返回 false 视为拦截。
+  // 终稿与 usage（stream_options.include_usage 的最后一帧）一并返回。
+  // 权衡：流式 prompt 输出纯文本（不做 companion_reply.v1 JSON 包裹，逐 token
+  // 无法边解析 JSON）；结构化 Schema 保留在非流式路径，流式的风格/情绪元数据为空。
+  async generateStream({ text, context, onFragment, signal } = {}) {
+    if (typeof text !== 'string' || !text.trim()) throw new QwenProviderError('QWEN_INPUT_INVALID', 'Qwen input must be non-empty', 400);
+    if (typeof onFragment !== 'function') throw new TypeError('generateStream requires onFragment');
+    const controller = new AbortController();
+    if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs * 4);
+    const FLUSH_PATTERN = /[。！？!?；;\n]/;
+    const MAX_BUFFER = 60;
+    let buffer = '';
+    let fullText = '';
+    let providerRequestId = null;
+    let usage = { unavailable: true };
+    const flush = async (force = false) => {
+      const candidate = buffer.trim();
+      if (!candidate) { buffer = ''; return; }
+      const boundaryIndex = force ? -1 : candidate.search(FLUSH_PATTERN);
+      if (boundaryIndex >= 0 && boundaryIndex + 1 < candidate.length) {
+        const fragment = candidate.slice(0, boundaryIndex + 1);
+        buffer = candidate.slice(boundaryIndex + 1);
+        const approved = await onFragment(fragment);
+        if (approved === false) throw new QwenProviderError('QWEN_STREAM_INTERCEPTED', '流式片段未通过输出门禁', 200, {}, false);
+        return;
+      }
+      if (force || candidate.length >= MAX_BUFFER) {
+        buffer = '';
+        const approved = await onFragment(candidate);
+        if (approved === false) throw new QwenProviderError('QWEN_STREAM_INTERCEPTED', '流式片段未通过输出门禁', 200, {}, false);
+      }
+    };
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json', accept: 'text/event-stream' },
+        body: JSON.stringify({
+          model: this.model,
+          messages: buildMessages(text.trim(), context),
+          enable_thinking: false,
+          preserve_thinking: false,
+          stream: true,
+          stream_options: { include_usage: true }
+        }),
+        signal: controller.signal
+      });
+      if (!response.ok || !response.body) throw new QwenProviderError('QWEN_UPSTREAM_REJECTED', 'Qwen 服务暂时不可用，请稍后重试', 502, { upstream_status: response.status }, response.status === 429 || response.status >= 500);
+      let pendingLine = '';
+      for await (const rawChunk of response.body) {
+        pendingLine += Buffer.from(rawChunk).toString('utf8');
+        const lines = pendingLine.split(/\r?\n/);
+        pendingLine = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const payloadText = line.slice(5).trim();
+          if (!payloadText || payloadText === '[DONE]') continue;
+          let frame;
+          try { frame = JSON.parse(payloadText); } catch { continue; }
+          if (typeof frame.id === 'string' && frame.id) providerRequestId = frame.id;
+          if (frame.usage && typeof frame.usage === 'object') usage = frame.usage;
+          const delta = frame.choices && frame.choices[0] && frame.choices[0].delta;
+          if (delta && typeof delta.content === 'string' && delta.content) {
+            buffer += delta.content;
+            fullText += delta.content;
+            await flush();
+          }
+        }
+      }
+      await flush(true);
+      if (!fullText.trim()) throw new QwenProviderError('QWEN_RESPONSE_INVALID', 'Qwen 未返回可用文本');
+      return assertAdapterResult('LLM', {
+        text: fullText.trim(),
+        providerRequestId: providerRequestId || 'qwen-request-id-unavailable',
+        modelVersion: this.model,
+        usage
+      });
+    } catch (error) {
+      if (error instanceof QwenProviderError) throw error;
+      if (error && error.name === 'AbortError') throw new QwenProviderError('QWEN_TIMEOUT', 'Qwen 流式响应超时或被中止', 502, {}, true);
+      throw new QwenProviderError('QWEN_NETWORK_ERROR', 'Qwen 网络请求失败，请稍后重试', 502, {}, true);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function createQwenReplyGenerator(environment = process.env, dependencies = {}) {
@@ -93,6 +181,30 @@ function createQwenReplyGenerator(environment = process.env, dependencies = {}) 
         type: 'development_note', normalized_value: { text: text.trim() }, display_text: `你提到：“${text.trim()}”`, confidence: 1
       }
     };
+  };
+}
+
+// 流式回复生成器（技术设计 7.5）：generateStream(text, context, onFragment)
+// 返回 { reply_text, provider, model_version, usage, ai_generated }；onFragment
+// 由服务端注入（执行逐段输出审核与权限门禁），返回 false 表示拦截。
+function createQwenStreamingReplyGenerator(environment = process.env, dependencies = {}) {
+  if (environment.QIYU_LLM_PROVIDER !== 'qwen') return null;
+  const adapter = new QwenAdapter({
+    apiKey: environment.QWEN_API_KEY || environment.DASHSCOPE_API_KEY,
+    baseUrl: environment.QWEN_BASE_URL || environment.DASHSCOPE_BASE_URL || DEFAULT_BASE_URL,
+    model: environment.QWEN_MODEL || DEFAULT_MODEL,
+    fetchImpl: dependencies.fetchImpl || globalThis.fetch,
+    timeoutMs: positiveTimeout(environment.QWEN_TIMEOUT_MS)
+  });
+  return {
+    async generateStream(text, context, onFragment, signal) {
+      const result = await adapter.generateStream({ text, context, onFragment, signal });
+      return {
+        provider: 'qwen', model_version: result.modelVersion, reply_text: result.text, usage: result.usage, ai_generated: true,
+        disclaimer: '这是由 Qwen 生成的 AI 内容，不代表真人或专业意见。',
+        memory_candidate: { type: 'development_note', normalized_value: { text: text.trim() }, display_text: `你提到：“${text.trim()}”`, confidence: 1 }
+      };
+    }
   };
 }
 
@@ -210,4 +322,4 @@ function positiveTimeout(value) {
   return Number.isFinite(parsed) && parsed >= 1000 && parsed <= 60000 ? parsed : 20000;
 }
 
-module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenReplyGenerator, fallbackCompanionReply, parseCompanionReply, summaryPrompt };
+module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenReplyGenerator, createQwenStreamingReplyGenerator, fallbackCompanionReply, parseCompanionReply, summaryPrompt };

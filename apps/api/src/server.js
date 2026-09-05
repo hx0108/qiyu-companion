@@ -3,7 +3,7 @@
 const { createApp } = require('./app');
 const { assertRuntimeConfiguration, assertLocalSyntheticRuntimeAllowed } = require('./production/startup');
 const { createPersistenceFromEnvironment } = require('./persistence/composition');
-const { createQwenConversationSummaryGenerator, createQwenReplyGenerator } = require('./providers/qwen-adapter');
+const { createQwenConversationSummaryGenerator, createQwenReplyGenerator, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
 const { createTencentImageModeratorFromEnvironment, createTencentTextModeratorFromEnvironment } = require('./providers/tencent-moderation-adapter');
 const { createTencentAsrTranscriberFromEnvironment } = require('./providers/tencent-asr-adapter');
 const { createTencentTtsGeneratorFromEnvironment } = require('./providers/tencent-tts-adapter');
@@ -21,6 +21,8 @@ const port = Number(process.env.PORT || 3000);
 const runtime = assertLocalSyntheticRuntimeAllowed(assertRuntimeConfiguration(process.env));
 const store = createPersistenceFromEnvironment(process.env);
 const replyGenerator = createQwenReplyGenerator(process.env) || undefined;
+// 真流式生成器（技术设计 7.5）：请求 body.stream:true 且已配置 Qwen 时启用。
+const streamingReplyGenerator = createQwenStreamingReplyGenerator(process.env) || null;
 const summaryGenerator = createQwenConversationSummaryGenerator(process.env) || undefined;
 const textModerator = createTencentTextModeratorFromEnvironment(process.env) || undefined;
 const asrTranscriber = createTencentAsrTranscriberFromEnvironment(process.env) || undefined;
@@ -34,7 +36,7 @@ const imageResultFetcher = imageGenerator ? fetchTencentGeneratedImage : undefin
 // 外层权益服务仅对进程内内存存储有效；Postgres 模式由 withAccountTransaction
 // 在每个请求作用域 store 上挂载实例（请求级账本与订阅都在其中加载）。
 const mediaEntitlementService = process.env.QIYU_PERSISTENCE === 'postgres' ? null : new MediaEntitlementService({ store });
-createApp({ store, replyGenerator, summaryGenerator, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService }).listen(port, '127.0.0.1', () => {
+createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService }).listen(port, '127.0.0.1', () => {
   console.log(`栖语 M1 本地合成 API 已监听 http://127.0.0.1:${port}`);
   console.log(`运行模式：${runtime.mode}；外部高风险能力默认关闭，必须经生产配置门禁启用。`);
   console.log(`持久化：${process.env.QIYU_PERSISTENCE || 'memory'}；模型：${process.env.QIYU_LLM_PROVIDER === 'qwen' ? 'qwen（本地开发接线）' : 'mock'}。`);

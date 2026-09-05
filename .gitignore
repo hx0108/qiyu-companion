@@ -9,6 +9,7 @@ node_modules/
 !.env.example
 !*.env.example
 infra/postgres/.env
+deploy/.env
 
 # 本地运行产物（媒体、任务状态、截图、调试）
 .qiyu-dev-media/

@@ -61,7 +61,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -69,7 +69,8 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, requestId });
+      if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
       send(res, result.status, result.body, requestId);
@@ -97,7 +98,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -176,12 +177,12 @@ async function route(context) {
   if (method === 'GET' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) return listMessages(store, account, path, url);
   if (method === 'GET' && /^\/api\/v1\/messages\/[^/]+$/.test(path)) return getMessage(store, account, path);
   if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/feedback$/.test(path)) return idempotent(context, account, () => createMessageFeedback(store, account, path, body));
-  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId);
+  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, textModerator);
   if (method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(path)) return idempotent(context, account, () => deleteConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/resume$/.test(path)) return idempotent(context, account, () => resumeConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) {
-    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator));
+    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator));
   }
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/asr-jobs$/.test(path)) {
     return idempotent(context, account, () => createAsrJob(store, account, path, body, asrTranscriber, mediaStore, imageEntitlementService));
@@ -942,7 +943,7 @@ function deleteConversation(store, account, path) {
   return ok({ conversation: { conversation_id: conversation.conversation_id, status: conversation.status, deleted_at: deletedAt }, deletion_job: deletionJob });
 }
 
-async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator) {
+async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null) {
   const conversationId = path.split('/')[4];
   const text = requiredText(body?.content?.text, 'content.text');
   // 注销/封禁是硬阻断，优先于资源解析与固定安全响应（与 access-policy 的 ACCOUNT_NOT_OPEN 同源）。
@@ -962,6 +963,12 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     const moderation = await moderateTextWithMetric(store, account, textModerator, { text, conversationId: conversation.conversation_id, direction: 'INPUT' });
     if (!moderation || !['PASS', 'REVIEW', 'BLOCK'].includes(moderation.decision)) throw apiError(502, 'TEXT_MODERATION_RESPONSE_INVALID', '内容审核未返回有效决策');
     if (moderation.decision !== 'PASS') return createModerationResponse(store, account, conversation, text, moderation);
+  }
+  // 技术设计 8.4/7.5：请求 stream:true 且配置了流式生成器时走 202 ACCEPTED——
+  // 模型调用、额度预留与终稿持久化全部发生在一次性 SSE 令牌的消费请求中，
+  // 未消费的令牌不产生任何模型调用或额度副作用。
+  if (body?.stream === true && streamingReplyGenerator && typeof streamingReplyGenerator.generateStream === 'function') {
+    return acceptStreamingMessage(store, account, conversation, text);
   }
   let reservation;
   const modelStartedAt = Date.now();
@@ -1133,13 +1140,30 @@ function mintStreamToken(store, account, conversation, assistantMessage) {
   return { stream_url: `/api/v1/conversation-streams/${token}`, stream_token: token, stream_expires_at: new Date(now + STREAM_TOKEN_TTL_MS).toISOString(), replay: true };
 }
 
-function getConversationStream(store, account, path, requestId) {
+// ---- 真流式（技术设计 8.4 ACCEPTED 合同 + 7.5 逐段输出门禁）----
+// POST stream:true 只受理与签发一次性令牌；模型调用、额度预留、逐段审核、
+// 终稿持久化都在 SSE 消费请求内完成。令牌未消费则无任何副作用。
+function acceptStreamingMessage(store, account, conversation, text) {
+  const userMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'USER', text, provider: null, ai_generated: false, created_at: new Date().toISOString() };
+  store.messages.set(userMessage.message_id, userMessage);
+  const token = `st_${randomUUID()}`;
+  const now = Date.now();
+  streamTokens.set(token, { mode: 'live', accountId: account.account_id, conversationId: conversation.conversation_id, text, expiresAt: now + STREAM_TOKEN_TTL_MS, used: false });
+  return accepted({
+    status: 'ACCEPTED', user_message: userMessage, assistant_message: null, memory_candidate: null,
+    stream: { stream_url: `/api/v1/conversation-streams/${token}`, stream_token: token, stream_expires_at: new Date(now + STREAM_TOKEN_TTL_MS).toISOString(), mode: 'live' },
+    note: '已受理。在 30 秒内以 GET 消费 stream_url 建立流式连接；令牌一次性，未消费不产生模型调用或额度扣减。'
+  });
+}
+
+function getConversationStream(store, account, path, requestId, streamingReplyGenerator, textModerator) {
   const token = path.split('/')[4];
   const entry = streamTokens.get(token);
   if (!entry || entry.accountId !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '流式回放不存在');
   if (entry.used) throw apiError(409, 'STATE_TRANSITION_INVALID', '流式令牌已使用，请用消息接口读取终态');
   if (entry.expiresAt < Date.now()) { streamTokens.delete(token); throw apiError(410, 'CONTENT_REVOKED', '流式令牌已过期'); }
   entry.used = true;
+  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, textModerator);
   const assistantMessage = store.messages.get(entry.assistantMessageId);
   const finalText = assistantMessage ? assistantMessage.text : entry.text;
   return {
@@ -1153,6 +1177,124 @@ function getConversationStream(store, account, path, requestId) {
       ]
     }
   };
+}
+
+// 真流式执行体（技术设计 7.5）：额度预留→Qwen 流式→按句片段过本地权限门禁
+// 与 OUTPUT 审核→通过才下发 chunk；拦截/失败走 replaced/failed 终态并释放额度。
+// SSE 请求与 POST 同处账户事务模型：流式期间同账户其他请求按公平使用语义排队。
+function liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, textModerator) {
+  return {
+    status: 200,
+    sseLive: {
+      requestId,
+      produce: async (emit, signal) => {
+        const conversation = ownConversation(store, account.account_id, entry.conversationId);
+        requireOpenConversation(conversation);
+        const activeSafety = responseForExistingSafetyMode(account.safety_mode) || assessSafety(entry.text);
+        if (activeSafety) {
+          const assistantMessageId = store.next('msg');
+          emit('safety.response', { request_id: requestId, code: activeSafety.code, assistant_message_id: assistantMessageId });
+          persistStreamingFinal(store, account, conversation, { reply_text: activeSafety.text, provider: 'safety-policy', model_version: 'deterministic-safety-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
+          return;
+        }
+        authorize(account, 'SEND_MESSAGE', store);
+        let reservation;
+        try {
+          reservation = reserveDailyChatUsage(store, { accountId: account.account_id, estimatedInputTokens: estimateInputTokens(entry.text) });
+        } catch (error) {
+          emit('message.failed', { request_id: requestId, code: error.code || 'DAILY_CHAT_LIMIT_REACHED', retryable: false });
+          return;
+        }
+        const assistantMessageId = store.next('msg');
+        emit('message.accepted', { request_id: requestId, assistant_message_id: assistantMessageId });
+        let sequence = 0;
+        let settled = false;
+        const release = () => { if (!settled) { settled = true; try { releaseDailyChatUsage(store, reservation); } catch { /* 事务已回滚则忽略 */ } } };
+        const commitUsage = (modelReply) => { if (!settled) { settled = true; return commitDailyChatUsage(store, reservation, { billedInputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens) }); } return null; };
+        try {
+          const contextPack = buildContextPack(store, account, conversation, entry.text);
+          const onFragment = async (fragment) => {
+            // 本地确定性门禁（7.5 本地规则，零成本）先于供应商审核。
+            if (assessModelOutputAuthority(fragment)) return false;
+            if (typeof textModerator === 'function') {
+              const moderation = await textModerator({ text: fragment, accountId: account.account_id, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
+              if (!moderation || moderation.decision !== 'PASS') return false;
+            }
+            sequence += 1;
+            emit('message.chunk', { sequence, text: fragment });
+            return true;
+          };
+          const modelReply = await streamingReplyGenerator.generateStream(entry.text, contextPack, onFragment, signal);
+          // 终稿复核：片段全过不代表拼接终稿安全（跨片段可能拼出新表述）。
+          if (assessModelOutputAuthority(modelReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '终稿未通过输出门禁');
+          const usage = commitUsage(modelReply);
+          persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true });
+        } catch (error) {
+          const intercepted = error?.code === 'QWEN_STREAM_INTERCEPTED' || error?.code === 'MODEL_CLAIMED_AUTHORITY';
+          release();
+          if (intercepted) {
+            emit('message.replaced', { request_id: requestId, reason: 'OUTPUT_MODERATION' });
+            persistStreamingFinal(store, account, conversation, { reply_text: '这条回复的部分内容未通过安全审核，已停止生成。你可以换一个话题继续。', provider: 'model-output-guard', model_version: 'stream-gate-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
+            return;
+          }
+          if (signal?.aborted) { emit('message.cancelled', { request_id: requestId, reason: 'CLIENT_DISCONNECTED' }); return; }
+          emit('message.failed', { request_id: requestId, code: error?.code || 'MODEL_UNAVAILABLE', retryable: Boolean(error?.retryable ?? true) });
+        }
+      }
+    }
+  };
+}
+
+// 流式终态统一持久化：助手消息（含世界状态快照）与可选候选；拦截/安全路径
+// 不创建候选。最后发 message.completed（断线后客户端以 GET /messages/{id} 恢复终态）。
+function persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate }) {
+  const createdAt = new Date().toISOString();
+  const contextCharacter = store.characters.get(conversation.character_id);
+  const worldState = contextCharacter ? publicWorldState(currentWorldState(store, account, contextCharacter)) : null;
+  const assistantMessage = {
+    message_id: assistantMessageId, conversation_id: conversation.conversation_id, actor: 'ASSISTANT',
+    text: modelReply.reply_text, provider: modelReply.provider, model_version: modelReply.model_version,
+    ai_generated: modelReply.ai_generated !== false, world_state_id: worldState?.world_state_id ?? null,
+    world_state_version: worldState?.state_version ?? null, created_at: createdAt
+  };
+  store.messages.set(assistantMessage.message_id, assistantMessage);
+  let memoryCandidate = null;
+  if (candidate && modelReply.memory_candidate) {
+    memoryCandidate = {
+      candidate_id: store.next('memc'), account_id: account.account_id, character_id: conversation.character_id,
+      state: 'CANDIDATE', version: 1, type: modelReply.memory_candidate.type,
+      normalized_value: modelReply.memory_candidate.normalized_value, display_text: modelReply.memory_candidate.display_text,
+      provider: modelReply.provider, expires_at: plusDays(30), source_message_id: null,
+      conflicts_with: detectAssetConflicts(store, account.account_id, conversation.character_id, modelReply.memory_candidate.display_text)
+    };
+    store.candidates.set(memoryCandidate.candidate_id, memoryCandidate);
+  }
+  emit('message.completed', { request_id: requestId, message_id: assistantMessage.message_id, version: 1, media_eligible: { tts: true, image: false }, usage: usage ?? null, memory_candidate: memoryCandidate ? { candidate_id: memoryCandidate.candidate_id } : null });
+}
+
+// 真流式 SSE 传输：逐事件写出；客户端断开时中止模型调用（AbortController）。
+function sendLiveEventStream(res, result, requestId) {
+  return new Promise((resolve) => {
+    const controller = new AbortController();
+    res.writeHead(result.status, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-request-id': requestId,
+      connection: 'keep-alive'
+    });
+    let closed = false;
+    res.on('close', () => { closed = true; controller.abort(); });
+    const emit = (event, data) => {
+      if (closed) return;
+      res.write(`event: ${event}
+data: ${JSON.stringify(data)}
+
+`);
+    };
+    result.sseLive.produce(emit, controller.signal)
+      .catch(() => { emit('message.failed', { request_id: requestId, code: 'STREAM_INTERNAL_ERROR', retryable: true }); })
+      .finally(() => { if (!closed) res.end(); resolve(); });
+  });
 }
 
 function streamChunks(text, maxLength = 60) {

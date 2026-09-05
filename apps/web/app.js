@@ -524,15 +524,50 @@ async function sendMessage(form) {
   setBusy(true);
   try {
     await ensureConversation();
+    // stream:true：服务端配置了流式生成器时返回 202+一次性令牌，SSE 为真流式
+    // （逐句审核后下发）；未配置时服务端回退 201 同步合同，走同一渲染路径。
     const payload = await api(`/conversations/${encodeURIComponent(conversationId())}/messages`, {
-      method: "POST", idempotent: uuid(), body: { content: { text: content } },
+      method: "POST", idempotent: uuid(), body: { content: { text: content }, stream: true },
     });
     input.value = "";
     state.pendingTranscript = "";
     if (payload?.user_message) state.messages.push(payload.user_message);
     const assistant = payload?.assistant_message;
-    if (assistant) {
-      // 服务端已持久化终稿；SSE 回放让文字逐句出现。回放失败时直接显示终稿。
+    const live = payload?.status === "ACCEPTED" && payload?.stream?.mode === "live";
+    if (live) {
+      // 真流式：先渲染空的助手占位，SSE chunk 逐句填充；终态以 completed 后
+      // 的消息终稿为准（replaced/failed 时占位被服务端安全文案替换）。
+      const streaming = { message_id: null, actor: "ASSISTANT", text: "", ai_generated: true, provider: "streaming" };
+      state.messages.push(streaming);
+      render();
+      let completedId = null;
+      let terminalEvent = null;
+      try {
+        await consumeSseStream(payload.stream.stream_url, (event, data) => {
+          if (event === "message.chunk" && typeof data.text === "string") {
+            streaming.text += data.text;
+            render();
+          }
+          if (event === "message.accepted" && data.assistant_message_id) streaming.message_id = data.assistant_message_id;
+          if (event === "message.replaced") { terminalEvent = "replaced"; }
+          if (event === "message.failed") { terminalEvent = "failed"; }
+          if (event === "message.completed") completedId = data.message_id;
+        });
+      } catch {
+        terminalEvent = terminalEvent ?? "failed";
+      }
+      if (completedId) {
+        // 拉取持久化终稿（含 replaced 安全文案），确保展示与库内一致。
+        const finalPayload = await api(`/messages/${encodeURIComponent(completedId)}`);
+        const finalMessage = unwrap(finalPayload, "message", null) ?? finalPayload;
+        const index = state.messages.indexOf(streaming);
+        if (index >= 0) state.messages[index] = finalMessage;
+      } else if (terminalEvent === "failed") {
+        streaming.text = streaming.text || "这条回复暂时没有生成成功，可以稍后再试。";
+      }
+      render();
+    } else if (assistant) {
+      // 回退路径：服务端已持久化终稿；SSE 回放让文字逐句出现。
       const streaming = { ...assistant, text: "" };
       state.messages.push(streaming);
       if (payload?.stream?.stream_url) {

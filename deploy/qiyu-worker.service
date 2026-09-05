@@ -1,0 +1,26 @@
+# 栖语封测环境 systemd 单元（非 Docker 备选路径，API 与 Worker 各一份）。
+# 安装：cp deploy/qiyu-api.service /etc/systemd/system/ 并按机器路径修改
+# WorkingDirectory/EnvironmentFile 后 systemctl daemon-reload && systemctl enable --now qiyu-api qiyu-worker
+
+[Unit]
+Description=Qiyu background worker (summary + asset embedding queues)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qiyu
+WorkingDirectory=/opt/qiyu/apps/api
+EnvironmentFile=/opt/qiyu/deploy/.env
+Environment=QIYU_PERSISTENCE=postgres
+Environment=PORT=3000
+# NODE_ENV 保持 development：生产模式被启动门禁拒绝（PRODUCTION_RUNTIME_NOT_WIRED）。
+ExecStart=/usr/bin/node scripts/run-workers.js --interval-ms=5000
+Restart=always
+RestartSec=5
+# 日志走 journald：journalctl -u qiyu-api -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
