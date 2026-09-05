@@ -364,7 +364,9 @@ async function persistAgeReviewDecision(client, item, exists) {
 }
 async function persistAssetEmbeddingJob(client, item, exists) {
   const values = [item.job_id, item.account_id, item.character_id || null, item.asset_id, item.asset_version, item.state, item.attempt_count, item.next_attempt_at, item.exhausted_at || null, item.last_error || null, item.created_at || null, item.completed_at || null];
-  if (exists) return client.query('UPDATE asset_embedding_jobs SET state = $6, attempt_count = $7, next_attempt_at = $8::timestamptz, exhausted_at = $9::timestamptz, last_error = $10, completed_at = $12::timestamptz WHERE job_id = $1 AND account_id = $2', values);
+  // UPDATE 分支必须只传被引用的参数：未引用的 null 参数（character_id 等）会让
+  // PostgreSQL 报 42P18（could not determine data type）。
+  if (exists) return client.query('UPDATE asset_embedding_jobs SET state = $3, attempt_count = $4, next_attempt_at = $5::timestamptz, exhausted_at = $6::timestamptz, last_error = $7, completed_at = $8::timestamptz WHERE job_id = $1 AND account_id = $2', [item.job_id, item.account_id, item.state, item.attempt_count, item.next_attempt_at, item.exhausted_at || null, item.last_error || null, item.completed_at || null]);
   return client.query('INSERT INTO asset_embedding_jobs (job_id, account_id, character_id, asset_id, asset_version, state, attempt_count, next_attempt_at, exhausted_at, last_error, created_at, completed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10, COALESCE($11::timestamptz, CURRENT_TIMESTAMP), $12::timestamptz)', values);
 }
 async function persistAssetEmbeddingDeadLetter(client, item, exists) {
