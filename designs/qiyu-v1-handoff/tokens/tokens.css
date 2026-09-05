@@ -1,0 +1,62 @@
+:root {
+  --qy-paper: #f3eee6;
+  --qy-paper-2: #ece4d9;
+  --qy-paper-3: #fbf8f2;
+  --qy-ink: #2c2028;
+  --qy-muted: #796d74;
+  --qy-plum: #5b3653;
+  --qy-plum-2: #74506b;
+  --qy-rose: #bd8f94;
+  --qy-rose-soft: #ead8d4;
+  --qy-night: #120f18;
+  --qy-night-2: #211724;
+  --qy-night-ink: #f6eee9;
+  --qy-night-muted: #c8b8bf;
+  --qy-success: #526a5a;
+  --qy-danger: #9d4c56;
+  --qy-gold: #9b7a52;
+  --qy-space-1: 4px;
+  --qy-space-2: 8px;
+  --qy-space-3: 12px;
+  --qy-space-4: 16px;
+  --qy-space-5: 20px;
+  --qy-space-6: 24px;
+  --qy-space-8: 32px;
+  --qy-space-10: 40px;
+  --qy-space-12: 48px;
+  --qy-radius-sm: 8px;
+  --qy-radius-md: 12px;
+  --qy-radius-lg: 16px;
+  --qy-radius-xl: 20px;
+  --qy-radius-2xl: 24px;
+  --qy-radius-sheet: 28px;
+  --qy-radius-phone: 44px;
+  --qy-radius-full: 999px;
+  --qy-touch-min: 44px;
+  --qy-screen-width: 393px;
+  --qy-screen-height: 852px;
+  --qy-safe-top-reference: 59px;
+  --qy-safe-bottom-reference: 34px;
+  --qy-font-serif: "Noto Serif SC", "Songti SC", STSong, Georgia, serif;
+  --qy-font-sans: "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+}
+
+[data-qy-theme="day"] {
+  --qy-bg-canvas: var(--qy-paper);
+  --qy-bg-subtle: var(--qy-paper-2);
+  --qy-bg-elevated: var(--qy-paper-3);
+  --qy-text-primary: var(--qy-ink);
+  --qy-text-secondary: var(--qy-muted);
+  --qy-action-primary: var(--qy-plum);
+  --qy-action-secondary: var(--qy-rose-soft);
+}
+
+[data-qy-theme="night"] {
+  --qy-bg-canvas: var(--qy-night);
+  --qy-bg-subtle: var(--qy-night-2);
+  --qy-bg-elevated: #2a2029;
+  --qy-text-primary: var(--qy-night-ink);
+  --qy-text-secondary: var(--qy-night-muted);
+  --qy-action-primary: #7d526d;
+  --qy-action-secondary: rgba(255, 255, 255, 0.08);
+}

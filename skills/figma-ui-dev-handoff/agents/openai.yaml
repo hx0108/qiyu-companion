@@ -1,0 +1,7 @@
+interface:
+  display_name: "Figma 与 UI 开发交付"
+  short_description: "生成全状态 Figma 导入 HTML 与 UI 开发交付包"
+  default_prompt: "Use $figma-ui-dev-handoff to generate a Chinese-named Figma import HTML and a traceable UI/development handoff package."
+
+policy:
+  allow_implicit_invocation: true

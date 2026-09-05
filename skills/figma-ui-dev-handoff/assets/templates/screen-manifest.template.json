@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0",
+  "project": "待填写产品名",
+  "version": "待填写版本",
+  "viewport": {
+    "width": 393,
+    "height": 852,
+    "safe_area_top": 59,
+    "safe_area_bottom": 34,
+    "supported_widths": [375, 390, 393],
+    "orientation": "portrait"
+  },
+  "figma_pages": [
+    {
+      "id": "core-flow",
+      "name_zh": "01 核心流程",
+      "screen_ids": ["notice-default", "age-pass"]
+    },
+    {
+      "id": "states",
+      "name_zh": "02 状态与异常",
+      "screen_ids": []
+    },
+    {
+      "id": "components",
+      "name_zh": "03 组件与规范",
+      "screen_ids": []
+    }
+  ],
+  "screens": [
+    {
+      "id": "notice-default",
+      "name_zh": "告知｜未确认",
+      "group_id": "onboarding",
+      "group_name_zh": "年龄与 AI 告知",
+      "figma_page_id": "core-flow",
+      "source_status": "implemented",
+      "theme": "day",
+      "viewport": "393x852",
+      "component_ids": ["system-notice-default", "primary-button-disabled"],
+      "api_refs": [],
+      "analytics_refs": ["notice_view"],
+      "acceptance_criteria": ["三项告知均可见", "继续按钮默认不可用"]
+    },
+    {
+      "id": "age-pass",
+      "name_zh": "年龄｜PASS",
+      "group_id": "age-assurance",
+      "group_name_zh": "年龄增强核验",
+      "figma_page_id": "core-flow",
+      "source_status": "designed",
+      "theme": "day",
+      "viewport": "393x852",
+      "component_ids": ["age-result-pass"],
+      "api_refs": ["POST /age/assess"],
+      "analytics_refs": ["age_assessment_result"],
+      "acceptance_criteria": ["显示通过结果", "允许进入下一步"]
+    }
+  ],
+  "components": [
+    {
+      "id": "system-notice-default",
+      "name_zh": "系统告知｜默认",
+      "code_name": "SystemNotice",
+      "variants": ["default"]
+    },
+    {
+      "id": "primary-button-disabled",
+      "name_zh": "按钮｜主按钮｜禁用",
+      "code_name": "PrimaryButton",
+      "variants": ["disabled"]
+    },
+    {
+      "id": "age-result-pass",
+      "name_zh": "年龄结果｜通过",
+      "code_name": "AgeResultCard",
+      "variants": ["pass"]
+    }
+  ]
+}

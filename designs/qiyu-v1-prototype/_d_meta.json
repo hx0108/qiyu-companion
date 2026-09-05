@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "栖语 V1.2 高保真原型": {
+      "versions": [
+        {
+          "path": "栖语_V1_高保真原型_v1.2.html",
+          "createdAt": "2026-09-03T02:00:59.000Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-08-30T18:36:14.407Z",
+  "updatedAt": "2026-08-31T07:34:55.795Z"
+}

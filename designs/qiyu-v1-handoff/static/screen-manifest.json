@@ -1,0 +1,573 @@
+[
+  {
+    "group": "01 年龄与 AI 告知",
+    "id": "notice-default",
+    "title": "告知｜未确认",
+    "renderer": "notice",
+    "navigation": null,
+    "patch": {
+      "checks": [
+        false,
+        false,
+        false
+      ]
+    }
+  },
+  {
+    "group": "01 年龄与 AI 告知",
+    "id": "notice-ready",
+    "title": "告知｜可继续",
+    "renderer": "notice",
+    "navigation": null,
+    "patch": {
+      "checks": [
+        true,
+        true,
+        true
+      ]
+    }
+  },
+  {
+    "group": "02 年龄增强核验",
+    "id": "age-idle",
+    "title": "年龄｜待核验",
+    "renderer": "age",
+    "navigation": null,
+    "patch": {
+      "screen": "age",
+      "ageStatus": "idle",
+      "ageScenario": "pass"
+    }
+  },
+  {
+    "group": "02 年龄增强核验",
+    "id": "age-reviewing",
+    "title": "年龄｜核验中",
+    "renderer": "age",
+    "navigation": null,
+    "patch": {
+      "screen": "age",
+      "ageStatus": "reviewing",
+      "ageScenario": "pass"
+    }
+  },
+  {
+    "group": "02 年龄增强核验",
+    "id": "age-pass",
+    "title": "年龄｜PASS",
+    "renderer": "age",
+    "navigation": null,
+    "patch": {
+      "screen": "age",
+      "ageStatus": "pass",
+      "ageScenario": "pass"
+    }
+  },
+  {
+    "group": "02 年龄增强核验",
+    "id": "age-review",
+    "title": "年龄｜REVIEW",
+    "renderer": "age",
+    "navigation": null,
+    "patch": {
+      "screen": "age",
+      "ageStatus": "review",
+      "ageScenario": "review"
+    }
+  },
+  {
+    "group": "02 年龄增强核验",
+    "id": "age-denied",
+    "title": "年龄｜DENIED",
+    "renderer": "age",
+    "navigation": null,
+    "patch": {
+      "screen": "age",
+      "ageStatus": "denied",
+      "ageScenario": "denied"
+    }
+  },
+  {
+    "group": "02 年龄增强核验",
+    "id": "age-appeal",
+    "title": "年龄｜申诉弹窗",
+    "renderer": "age",
+    "navigation": null,
+    "patch": {
+      "screen": "age",
+      "ageStatus": "denied",
+      "ageScenario": "denied",
+      "dialog": "age-appeal"
+    }
+  },
+  {
+    "group": "03 紧急联系人",
+    "id": "contact-empty",
+    "title": "联系人｜未保存",
+    "renderer": "contact",
+    "navigation": null,
+    "patch": {
+      "screen": "contact",
+      "contactSaved": false
+    }
+  },
+  {
+    "group": "03 紧急联系人",
+    "id": "contact-saved",
+    "title": "联系人｜已保存",
+    "renderer": "contact",
+    "navigation": null,
+    "patch": {
+      "screen": "contact",
+      "contactSaved": true,
+      "contactConsent": true
+    }
+  },
+  {
+    "group": "04 创建角色",
+    "id": "create-default",
+    "title": "创建角色｜默认",
+    "renderer": "create",
+    "navigation": null,
+    "patch": {
+      "screen": "create"
+    }
+  },
+  {
+    "group": "05 对话与世界状态",
+    "id": "chat-day",
+    "title": "对话｜日间",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "night": false,
+      "memory": "pending"
+    }
+  },
+  {
+    "group": "05 对话与世界状态",
+    "id": "chat-night",
+    "title": "对话｜暮色私语",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "night": true,
+      "memory": "confirmed"
+    }
+  },
+  {
+    "group": "05 对话与世界状态",
+    "id": "chat-image",
+    "title": "对话｜情境图已交付",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "night": true,
+      "memory": "confirmed",
+      "imageReady": true,
+      "imageMode": "ready"
+    }
+  },
+  {
+    "group": "05 对话与世界状态",
+    "id": "voice-confirm",
+    "title": "语音输入｜确认转写",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "sheet": "voice",
+      "recording": false,
+      "voiceError": false
+    }
+  },
+  {
+    "group": "06 关系记忆",
+    "id": "memory-pending",
+    "title": "记忆｜候选确认",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "sheet": "memory",
+      "memory": "pending"
+    }
+  },
+  {
+    "group": "06 关系记忆",
+    "id": "memory-confirmed",
+    "title": "记忆｜已确认",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "sheet": "memory",
+      "memory": "confirmed"
+    }
+  },
+  {
+    "group": "06 关系记忆",
+    "id": "memory-dismissed",
+    "title": "记忆｜已忽略可撤销",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "memory": "dismissed"
+    }
+  },
+  {
+    "group": "07 关系资产",
+    "id": "timeline-all",
+    "title": "时间线｜全部",
+    "renderer": "timeline",
+    "navigation": "timeline",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "timeline",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "memory": "confirmed",
+      "timelineFilter": "all"
+    }
+  },
+  {
+    "group": "07 关系资产",
+    "id": "timeline-memory-empty",
+    "title": "时间线｜记忆空态",
+    "renderer": "timeline",
+    "navigation": "timeline",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "timeline",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "memory": "dismissed",
+      "timelineFilter": "memory"
+    }
+  },
+  {
+    "group": "07 关系资产",
+    "id": "relation-world",
+    "title": "关系｜世界状态",
+    "renderer": "relation",
+    "navigation": "relation",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "relation",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "memory": "confirmed"
+    }
+  },
+  {
+    "group": "08 试用与订阅",
+    "id": "trial-active",
+    "title": "试用｜进行中",
+    "renderer": "trial",
+    "navigation": "profile",
+    "patch": {
+      "screen": "trial",
+      "trialState": "active"
+    }
+  },
+  {
+    "group": "08 试用与订阅",
+    "id": "trial-ending",
+    "title": "试用｜即将到期",
+    "renderer": "trial",
+    "navigation": "profile",
+    "patch": {
+      "screen": "trial",
+      "trialState": "ending"
+    }
+  },
+  {
+    "group": "08 试用与订阅",
+    "id": "trial-expired",
+    "title": "试用｜到期降级",
+    "renderer": "trial",
+    "navigation": "profile",
+    "patch": {
+      "screen": "trial",
+      "trialState": "expired"
+    }
+  },
+  {
+    "group": "08 试用与订阅",
+    "id": "subscribe-default",
+    "title": "订阅｜¥39 月度方案",
+    "renderer": "subscribe",
+    "navigation": "profile",
+    "patch": {
+      "screen": "subscribe",
+      "renew": false
+    }
+  },
+  {
+    "group": "08 试用与订阅",
+    "id": "subscribe-renew",
+    "title": "订阅｜明确开启续费",
+    "renderer": "subscribe",
+    "navigation": "profile",
+    "patch": {
+      "screen": "subscribe",
+      "renew": true
+    }
+  },
+  {
+    "group": "09 安全与帮助",
+    "id": "safety-center",
+    "title": "安全与帮助｜稳定入口",
+    "renderer": "safety",
+    "navigation": "profile",
+    "patch": {
+      "screen": "safety"
+    }
+  },
+  {
+    "group": "09 安全与帮助",
+    "id": "safety-2h",
+    "title": "安全｜连续 2 小时提醒",
+    "renderer": "chat",
+    "navigation": "chat",
+    "patch": {
+      "created": true,
+      "screen": "app",
+      "tab": "chat",
+      "checks": [
+        true,
+        true,
+        true
+      ],
+      "dialog": "safety"
+    }
+  },
+  {
+    "group": "09 安全与帮助",
+    "id": "safety-r2",
+    "title": "安全｜R2 固定响应",
+    "renderer": "safety",
+    "navigation": "profile",
+    "patch": {
+      "screen": "safety",
+      "dialog": "r2"
+    }
+  },
+  {
+    "group": "09 安全与帮助",
+    "id": "safety-report",
+    "title": "安全｜举报内容",
+    "renderer": "safety",
+    "navigation": "profile",
+    "patch": {
+      "screen": "safety",
+      "dialog": "report"
+    }
+  },
+  {
+    "group": "09 安全与帮助",
+    "id": "safety-complaint",
+    "title": "安全｜服务投诉",
+    "renderer": "safety",
+    "navigation": "profile",
+    "patch": {
+      "screen": "safety",
+      "dialog": "complaint"
+    }
+  },
+  {
+    "group": "10 数据中心",
+    "id": "data-default",
+    "title": "数据中心｜默认",
+    "renderer": "data",
+    "navigation": "profile",
+    "patch": {
+      "screen": "data",
+      "retention": "90"
+    }
+  },
+  {
+    "group": "10 数据中心",
+    "id": "data-delete-confirm",
+    "title": "数据中心｜删除确认",
+    "renderer": "data",
+    "navigation": "profile",
+    "patch": {
+      "screen": "data",
+      "dialog": "delete"
+    }
+  },
+  {
+    "group": "10 数据中心",
+    "id": "delete-processing",
+    "title": "删除回执｜处理中",
+    "renderer": "receipt",
+    "navigation": "profile",
+    "patch": {
+      "screen": "receipt",
+      "deletionJob": {
+        "id": "DEL-0831-019",
+        "production": "processing",
+        "created": "2026-08-31 22:18"
+      }
+    }
+  },
+  {
+    "group": "10 数据中心",
+    "id": "delete-done",
+    "title": "删除回执｜已完成",
+    "renderer": "receipt",
+    "navigation": "profile",
+    "patch": {
+      "screen": "receipt",
+      "deletionJob": {
+        "id": "DEL-0831-019",
+        "production": "done",
+        "created": "2026-08-31 22:18"
+      }
+    }
+  },
+  {
+    "group": "11 人格连续性",
+    "id": "version-history",
+    "title": "人格版本｜变更记录",
+    "renderer": "version",
+    "navigation": "relation",
+    "patch": {
+      "screen": "version",
+      "personaVersion": "1.1"
+    }
+  },
+  {
+    "group": "11 人格连续性",
+    "id": "version-feedback",
+    "title": "人格版本｜异常反馈",
+    "renderer": "version",
+    "navigation": "relation",
+    "patch": {
+      "screen": "version",
+      "personaVersion": "1.1",
+      "dialog": "version-feedback"
+    }
+  },
+  {
+    "group": "12 媒体状态",
+    "id": "media-normal",
+    "title": "媒体｜正常",
+    "renderer": "media",
+    "navigation": "chat",
+    "patch": {
+      "screen": "media",
+      "imageMode": "idle"
+    }
+  },
+  {
+    "group": "12 媒体状态",
+    "id": "media-image-failed",
+    "title": "媒体｜图片失败返额",
+    "renderer": "media",
+    "navigation": "chat",
+    "patch": {
+      "screen": "media",
+      "imageMode": "failed"
+    }
+  },
+  {
+    "group": "12 媒体状态",
+    "id": "media-quota",
+    "title": "媒体｜图片额度耗尽",
+    "renderer": "media",
+    "navigation": "chat",
+    "patch": {
+      "screen": "media",
+      "imageMode": "quota"
+    }
+  },
+  {
+    "group": "12 媒体状态",
+    "id": "media-tts-failed",
+    "title": "媒体｜TTS 失败降级",
+    "renderer": "media",
+    "navigation": "chat",
+    "patch": {
+      "screen": "media",
+      "ttsFailed": true
+    }
+  },
+  {
+    "group": "12 媒体状态",
+    "id": "media-asr-failed",
+    "title": "媒体｜ASR 失败降级",
+    "renderer": "media",
+    "navigation": "chat",
+    "patch": {
+      "screen": "media",
+      "voiceError": true
+    }
+  }
+]

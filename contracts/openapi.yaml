@@ -1,0 +1,1184 @@
+openapi: 3.1.0
+info:
+  title: 栖语 M1 本地合成 API
+  version: 0.1.0
+  description: |
+    本合同只覆盖本地开发与合成数据闭环。Bearer token、年龄判断、内存存储均不是生产能力。
+    默认 provider=mock；经本地开发进程显式启用时 provider=qwen 会调用 Qwen3.8-Flash，仍禁止用于外部封测或公开服务。
+servers:
+  - url: http://127.0.0.1:3000
+security:
+  - syntheticBearer: []
+paths:
+  /health:
+    get:
+      summary: 本地服务健康检查
+      security: []
+      responses:
+        '200': { description: 服务已启动 }
+  /api/v1/dev/session:
+    get:
+      summary: 获取当前合成开发账户状态
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/sms-challenges:
+    post:
+      summary: 创建短信验证挑战（开发固定验证码）
+      description: 开发骨架：返回固定验证码 000000；生产短信通道未接入。同号1分钟内最多5次。
+      security: []
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties: { phone: { type: string, pattern: '^1[3-9][0-9]{9}$' } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/register:
+    post:
+      summary: 依法注册并创建 AGE_UNVERIFIED 账户
+      description: 注册后签发短期 Access Token（1小时）与可撤销 Refresh Token（30天）；完成必要告知与年龄声明后才能进入伴侣互动。仅进程内内存存储支持。
+      security: []
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone: { type: string }
+                code: { type: string }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/refresh:
+    post:
+      summary: 刷新令牌（轮换式）
+      description: Refresh Token 一次性；使用后立即轮换新对，旧 Refresh Token 失效。
+      security: []
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties: { refresh_token: { type: string } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/subscription/catalog:
+    get:
+      summary: 获取开发订阅目录
+      description: 返回服务端维护的公开 V1 价格、配额和默认非自动续费事实。
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/checkout-sessions:
+    post:
+      summary: 创建订阅下单会话
+      description: sku 必须在服务端目录中；金额与币种由服务端持有。auto_renew 默认 false。响应附开发模拟渠道的预签名回调载荷（密钥不出服务端；真实支付渠道未接入）。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sku]
+              properties:
+                sku: { type: string, enum: [qiyu_public_monthly_v1, qiyu_public_quarterly_v1] }
+                auto_renew: { type: boolean, default: false }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/callbacks/payments/development-simulated:
+    post:
+      summary: 开发模拟渠道支付回调（HMAC 验签）
+      description: 仅本地开发。请求头 X-Qiyu-Payment-Signature 必须等于 HMAC-SHA256(QIYU_DEV_PAYMENT_SECRET, body)。事件经验签后进入订阅状态机；APPLIED 且属于发放事件时按周期入账权益（图片按张、语音按秒）。未知/不一致事件进入隔离，不发放权益。
+      security: []
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/subscriptions/current:
+    get:
+      summary: 查询当前订阅与续费状态
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/subscriptions/{subscriptionId}/cancel-renewal:
+    post:
+      summary: 关闭自动续费
+      description: 仅 ACTIVE/BILLING_RETRY/GRACE_PERIOD 可取消；当期权益保留至周期结束，到期后数据权利不受影响。
+      parameters: [ { name: subscriptionId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/entitlements:
+    get:
+      summary: 查询文字/图片/语音权益余额与重置时间
+      description: 图片单位为张，TTS/ASR 单位为秒（订阅目录的分钟×60 入账）；text_fair_use 为每日公平使用。
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/usage/daily:
+    get:
+      summary: 查询当日普通对话用量
+      description: 返回当前账户的当日轮次、输入 Token 计量与重置时间；计量只能由服务端预留、提交或释放。
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/required-notices:
+    get:
+      summary: 获取当前必要告知
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/required-notices/{noticeId}/displayed:
+    post:
+      summary: 写入版本化必要告知展示回执
+      parameters:
+        - $ref: '#/components/parameters/NoticeId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notice_version]
+              properties:
+                notice_version: { type: string, example: ai_identity_m1.0 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/age/declarations:
+    post:
+      summary: 提交确定性开发年龄声明
+      description: 有效成人声明返回 AGE_PASS；未满18岁返回 AGE_DENIED_MINOR；冲突或无法判断返回 AGE_REVIEW。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [date_of_birth, confirmed_18_plus]
+              properties:
+                date_of_birth: { type: string, format: date }
+                confirmed_18_plus: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/age/appeals:
+    post:
+      summary: 请求年龄增强核验或人工申诉
+      description: 只创建 AGE_REVIEW 等待态，不接收证件照片、人脸模板或供应商原始载荷。伴侣互动保持关闭，直到服务端写入合规最小年龄断言。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/age/status:
+    get:
+      summary: 查询开发年龄状态、最小原因码、增强核验等待态与允许动作
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/characters:
+    post:
+      summary: 创建当前账户的唯一活跃角色
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 80 }
+                import_id:
+                  type: string
+                  description: 已通过权利审核的 OC 导入记录；未通过审核时服务端返回 422，且不得将候选字段写入人格。
+                persona:
+                  type: object
+                  description: 可选人格档案（PRD 3.2.1 用户可编辑字段）；省略时创建空档案。字段约束同 PATCH。
+                  properties:
+                    worldview: { type: string }
+                    age_setting: { type: string }
+                    relationship_to_user: { type: string }
+                    personality: { type: string }
+                    expression_style: { type: string }
+                    hard_boundaries: { type: array, items: { type: string } }
+                    example_behaviors: { type: array, items: { type: string } }
+                  additionalProperties: false
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+    get:
+      summary: 查询本人角色列表
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/imports:
+    post:
+      summary: 隔离提交 OC 文本并创建内容权利审核请求
+      description: 仅接受调用方原创或已获授权的声明。服务端只进行受控字段候选提取，原文不进入角色模型或公开响应；所有导入默认 REVIEW_REQUIRED，不能直接创建角色。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [original_or_authorized, source_text]
+              properties:
+                original_or_authorized: { type: boolean, enum: [true] }
+                declaration_version: { type: string, maxLength: 64 }
+                source_text: { type: string, minLength: 1, maxLength: 8000 }
+              additionalProperties: false
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+  /api/v1/content-rights-reviews/{reviewId}:
+    get:
+      summary: 查询本人内容权利审核状态
+      description: 不返回 OC 原文或媒体对象地址。此接口只提供申请状态、风险路由码和是否可申诉。
+      parameters: [ { $ref: '#/components/parameters/ReviewId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/content-rights-reviews/{reviewId}/appeals:
+    post:
+      summary: 对本人内容权利审核提交申诉陈述
+      parameters: [ { $ref: '#/components/parameters/ReviewId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                statement: { type: string, maxLength: 1000 }
+              additionalProperties: false
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/{characterId}:
+    get:
+      summary: 获取角色、当前人格档案与版本记录
+      parameters: [ { $ref: '#/components/parameters/CharacterId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      summary: 编辑角色基本信息与人格档案
+      description: 需要 expected_version 乐观并发；任何实际变更使角色版本 +1 并追加一条不可变的人格版本记录。系统安全边界不在此接口范围内。
+      parameters:
+        - $ref: '#/components/parameters/CharacterId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                name: { type: string, minLength: 1, maxLength: 80 }
+                note: { type: string, maxLength: 200 }
+                persona:
+                  type: object
+                  description: PRD 3.2.1 用户可编辑人格字段；文本字段最长500字，列表字段最多10项、单项最长200字。
+                  properties:
+                    worldview: { type: string }
+                    age_setting: { type: string }
+                    relationship_to_user: { type: string }
+                    personality: { type: string }
+                    expression_style: { type: string }
+                    hard_boundaries: { type: array, items: { type: string } }
+                    example_behaviors: { type: array, items: { type: string } }
+                  additionalProperties: false
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/{characterId}/world-state:
+    get:
+      summary: 获取当前角色的短期世界状态
+      description: 仅返回经批准的情绪、地点、临时到期与已确认事件引用；不包含人格、安全、年龄或关系事实。
+      parameters: [ { $ref: '#/components/parameters/CharacterId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      summary: 用户更新当前角色的短期世界状态
+      description: 必须带 expected_version。服装资产在权利审核能力接入前不可绑定；事件只能引用当前角色已确认有效资产。
+      parameters: [ { $ref: '#/components/parameters/CharacterId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                mood_code: { type: string, enum: [CALM, HAPPY, TIRED, CONCERNED, NEUTRAL] }
+                location_code: { type: string, enum: [UNSPECIFIED, HOME, CAFE, PARK, STUDIO, LIBRARY, WORKPLACE] }
+                wardrobe_asset_id: { type: [string, 'null'] }
+                active_event_refs: { type: array, maxItems: 5, items: { type: string } }
+                expires_at: { type: [string, 'null'], format: date-time }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/{characterId}/world-state/reset:
+    post:
+      summary: 重置短期世界状态为模板默认值
+      description: 写入 USER_RESET 追加事件，不删除历史变更记录。
+      parameters: [ { $ref: '#/components/parameters/CharacterId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations:
+    post:
+      summary: 为当前账户自己的角色创建会话
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [character_id]
+              properties: { character_id: { type: string } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+    get:
+      summary: 查询本人保留期内的会话列表
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/messages:
+    get:
+      summary: 按时间升序查询会话消息历史
+      description: 返回最近 limit 条（默认50、最大100）消息与 next_cursor；携带 cursor 时返回严格早于该消息的一页。已删除会话返回404，过期原始消息按保留策略过滤。
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: 上一页返回的 next_cursor（消息ID），用于获取更早一页。
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      summary: 创建文字回复与候选记忆
+      description: 默认返回 provider=mock；本地开发显式启用 Qwen 时返回 provider=qwen 和服务端记录的 model_version。模型调用会收到上下文包（当前角色、最近20条对话、Top-20 已确认关系资产）。固定安全策略或 INPUT 文本审核可在模型调用前返回 provider=safety-policy/content-moderation-policy、memory_candidate=null 并进入受控安全模式；模型终稿还必须通过 OUTPUT 文本审核后才可持久化、创建候选记忆和进入 SSE 回放。OUTPUT 未通过时仅返回固定审核说明，不暴露或保存原始模型回复，并释放该轮普通对话额度。以上均不代表生产安全审核。
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: object
+                  required: [text]
+                  properties: { text: { type: string, minLength: 1, maxLength: 4000 } }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '428': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}:
+    delete:
+      summary: 删除当前账户的一段会话及其派生关系数据
+      description: 在线撤销会话消息、候选记忆与由这些候选确认的关系资产；生产媒体、备份和供应商删除由独立删除编排负责。
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/asr-jobs:
+    post:
+      summary: 为当前账户会话创建本地 ASR 转写任务
+      description: 仅本地开发显式启用腾讯 ASR 时可用。受控短音频先写入私有开发媒体库，转写必须经用户确认；原始音频不提供公开 URL，确认后立即撤销并尝试删除。
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mime_type, audio_base64]
+              properties:
+                mime_type: { type: string, enum: [audio/mpeg, audio/wav, audio/x-wav, audio/mp4, audio/aac, audio/ogg] }
+                audio_base64: { type: string, minLength: 4, maxLength: 2796208 }
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/asr-jobs/{jobId}:
+    get:
+      summary: 查询当前账户的本地 ASR 转写与确认状态
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/asr-jobs/{jobId}/confirm:
+    post:
+      summary: 确认或修订 ASR 转写，并撤销原始音频
+      parameters: [ { $ref: '#/components/parameters/JobId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: { text: { type: string, minLength: 1, maxLength: 4000 } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/conversation-streams/{streamToken}:
+    get:
+      summary: 一次性 SSE 回放流式回复
+      description: POST 消息成功后响应携带 stream.stream_url（令牌一次性、30秒TTL、绑定账户与助手消息）。事件序列为 message.accepted → message.chunk×N（按句切分）→ message.completed。这是开发子集的终稿回放，不是供应商 token 级实时流，也不含逐段输出审核。复用已用令牌返回409，过期返回410。
+      parameters:
+        - name: streamToken
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: text/event-stream 事件流
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/v1/messages/{messageId}:
+    get:
+      summary: 获取单条消息的持久化终态
+      description: 用于刷新或断线后恢复；仅返回本人会话内的消息。
+      parameters: [ { $ref: '#/components/parameters/MessageId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/messages/{messageId}/feedback:
+    post:
+      summary: 为助手消息提交 OOC、记忆、图片穿帮或不适反馈
+      description: 只记录用户反馈及该回复的版本快照，不自动写入关系记忆或改写世界状态。
+      parameters: [ { $ref: '#/components/parameters/MessageId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, severity]
+              properties:
+                type: { type: string, enum: [OOC, MEMORY_ERROR, IMAGE_FACE_MISMATCH, IMAGE_WARDROBE_ERROR, IMAGE_SCENE_CONFLICT, UNSAFE_OR_UNCOMFORTABLE] }
+                severity: { type: string, enum: [LOW, MEDIUM, HIGH] }
+                note: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/pause:
+    post:
+      summary: 用户主动暂停当前会话
+      description: 立即阻断该会话的普通消息；暂停本身可在安全或账户审核状态中使用。
+      parameters: [ { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/resume:
+    post:
+      summary: 恢复已暂停的会话
+      description: 恢复时重新检查年龄、账户、安全、告知与服务状态。用户显式调用恢复会解除退出意图（EXIT_INTENT_CONFIRMED）设置的账户级暂停；危机安全模式（R2/R1）仍由安全策略单独控制，不因恢复而清除。
+      parameters: [ { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/messages/{messageId}/tts-jobs:
+    post:
+      summary: 为当前账户自己的已审核助手消息创建本地 TTS 任务
+      description: 仅本地开发显式启用腾讯 TTS 时可用。真实腾讯适配器必须固定服务端 `voice_id`、音色版本、授权记录和已批准权利审核引用；客户端不能传入或选择音色。任务会先写入私有开发媒体库并重新审核助手文本，并继承原助手回复的 world_state_id/state_version 快照；失败不影响原文字消息，不返回公开音频 URL。
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/tts-jobs/{jobId}:
+    get:
+      summary: 查询当前账户的本地 TTS 任务状态
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/{characterId}/reference-images:
+    get:
+      summary: 恢复当前角色私有参考图及其权利审核状态
+      description: 返回当前账户、当前角色未删除的参考图元数据与关联的审核状态，按创建时间倒序；不返回对象键、签名 URL 或任何原始图片内容。用于刷新页面后继续查看待审、申诉或已通过的状态。
+      parameters: [ { $ref: '#/components/parameters/CharacterId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      summary: 上传当前角色的参考立绘并执行私有 COS/IMS 前审与权利审核路由
+      description: 仅显式启用受控图片链路时可用。调用方必须确认图片使用授权；不返回对象键、签名 URL 或原始图片内容。IMS PASS 仅代表内容审核通过，参考图仍保持私有隔离并进入独立权利审核；只有 APPROVED 权利审核记录可用于生图。
+      parameters:
+        - $ref: '#/components/parameters/CharacterId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mime_type, image_base64, user_confirms_image_rights]
+              properties:
+                mime_type: { type: string, enum: [image/jpeg, image/png, image/webp] }
+                image_base64: { type: string, minLength: 4, maxLength: 2796208 }
+                user_confirms_image_rights: { type: boolean, const: true }
+                rights_declaration_version: { type: string, maxLength: 64 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/{characterId}/image-jobs:
+    post:
+      summary: 基于确认且权利审核通过的参考立绘和受控情境契约提交单张图片任务
+      description: 仅接受当前角色 IMS 前审 PASS、USER_CONFIRMED 且关联 APPROVED 独立权利审核的参考图；地点、服装、时间和最多三条已确认关系资产共同构成服务端情境契约。任务创建时冻结当前 world_state_id/state_version，后续状态变化不会改写已提交任务；供应商临时结果 URL 不会返回。
+      parameters:
+        - $ref: '#/components/parameters/CharacterId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reference_asset_id, scene]
+              properties:
+                reference_asset_id: { type: string }
+                resolution: { type: string, enum: ['768:768', '768:1024', '1024:768', '1024:1024'], default: '768:1024' }
+                style: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
+                scene:
+                  type: object
+                  required: [location, outfit, time_of_day]
+                  properties:
+                    location: { type: string, minLength: 1, maxLength: 80 }
+                    outfit: { type: string, minLength: 1, maxLength: 80 }
+                    time_of_day: { type: string, enum: [DAWN, MORNING, AFTERNOON, EVENING, NIGHT] }
+                    confirmed_event_asset_ids: { type: array, maxItems: 3, uniqueItems: true, items: { type: string } }
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/image-jobs/{jobId}:
+    get:
+      summary: 查询当前账户图片任务状态及安全失败码
+      parameters: [ { $ref: '#/components/parameters/JobId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/image-jobs/{jobId}/refresh:
+    post:
+      summary: 手动刷新当前账户图片任务，并在完成时执行私有入桶和 IMS 后审
+      description: 仅 PENDING/RUNNING 任务可调用供应商查询；结果审核通过前不生成可读取媒体资产。
+      parameters: [ { $ref: '#/components/parameters/JobId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/media-assets/{assetId}/content:
+    get:
+      summary: 读取当前账户自己的私有 TTS MP3 或后审通过的情境图
+      description: 仅限 AVAILABLE 的 TTS_AUDIO 或 SCENE_IMAGE；不返回对象键、公开 URL、ASR 用户原始音频或参考立绘。响应必须为 private, no-store。
+      parameters: [ { $ref: '#/components/parameters/AssetId' } ]
+      responses:
+        '200':
+          description: 私有二进制媒体内容
+          content:
+            audio/mpeg: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/media-assets/{assetId}:
+    get:
+      summary: 查询私有媒体元数据（不返回对象键或下载 URL）
+      parameters: [ { $ref: '#/components/parameters/AssetId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: 在线撤销并请求删除当前账户的私有媒体对象
+      parameters: [ { $ref: '#/components/parameters/AssetId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/memory-candidates:
+    get:
+      summary: 获取当前账户未处理、未过期候选记忆
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/memory-candidates/{candidateId}/confirm:
+    post:
+      summary: 用户原样确认候选并创建 ACTIVE 资产
+      parameters: [ { $ref: '#/components/parameters/CandidateId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody: { $ref: '#/components/requestBodies/ExpectedVersion' }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/memory-candidates/{candidateId}/confirm-edited:
+    post:
+      summary: 用户编辑确认候选并创建 ACTIVE 资产
+      parameters: [ { $ref: '#/components/parameters/CandidateId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version, display_text]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                display_text: { type: string, minLength: 1 }
+                normalized_value: { type: object, additionalProperties: true }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/memory-candidates/{candidateId}/reject:
+    post:
+      summary: 用户拒绝候选；拒绝项不能进入资产或召回
+      parameters: [ { $ref: '#/components/parameters/CandidateId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/data-exports/relationship-profile:
+    get:
+      summary: 导出当前账户的关系档案 JSON
+      description: 仅包含当前账户可见的角色、确认关系资产、会话和消息；不包含对象键、媒体字节、供应商原始载荷或内部安全字段。
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/privacy/raw-interaction-retention:
+    post:
+      summary: 设置当前账户原始互动的 30 或 90 天保留期
+      description: 仅影响原始会话消息及其未确认候选；已由用户确认的关系资产不受该清理策略影响。持久化开发路径会使用同一策略写入后续会话与消息的到期时间。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [retention_days]
+              properties:
+                retention_days: { type: integer, enum: [30, 90] }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/relationship-assets:
+    get:
+      summary: 获取当前账户的 ACTIVE 关系资产
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/memory-recall:
+    get:
+      summary: 获取仅当前账户 ACTIVE 资产的本地结构化召回结果
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/timeline:
+    get:
+      summary: 查询关系时间线
+      description: 返回仍有效的确认资产（最新在前）；被修订替代（SUPERSEDED）与已删除版本不出现。纪念日/约定类事件随主动事件能力接入。
+      parameters:
+        - name: filter
+          in: query
+          schema: { type: string, enum: [all, memory, commitment, boundary, event], default: all }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/relationship-assets/{assetId}:
+    patch:
+      summary: 修订资产并生成新版本
+      description: 旧资产转为 SUPERSEDED 并保留，新资产以新 ID 生效且在线召回只返回新版本（AC-06 版本历史语义）。需要 expected_version 乐观并发。
+      parameters: [ { $ref: '#/components/parameters/AssetId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version, display_text]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                display_text: { type: string, minLength: 1, maxLength: 4000 }
+                normalized_value: { type: object }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: 立即在线撤销资产并创建开发删除任务
+      description: 返回 ONLINE_DISABLED 与 NOT_IMPLEMENTED_LOCAL；不是生产物理清理完成。
+      parameters: [ { $ref: '#/components/parameters/AssetId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/emergency-contact:
+    get:
+      summary: 查询紧急联系人（掩码）与独立用途告知
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+    put:
+      summary: 创建或更新紧急联系人
+      description: 必须确认独立用途告知；仅用于法规要求与生命健康或重大财产安全响应。响应只返回掩码手机号。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consent_independent_purpose, contact_name, relationship, phone]
+              properties:
+                consent_independent_purpose: { type: boolean, enum: [true] }
+                contact_name: { type: string, maxLength: 80 }
+                relationship: { type: string, maxLength: 40 }
+                phone: { type: string, pattern: '^\+?[0-9]{5,20}$' }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: 删除紧急联系人
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/interaction-activity/heartbeat:
+    post:
+      summary: 前台活动心跳（连续使用时长由服务端计算）
+      description: 超过5分钟间隔视为会话中断并重置计时；连续使用每满2小时返回一次不可关闭的 CONTINUOUS_USE 提醒（SAFE-03）。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/complaints:
+    post:
+      summary: 提交举报/服务投诉/申诉
+      description: 举报内容必须携带 target_resource_id；默认不附带完整私聊正文。提交后在任何账户/年龄状态下均可用。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, description]
+              properties:
+                kind: { type: string, enum: [REPORT_CONTENT, SERVICE_COMPLAINT, APPEAL] }
+                description: { type: string, minLength: 1, maxLength: 2000 }
+                target_resource_id: { type: string, maxLength: 128 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/complaints/{complaintId}:
+    get:
+      summary: 查询投诉处理进度
+      parameters: [ { name: complaintId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/account-deletions:
+    post:
+      summary: 注销账户（二次确认）
+      description: confirm_text 必须为“注销”。确认后账户转 CLOSING、全部会话立即下线、互动与召回停止；返回 ACCOUNT 范围删除任务。生产数据 24 小时内清理、备份最长 30 天为合同口径，本地开发仅为内存实现。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm_text]
+              properties: { confirm_text: { type: string, enum: ["注销"] } }
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/proactive-preferences:
+    get:
+      summary: 查询主动消息偏好与频率政策
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+    put:
+      summary: 更新主动消息偏好
+      description: 关闭立即生效；付费不能突破每日1条与静默时段上限。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                quiet_start_hour: { type: integer, minimum: 0, maximum: 23 }
+                quiet_end_hour: { type: integer, minimum: 0, maximum: 23 }
+                timezone_offset_minutes: { type: integer, minimum: -720, maximum: 840 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/proactive-events:
+    get:
+      summary: 查询 ACTIVE 主动事件
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+    post:
+      summary: 创建纪念日/约定/早晚订阅事件
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, title]
+              properties:
+                type: { type: string, enum: [SUBSCRIBED_MORNING, SUBSCRIBED_EVENING, CONFIRMED_ANNIVERSARY, CONFIRMED_BIRTHDAY, CONFIRMED_APPOINTMENT, CONFIRMED_REALITY_ACTION] }
+                title: { type: string, maxLength: 80 }
+                due_at: { type: string, format: date-time }
+                time_of_day_local: { type: integer, minimum: 0, maximum: 23 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/proactive-events/{eventId}:
+    delete:
+      summary: 删除事件并取消未发送任务
+      parameters: [ { name: eventId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/proactive-events/{eventId}/trigger:
+    post:
+      summary: 模拟触发时刻到达（规则引擎决定是否发送）
+      description: 开发切片入口：生产中由调度器按时钟调用同一规则引擎。允许时按固定模板槽生成消息记录；拒绝时返回原因（USER_OPTED_OUT / QUIET_HOURS / DAILY_LIMIT_REACHED），模型与付费均不可改写。
+      parameters: [ { name: eventId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/proactive-messages:
+    get:
+      summary: 查询已发送主动消息记录
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/deletion-jobs/{deletionJobId}:
+    get:
+      summary: 查询开发删除任务状态
+      parameters: [ { $ref: '#/components/parameters/DeletionJobId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /internal/content-rights-reviews:
+    get:
+      summary: 审核员查询权利审核队列（技术设计 8.10）
+      description: 独立审核员身份（开发内置 reviewer-dev-token，可用 QIYU_REVIEWER_TOKENS 覆盖；生产为独立域名+MFA+qiyu_reviewer 数据库角色）。OC 原文仅返回前 500 字摘要；决策不可由用户侧触发。持久化（Postgres）运行时决策端点返回 503——须在生产审核台经 SECURITY DEFINER 函数执行。
+      security: [ { reviewerBearer: [] } ]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string, enum: [REVIEW_REQUIRED, APPROVED, REJECTED], default: REVIEW_REQUIRED }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /internal/content-rights-reviews/{reviewId}/decisions:
+    post:
+      summary: 审核员决策（APPROVED/REJECTED，单次不可逆）
+      description: REJECTED 为终态（用户申诉留档、队列可见，但不重开决策）。APPROVED 的参考图资产解除隔离进入 AVAILABLE；APPROVED 的 OC 导入允许用户按 import_id 创建角色。决策记录 append-only 持久化（迁移 024 表）。
+      security: [ { reviewerBearer: [] } ]
+      parameters:
+        - name: reviewId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason]
+              properties:
+                decision: { type: string, enum: [APPROVED, REJECTED] }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /internal/deletion-jobs:
+    get:
+      summary: 审核员查询删除任务队列（只读）
+      description: 失败目标的重试由生产清理 Worker 执行；本端点不提供重试动作。
+      security: [ { reviewerBearer: [] } ]
+      parameters:
+        - name: state
+          in: query
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /internal/provider-health:
+    get:
+      summary: 审核员查询供应商调用健康聚合
+      description: 按供应商/模型聚合调用量、结果分布与平均延迟；不含消息正文。本地开发仅文字成功路径，无生产熔断与告警。
+      security: [ { reviewerBearer: [] } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /internal/feature-flags:
+    get:
+      summary: 审核员查询功能开关状态
+      description: 本地合成运行时全部关闭；生产由 QIYU_PROVIDER_CONFIG_JSON 门禁开启。
+      security: [ { reviewerBearer: [] } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /internal/asset-embedding-dead-letters:
+    get:
+      summary: 审核员查询资产向量死信队列
+      description: 资产 Embedding 任务连续失败（默认5次）后进入死信；重放仅一次且需 reason 留痕。开发向量为确定性字符 n-gram 嵌入（可复现、无外呼、不代表语义质量）；生产接入供应商 embedding 后历史索引须按 model_version 全量重建。
+      security: [ { reviewerBearer: [] } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /internal/asset-embedding-dead-letters/{jobId}/replay:
+    post:
+      summary: 审核员重放资产向量死信（一次）
+      description: 仅已耗尽任务可重放；源资产已删除或被修订时拒绝（SOURCE_REVOKED）。持久化运行时返回 503，须由生产独立向量 Worker 运营身份执行。
+      security: [ { reviewerBearer: [] } ]
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: { reason: { type: string, minLength: 1, maxLength: 1000 } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /internal/age-reviews:
+    get:
+      summary: 年龄人工复核队列（FB 级）
+      description: 列出 AGE_REVIEW 账户（状态、原因码、复核请求时间与历史结论留痕）；不含证件材料。公开上线前须替换为第三方年龄断言。
+      security: [ { reviewerBearer: [] } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /internal/age-reviews/{accountId}/decisions:
+    post:
+      summary: 年龄人工复核裁决
+      description: PASS→恢复互动（reason_codes=MANUAL_REVIEW_PASSED）；DENIED_MINOR→阻断伴侣功能但数据权利保留；MAINTAIN_REVIEW→保持阻断并留痕。决策 append-only 持久化（迁移 028 表）。仅 AGE_REVIEW 状态可裁决。
+      security: [ { reviewerBearer: [] } ]
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason]
+              properties:
+                decision: { type: string, enum: [PASS, DENIED_MINOR, MAINTAIN_REVIEW] }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /internal/subscriptions/manual-grant:
+    post:
+      summary: 线下收款人工发放订阅（封测期，PRD 9.4 可退款预订阅）
+      description: 创建 channel=MANUAL_OFFLINE_PAYMENT 的完整订阅周期并按周期入账权益（复用到期/撤销/账本语义）。运营须在 reason 留收款凭据摘要；真实支付渠道接入后该通道仅作对账补充。
+      security: [ { reviewerBearer: [] } ]
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account_id, sku, reason]
+              properties:
+                account_id: { type: string }
+                sku: { type: string, enum: [qiyu_public_monthly_v1, qiyu_public_quarterly_v1] }
+                reason: { type: string, minLength: 1, maxLength: 1000 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /internal/subscriptions/{subscriptionId}/revoke:
+    post:
+      summary: 撤销线下人工发放的订阅（退款）
+      description: 仅 MANUAL_OFFLINE_PAYMENT 渠道可撤销；订阅转 REVOKED、全额退款语义——新额度预留立即失败，周期退出用户权益视图（append-only 账本保留审计）。实际退款按原收款渠道退回。
+      security: [ { reviewerBearer: [] } ]
+      parameters:
+        - name: subscriptionId
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties: { reason: { type: string, minLength: 1, maxLength: 1000 } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    reviewerBearer:
+      type: http
+      scheme: bearer
+      description: 运营审核员身份，与用户 Bearer 体系分离（开发内置 reviewer-dev-token）。
+    syntheticBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: development-only
+      description: 仅接受 dev-alice-token 或 dev-bob-token；这是合成开发鉴权，不是生产认证。
+  parameters:
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+    NoticeId: { name: noticeId, in: path, required: true, schema: { type: string } }
+    ConversationId: { name: conversationId, in: path, required: true, schema: { type: string } }
+    CharacterId: { name: characterId, in: path, required: true, schema: { type: string } }
+    ReviewId: { name: reviewId, in: path, required: true, schema: { type: string } }
+    MessageId: { name: messageId, in: path, required: true, schema: { type: string } }
+    JobId: { name: jobId, in: path, required: true, schema: { type: string } }
+    CandidateId: { name: candidateId, in: path, required: true, schema: { type: string } }
+    AssetId: { name: assetId, in: path, required: true, schema: { type: string } }
+    DeletionJobId: { name: deletionJobId, in: path, required: true, schema: { type: string } }
+  requestBodies:
+    ExpectedVersion:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [expected_version]
+            properties: { expected_version: { type: integer, minimum: 1 } }
+  responses:
+    JsonResponse:
+      description: JSON success response. Concrete object shape is endpoint-specific in this M1 contract.
+      content: { application/json: { schema: { type: object, additionalProperties: true } } }
+    Error:
+      description: Unified error response
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: object
+                required: [code, message, request_id, retryable]
+                properties:
+                  code: { type: string, enum: [AUTH_REQUIRED, VALIDATION_ERROR, INVALID_JSON, PAYLOAD_TOO_LARGE, INTERNAL_ERROR, IDEMPOTENCY_KEY_REQUIRED, IDEMPOTENCY_CONFLICT, VERSION_CONFLICT, STATE_TRANSITION_INVALID, REQUIRED_NOTICE_PENDING, AGE_NOT_PASSED, ACCOUNT_NOT_OPEN, USER_PAUSED, SAFETY_RESTRICTED, SERVICE_LIMITED, ACTION_FORBIDDEN, ACTIVE_CHARACTER_EXISTS, OC_RIGHTS_REVIEW_REQUIRED, REFERENCE_IMAGE_RIGHTS_REVIEW_REQUIRED, RESOURCE_NOT_FOUND, ROUTE_NOT_FOUND, ASR_NOT_ENABLED, TENCENT_ASR_AUDIO_INVALID, TENCENT_ASR_AUDIO_FORMAT_INVALID, TENCENT_ASR_RESPONSE_INVALID, QWEN_UPSTREAM_REJECTED, QWEN_TIMEOUT, QWEN_NETWORK_ERROR, QWEN_RESPONSE_INVALID] }
+                  message: { type: string }
+                  request_id: { type: string }
+                  retryable: { type: boolean }
+                  details: { type: object, additionalProperties: true }

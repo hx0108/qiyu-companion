@@ -1,0 +1,54 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "栖语 V1.2 全页面静态展开版": {
+      "versions": [
+        {
+          "path": "static/栖语_V1.2_全页面静态展开版.html",
+          "createdAt": "2026-09-01T03:31:40.994Z",
+          "status": "needs-review",
+          "subtitle": "42 个页面/关键状态，供 Figma、UI 和开发交付",
+          "viewport": {
+            "width": 1320,
+            "height": 1400
+          },
+          "section": "UI & Dev Handoff"
+        }
+      ]
+    },
+    "栖语 V1.2 移动端实现边界": {
+      "versions": [
+        {
+          "path": "static/栖语_V1.2_移动端实现边界.html",
+          "createdAt": "2026-09-01T15:20:55.906Z",
+          "status": "needs-review",
+          "subtitle": "安全区、375/小屏/长屏、键盘、大字体、横屏、媒体、Sheet、滚动与主题策略",
+          "viewport": {
+            "width": 1600,
+            "height": 3400
+          },
+          "section": "UI & Dev Handoff"
+        }
+      ]
+    },
+    "栖语 V1.2 Figma导入 42 Frames": {
+      "versions": [
+        {
+          "path": "static/栖语_V1.2_Figma导入_42Frames_393x852.html",
+          "createdAt": "2026-09-01T15:20:56.903Z",
+          "status": "needs-review",
+          "subtitle": "42个393×852屏幕节点，无脚本，供插件整页导入",
+          "viewport": {
+            "width": 2838,
+            "height": 6700
+          },
+          "section": "UI & Dev Handoff"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-09-01T03:31:40.999Z",
+  "updatedAt": "2026-09-01T15:29:33.796Z"
+}

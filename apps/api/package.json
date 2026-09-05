@@ -1,0 +1,18 @@
+{
+  "name": "qiyu-m1-local-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local synthetic-data M1 baseline. Not a production service.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "eval:memory-recall": "node eval/run-memory-recall-regression.js"
+  },
+  "dependencies": {
+    "cos-nodejs-sdk-v5": "^3.0.0",
+    "pg": "^8.13.0"
+  }
+}

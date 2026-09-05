@@ -1,0 +1,18 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "栖语视觉方向对照": {
+      "versions": [
+        {
+          "path": "视觉方向对照.html",
+          "createdAt": "2026-08-30T17:54:40.953Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-08-30T17:54:40.955Z",
+  "updatedAt": "2026-08-30T18:03:32.534Z"
+}

@@ -1,0 +1,792 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#f3eee6" />
+  <link rel="icon" href="icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="栖语 V1.2" />
+  <link rel="apple-touch-icon" href="icon.png" />
+  <title>栖语 V1.2 高保真原型</title>
+  <style>
+    :root{
+      --paper:#f3eee6;--paper-2:#ece4d9;--paper-3:#fbf8f2;--ink:#2c2028;--muted:#796d74;
+      --plum:#5b3653;--plum-2:#74506b;--rose:#bd8f94;--rose-soft:#ead8d4;--line:rgba(63,42,54,.14);
+      --night:#120f18;--night-2:#211724;--night-ink:#f6eee9;--night-muted:#c8b8bf;
+      --success:#526a5a;--danger:#9d4c56;--gold:#9b7a52;
+      --serif:"Songti SC","STSong","Noto Serif SC",Georgia,serif;
+      --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+      --shadow:0 24px 70px rgba(35,20,30,.22);
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;min-height:100%;background:#d9d3cc;color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased}
+    button,input,select,textarea{font:inherit}
+    button{cursor:pointer}
+    button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid rgba(91,54,83,.22);outline-offset:2px}
+    .stage{min-height:100vh;display:grid;grid-template-columns:270px 390px;gap:30px;align-items:center;justify-content:center;padding:30px}
+    .guide{height:844px;border-radius:28px;background:#272128;color:#f8f1eb;padding:24px;display:flex;flex-direction:column;box-shadow:var(--shadow);overflow:auto}
+    .guide-mark{width:44px;height:44px;border-radius:14px;background:#f2ece3 url('icon.png') center/cover;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+    .guide h1{font:500 26px/1.15 var(--serif);margin:18px 0 6px;letter-spacing:.08em}
+    .guide .sub{font-size:12px;line-height:1.6;color:#bfb3bb;margin:0 0 20px}
+    .guide-label{font-size:10px;letter-spacing:.16em;color:#a597a1;text-transform:uppercase;margin:10px 0 8px}
+    .jump-list{display:grid;gap:6px}
+    .jump{border:0;background:transparent;color:#ddd1d8;text-align:left;min-height:42px;border-radius:12px;padding:9px 11px;display:flex;align-items:center;gap:10px}
+    .jump:hover,.jump.active{background:rgba(255,255,255,.08);color:#fff}
+    .jump b{font:500 12px/1 var(--serif);width:22px;color:#b98d98}
+    .jump span{font-size:12px}
+    .guide-actions{margin-top:auto;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:16px}
+    .guide-actions button{min-height:44px;border-radius:12px;border:1px solid rgba(255,255,255,.13);color:#eadfe4;background:transparent;font-size:12px}
+    .guide-actions button:first-child{background:#f0e8df;color:#372832;border:0}
+    .phone{width:390px;height:844px;border-radius:44px;overflow:hidden;background:var(--paper);box-shadow:0 0 0 8px #1e1b1e,0 0 0 10px #595158,var(--shadow);position:relative}
+    #app{height:100%;width:100%;position:relative;overflow:hidden;background:var(--paper)}
+    .screen{height:100%;display:flex;flex-direction:column;position:relative;overflow:hidden;padding-top:max(18px,env(safe-area-inset-top))}
+    .paper{background:
+      radial-gradient(circle at 15% 0%,rgba(255,255,255,.82),transparent 35%),
+      repeating-linear-gradient(0deg,rgba(73,46,61,.018) 0 1px,transparent 1px 4px),var(--paper)}
+    .content{flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-width:none;padding:20px 22px calc(102px + env(safe-area-inset-bottom))}
+    .content::-webkit-scrollbar,.chat-scroll::-webkit-scrollbar{display:none}
+    .brandline{display:flex;justify-content:space-between;align-items:center;padding:4px 22px 0;min-height:48px}
+    .wordmark{font:600 21px/1 var(--serif);letter-spacing:.18em;color:var(--plum)}
+    .step{font-size:10px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase}
+    .eyebrow{font-size:10px;letter-spacing:.18em;color:var(--plum-2);text-transform:uppercase;margin:12px 0}
+    h2{font:500 34px/1.22 var(--serif);letter-spacing:.015em;margin:8px 0 14px}
+    h3{font:500 22px/1.3 var(--serif);margin:0}
+    p{margin:0}
+    .lead{font:400 15px/1.75 var(--serif);color:#5f525a;max-width:320px}
+    .orbit{position:absolute;width:260px;height:132px;border:1px solid rgba(91,54,83,.14);border-radius:50%;transform:rotate(-18deg);right:-84px;top:95px;pointer-events:none}
+    .orbit:before{content:"";position:absolute;inset:18px -15px;border:1px solid rgba(189,143,148,.28);border-radius:50%}
+    .orbit:after{content:"";position:absolute;width:8px;height:8px;border-radius:50%;background:var(--plum);right:31px;top:9px;box-shadow:0 0 0 6px rgba(91,54,83,.07)}
+    .fact-grid{display:grid;gap:10px;margin:34px 0 22px}
+    .fact{background:rgba(255,255,255,.5);border:1px solid var(--line);border-radius:18px;padding:15px;display:grid;grid-template-columns:38px 1fr;gap:12px;align-items:start}
+    .fact-icon{width:38px;height:38px;border-radius:50%;background:var(--rose-soft);display:grid;place-items:center;color:var(--plum)}
+    .fact strong{font-size:14px;font-weight:600;display:block;margin:2px 0 4px}.fact small{font-size:12px;line-height:1.55;color:var(--muted)}
+    .check-list{display:grid;gap:9px;margin:18px 0}
+    .check-row{border:1px solid var(--line);background:rgba(255,255,255,.42);border-radius:14px;padding:12px 13px;display:flex;gap:11px;align-items:flex-start;min-height:48px}
+    .check-row input{appearance:none;width:20px;height:20px;min-width:20px;border:1.5px solid #9d8a95;border-radius:6px;margin:0;position:relative;background:#fff}
+    .check-row input:checked{background:var(--plum);border-color:var(--plum)}
+    .check-row input:checked:after{content:"✓";position:absolute;color:#fff;font-weight:700;font-size:13px;left:4px;top:0}
+    .check-row span{font-size:12px;line-height:1.55;color:#51464c}
+    .bottom-action{padding:12px 22px calc(18px + env(safe-area-inset-bottom));background:linear-gradient(180deg,transparent,var(--paper) 22%);position:absolute;left:0;right:0;bottom:0;z-index:6}
+    .btn{width:100%;min-height:52px;border:0;border-radius:17px;padding:0 18px;display:flex;align-items:center;justify-content:center;gap:8px;font-weight:600;font-size:14px}
+    .btn-primary{background:var(--plum);color:#fff;box-shadow:0 12px 24px rgba(91,54,83,.2)}
+    .btn-primary:disabled{background:#c7bec2;color:#fff;box-shadow:none;cursor:not-allowed}
+    .btn-soft{background:var(--rose-soft);color:var(--plum)}
+    .btn-line{background:transparent;border:1px solid var(--line);color:var(--ink)}
+    .note{font-size:10px;line-height:1.55;text-align:center;color:#8a7d84;margin-top:9px}
+    .field{margin:15px 0}.field label{display:block;font-size:11px;color:var(--muted);margin:0 0 7px}.field input,.field select,.field textarea{width:100%;border:1px solid var(--line);background:rgba(255,255,255,.58);border-radius:15px;min-height:50px;padding:12px 14px;color:var(--ink);resize:none}
+    .field textarea{height:78px}
+    .verify-card{margin-top:25px;border:1px solid var(--line);border-radius:24px;background:rgba(255,255,255,.52);padding:20px;position:relative;overflow:hidden}
+    .verify-card:after{content:"18+";position:absolute;right:-10px;top:-18px;font:500 88px/1 var(--serif);color:rgba(91,54,83,.055)}
+    .status-row{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--muted);margin-top:12px}.status-dot{width:8px;height:8px;border-radius:50%;background:#b8adaf}.status-dot.pass{background:var(--success);box-shadow:0 0 0 5px rgba(82,106,90,.1)}
+    .progress{height:4px;border-radius:5px;background:#ddd4cf;overflow:hidden;margin:14px 0}.progress i{display:block;width:65%;height:100%;background:var(--plum);animation:load 1s ease-in-out infinite alternate}@keyframes load{to{width:88%}}
+    .mode-switch{display:flex;background:rgba(91,54,83,.06);padding:4px;border-radius:14px;margin:18px 0 14px}.mode-switch button{flex:1;min-height:40px;border:0;border-radius:11px;color:var(--muted);background:transparent;font-size:12px}.mode-switch button.on{background:#fff;color:var(--plum);box-shadow:0 4px 16px rgba(70,46,61,.09)}
+    .portrait-editor{height:205px;border-radius:24px;overflow:hidden;position:relative;background:#c7b5b1;margin-bottom:18px}.portrait-editor img{width:100%;height:100%;object-fit:cover;object-position:center 32%}.aigc{position:absolute;right:10px;bottom:10px;background:rgba(30,22,28,.74);color:#f6ecec;border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:5px 8px;font-size:9px;letter-spacing:.08em;backdrop-filter:blur(8px)}
+    .chips{display:flex;gap:7px;flex-wrap:wrap}.chip{min-height:34px;border:1px solid var(--line);background:rgba(255,255,255,.5);color:var(--muted);border-radius:999px;padding:0 12px;font-size:11px}.chip.on{background:var(--plum);color:white;border-color:var(--plum)}
+    .rights{display:flex;gap:9px;padding:12px;border-radius:14px;background:#eee6df;color:#665961;font-size:10px;line-height:1.5;margin:16px 0}
+    .app-screen{padding-top:max(8px,env(safe-area-inset-top))}
+    .app-header{height:58px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;position:relative;z-index:4}
+    .identity{display:flex;align-items:center;gap:10px}.avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;object-position:center 26%;border:1px solid rgba(255,255,255,.55)}
+    .identity b{display:block;font:500 16px/1.2 var(--serif)}.identity small{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--muted);margin-top:3px}.ai-dot{width:5px;height:5px;border-radius:50%;background:var(--rose)}
+    .icon-btn{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;background:transparent;border:0;color:currentColor}.icon-btn.soft{background:rgba(91,54,83,.06)}
+    svg{display:block}
+    .chat-scroll{flex:1;overflow:auto;overscroll-behavior:contain;scrollbar-width:none;padding:8px 18px 155px;position:relative;z-index:2}
+    .date-rule{display:flex;align-items:center;gap:10px;color:#96888f;font-size:9px;letter-spacing:.1em;margin:7px 0 16px}.date-rule:before,.date-rule:after{content:"";height:1px;background:var(--line);flex:1}
+    .scene-state{border:1px solid var(--line);background:rgba(255,255,255,.45);border-radius:18px;padding:13px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px}.scene-state .glyph{width:32px;height:32px;border-radius:50%;background:var(--rose-soft);display:grid;place-items:center;color:var(--plum)}.scene-state b{font:500 13px/1.2 var(--serif);display:block}.scene-state small{font-size:9px;color:var(--muted)}
+    .memory-banner{border:1px dashed rgba(91,54,83,.24);border-radius:17px;padding:12px 13px;display:flex;gap:10px;align-items:center;background:rgba(234,216,212,.33);margin-bottom:16px;color:var(--plum)}.memory-banner b{font-size:11px;display:block}.memory-banner small{font-size:9px;color:var(--muted)}.memory-banner .chev{margin-left:auto}
+    .message{max-width:82%;margin:0 0 12px;display:flex;flex-direction:column;gap:5px}.message.ai{align-items:flex-start}.message.me{align-items:flex-end;margin-left:auto}.bubble{border-radius:18px;padding:12px 14px;font:400 13px/1.62 var(--serif)}.ai .bubble{background:rgba(255,255,255,.62);border:1px solid var(--line);border-bottom-left-radius:5px}.me .bubble{background:var(--plum);color:white;border-bottom-right-radius:5px}.msg-meta{font-size:8px;color:#968990;padding:0 5px}
+    .voice-card{min-width:206px;border:1px solid var(--line);background:rgba(255,255,255,.62);border-radius:18px 18px 18px 5px;padding:11px 13px;display:flex;align-items:center;gap:10px;color:var(--plum)}.voice-play{width:34px;height:34px;border:0;border-radius:50%;background:var(--plum);color:white;display:grid;place-items:center}.wave{flex:1;display:flex;align-items:center;gap:2px;height:22px}.wave i{display:block;width:2px;border-radius:2px;background:currentColor;opacity:.55}.wave i:nth-child(3n+1){height:7px}.wave i:nth-child(3n+2){height:15px}.wave i:nth-child(3n){height:21px}.playing .wave i{animation:pulse .75s ease-in-out infinite alternate}.playing .wave i:nth-child(2n){animation-delay:.2s}@keyframes pulse{to{height:5px;opacity:1}}.voice-card small{font-size:9px}
+    .composer-wrap{position:absolute;left:0;right:0;bottom:calc(63px + env(safe-area-inset-bottom));padding:10px 14px;z-index:5;background:linear-gradient(180deg,transparent,var(--paper) 25%)}
+    .composer{height:54px;border:1px solid var(--line);background:rgba(255,255,255,.86);border-radius:19px;box-shadow:0 10px 24px rgba(66,41,54,.1);display:flex;align-items:center;padding:5px}.composer input{min-width:0;flex:1;border:0;background:transparent;padding:0 9px;color:var(--ink);outline:0;font-size:12px}.composer .icon-btn{width:42px;height:42px}.send{background:var(--plum)!important;color:white!important}
+    .bottom-nav{position:absolute;left:0;right:0;bottom:0;height:calc(64px + env(safe-area-inset-bottom));padding:4px 10px env(safe-area-inset-bottom);display:flex;z-index:7;background:rgba(246,241,234,.92);backdrop-filter:blur(18px);border-top:1px solid var(--line)}
+    .nav-item{flex:1;border:0;background:transparent;color:#93868d;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:4px;font-size:9px;min-height:54px}.nav-item.on{color:var(--plum)}
+    .night{background:#151019;color:var(--night-ink)}.night:before{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(13,9,16,.22) 0%,rgba(16,11,18,.67) 48%,#151019 80%),url('imgs/qiyu-night-scene.png') center top/100% auto no-repeat;opacity:.93}.night .app-header,.night .chat-scroll,.night .composer-wrap,.night .bottom-nav{color:var(--night-ink)}.night .identity small,.night .msg-meta,.night .date-rule,.night .scene-state small,.night .memory-banner small{color:var(--night-muted)}.night .scene-state,.night .ai .bubble{background:rgba(35,25,37,.68);border-color:rgba(255,255,255,.12);backdrop-filter:blur(15px)}.night .memory-banner{background:rgba(125,77,105,.23);border-color:rgba(229,192,203,.3);color:#f1d8df;backdrop-filter:blur(15px)}.night .composer-wrap{background:linear-gradient(180deg,transparent,#151019 28%)}.night .composer{background:rgba(37,28,39,.86);border-color:rgba(255,255,255,.12)}.night .composer input{color:#fff}.night .bottom-nav{background:rgba(18,13,21,.9);border-color:rgba(255,255,255,.09)}.night .nav-item.on{color:#e8bec9}.night .icon-btn.soft{background:rgba(255,255,255,.08)}.night .me .bubble{background:#7d526d}.night .date-rule:before,.night .date-rule:after{background:rgba(255,255,255,.12)}
+    .page-content{flex:1;overflow:auto;padding:4px 20px calc(85px + env(safe-area-inset-bottom));scrollbar-width:none}.page-content::-webkit-scrollbar{display:none}
+    .page-title{font:500 30px/1.2 var(--serif);margin:14px 0 5px}.page-sub{font-size:11px;color:var(--muted);line-height:1.6}
+    .timeline-orbit{height:150px;position:relative;margin:24px 0 8px}.timeline-orbit:before,.timeline-orbit:after{content:"";position:absolute;border-radius:50%;border:1px solid rgba(91,54,83,.17);transform:rotate(-14deg)}.timeline-orbit:before{width:270px;height:95px;left:25px;top:20px}.timeline-orbit:after{width:226px;height:70px;left:48px;top:34px;border-color:rgba(189,143,148,.35)}.center-date{position:absolute;inset:0;display:grid;place-items:center;text-align:center}.center-date b{font:500 35px/1 var(--serif);color:var(--plum)}.center-date small{font-size:9px;color:var(--muted);letter-spacing:.12em}
+    .timeline{position:relative;padding-left:24px;margin-top:10px}.timeline:before{content:"";position:absolute;left:7px;top:5px;bottom:20px;width:1px;background:rgba(91,54,83,.19)}.event{position:relative;margin:0 0 18px;background:rgba(255,255,255,.5);border:1px solid var(--line);border-radius:18px;padding:14px}.event:before{content:"";position:absolute;width:8px;height:8px;border-radius:50%;left:-21px;top:19px;background:var(--rose);box-shadow:0 0 0 4px var(--paper)}.event time{font-size:9px;color:var(--rose);letter-spacing:.12em}.event h4{font:500 15px/1.35 var(--serif);margin:6px 0}.event p{font-size:10px;color:var(--muted);line-height:1.55}.confirmed{display:inline-flex;gap:4px;align-items:center;color:var(--success);font-size:8px;margin-top:8px}
+    .profile-card{margin:20px 0;border-radius:24px;padding:18px;background:var(--plum);color:white;display:flex;gap:14px;align-items:center;position:relative;overflow:hidden}.profile-card:after{content:"";position:absolute;width:110px;height:52px;border:1px solid rgba(255,255,255,.22);border-radius:50%;right:-18px;top:8px;transform:rotate(-14deg)}.profile-card .avatar{width:58px;height:58px}.profile-card h4{font:500 18px/1.2 var(--serif);margin:0 0 5px}.profile-card p{font-size:10px;color:#ddd0d8}.profile-card .aigc{right:12px;bottom:12px}
+    .section-title{display:flex;justify-content:space-between;align-items:end;margin:24px 0 10px}.section-title h4{font:500 16px/1.2 var(--serif);margin:0}.section-title small{font-size:9px;color:var(--muted)}
+    .list{background:rgba(255,255,255,.48);border:1px solid var(--line);border-radius:20px;overflow:hidden}.list-row{min-height:58px;padding:11px 14px;border:0;border-bottom:1px solid var(--line);background:transparent;width:100%;display:flex;align-items:center;gap:11px;text-align:left;color:var(--ink)}.list-row:last-child{border-bottom:0}.list-ico{width:32px;height:32px;border-radius:11px;background:var(--rose-soft);display:grid;place-items:center;color:var(--plum)}.list-copy{flex:1}.list-copy b{display:block;font-size:12px;font-weight:600}.list-copy small{display:block;font-size:9px;color:var(--muted);margin-top:3px}.list-end{font-size:10px;color:var(--muted);display:flex;align-items:center;gap:5px}
+    .world-card{border-radius:22px;overflow:hidden;background:#2a2029;color:#f5ebef;margin:20px 0}.world-image{height:190px;background:linear-gradient(180deg,transparent,rgba(16,11,18,.65)),url('imgs/qiyu-night-scene.png') center 28%/cover;position:relative}.world-card .copy{padding:15px}.world-card .copy b{font:500 16px var(--serif)}.world-card .copy p{font-size:10px;color:#cbbbc2;margin-top:5px}.world-tags{display:flex;gap:6px;margin-top:11px}.world-tags span{font-size:8px;border:1px solid rgba(255,255,255,.16);border-radius:999px;padding:5px 8px}
+    .sheet-layer{position:absolute;inset:0;z-index:30;background:rgba(25,17,23,.42);display:flex;align-items:flex-end;backdrop-filter:blur(3px);animation:fade .2s ease}.sheet{width:100%;max-height:88%;overflow:auto;border-radius:28px 28px 0 0;background:var(--paper-3);padding:10px 20px calc(24px + env(safe-area-inset-bottom));box-shadow:0 -18px 50px rgba(31,20,28,.22);animation:rise .25s ease}.grabber{width:38px;height:4px;border-radius:5px;background:#c8bdba;margin:0 auto 18px}.sheet-head{display:flex;justify-content:space-between;align-items:start;margin-bottom:16px}.sheet-head h3{font-size:23px}.sheet-head p{font-size:10px;color:var(--muted);margin-top:5px}.close{width:40px;height:40px;border-radius:50%;border:0;background:#eee5df;color:var(--ink);display:grid;place-items:center}.sheet .btn+.btn{margin-top:9px}.memory-quote{border-left:2px solid var(--rose);padding:8px 0 8px 15px;font:400 17px/1.65 var(--serif);color:#4d3d47;margin:18px 0}.candidate-tag{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:6px 9px;background:var(--rose-soft);color:var(--plum);font-size:9px}.sheet-actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:18px}.sheet-actions .wide{grid-column:1/-1}
+    .recording{text-align:center;padding:12px 0 22px}.record-orbit{width:110px;height:110px;border-radius:50%;border:1px solid rgba(91,54,83,.2);display:grid;place-items:center;margin:12px auto;position:relative}.record-orbit:before{content:"";position:absolute;inset:12px;border-radius:50%;background:var(--rose-soft);animation:ring 1.2s ease-in-out infinite alternate}@keyframes ring{to{transform:scale(.88);opacity:.55}}.record-orbit svg{position:relative;color:var(--plum)}.recording b{font:500 25px var(--serif)}.recording p{font-size:10px;color:var(--muted);margin-top:5px}
+    .scene-preview{height:270px;border-radius:20px;background:linear-gradient(180deg,transparent,rgba(12,8,14,.7)),url('imgs/qiyu-night-scene.png') center 28%/cover;position:relative;overflow:hidden}.scene-preview .caption{position:absolute;left:14px;right:14px;bottom:14px;color:#fff}.scene-preview .caption b{font:500 16px var(--serif)}.scene-preview .caption p{font-size:9px;color:#d5c6cc;margin-top:4px}.scene-contract{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:13px 0}.contract-item{background:#eee6df;border-radius:12px;padding:10px}.contract-item small{font-size:8px;color:var(--muted);display:block}.contract-item b{font-size:10px;display:block;margin-top:3px}
+    .plan-card{border:1px solid rgba(91,54,83,.22);background:rgba(255,255,255,.58);border-radius:24px;padding:18px;margin:18px 0;position:relative}.plan-card.featured{border:1.5px solid var(--plum);box-shadow:0 14px 32px rgba(91,54,83,.11)}.plan-card .recommended{position:absolute;right:14px;top:14px;background:var(--plum);color:#fff;border-radius:999px;padding:5px 8px;font-size:8px}.price{font:500 34px/1 var(--serif);margin:10px 0}.price span{font:400 11px var(--sans);color:var(--muted)}.benefits{display:grid;gap:9px;margin:16px 0}.benefit{display:flex;align-items:center;gap:8px;font-size:11px;color:#594b54}.benefit svg{color:var(--success)}
+    .renew{border-radius:16px;background:#eee5df;padding:12px;display:flex;align-items:center;justify-content:space-between;font-size:10px;color:var(--muted);margin:14px 0}.toggle{width:44px;height:26px;border-radius:999px;border:0;background:#c7bdc1;padding:3px;transition:.2s}.toggle:after{content:"";display:block;width:20px;height:20px;border-radius:50%;background:#fff;transition:.2s}.toggle.on{background:var(--plum)}.toggle.on:after{transform:translateX(18px)}
+    .data-hero{margin:18px 0;background:#332630;color:#f6edf1;border-radius:24px;padding:18px;position:relative;overflow:hidden}.data-hero h4{font:500 19px var(--serif);margin:0 0 6px}.data-hero p{font-size:10px;color:#cfc0c7;line-height:1.6;max-width:260px}.data-hero .lock{position:absolute;right:17px;top:18px;color:#c89aa7}
+    .segment{display:flex;padding:4px;background:#e7ded7;border-radius:13px}.segment button{border:0;background:transparent;flex:1;min-height:38px;border-radius:10px;font-size:11px;color:var(--muted)}.segment button.on{background:#fff;color:var(--plum);box-shadow:0 4px 12px rgba(65,42,54,.09)}
+    .danger-row .list-ico{background:#f2dfe0;color:var(--danger)}.danger-row .list-copy b{color:var(--danger)}
+    .dialog-layer{position:absolute;inset:0;z-index:40;background:rgba(23,16,21,.53);display:grid;place-items:center;padding:22px;backdrop-filter:blur(5px)}.dialog{width:100%;border-radius:24px;background:var(--paper-3);padding:22px;box-shadow:0 26px 80px rgba(20,12,18,.3)}.dialog .system{display:inline-flex;border-radius:999px;background:#e8ded7;color:var(--plum);padding:6px 9px;font-size:8px;letter-spacing:.12em}.dialog h3{margin:14px 0 9px}.dialog p{font-size:11px;line-height:1.65;color:var(--muted)}.dialog .btn{margin-top:10px}.dialog .btn-line{color:var(--ink)}
+    .toast{position:absolute;left:18px;right:18px;bottom:88px;z-index:50;background:#2b2228;color:#fff;border-radius:15px;padding:13px 15px;display:flex;align-items:center;gap:9px;box-shadow:0 12px 30px rgba(22,14,19,.25);font-size:11px;animation:toast .25s ease}.toast svg{color:#d9b0bb}@keyframes toast{from{transform:translateY(14px);opacity:0}}@keyframes fade{from{opacity:0}}@keyframes rise{from{transform:translateY(40px)}}
+    .loading-screen{display:grid;place-items:center;height:100%;background:var(--paper)}.loading-mark{width:75px;height:75px;border-radius:24px;background:url('icon.png') center/cover;animation:breathe 1.2s ease-in-out infinite alternate}@keyframes breathe{to{transform:scale(.94);opacity:.72}}
+    .state-card{border:1px solid var(--line);border-radius:20px;background:rgba(255,255,255,.55);padding:15px;margin:14px 0}.state-card.success{border-color:rgba(82,106,90,.28);background:rgba(226,235,227,.62)}.state-card.warn{border-color:rgba(155,122,82,.28);background:rgba(241,229,208,.58)}.state-card.block{border-color:rgba(157,76,86,.25);background:rgba(244,225,226,.62)}.state-card h4{font:500 16px/1.35 var(--serif);margin:0 0 6px}.state-card p{font-size:10px;line-height:1.65;color:var(--muted)}
+    .branch-picker{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:16px 0}.branch-picker button{min-height:48px;border:1px solid var(--line);background:rgba(255,255,255,.5);border-radius:13px;color:var(--muted);font-size:10px;padding:7px}.branch-picker button.on{background:var(--plum);color:#fff;border-color:var(--plum)}
+    .status-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 9px;background:var(--rose-soft);color:var(--plum);font-size:9px}.status-pill.success{background:#dfe9e1;color:var(--success)}.status-pill.warn{background:#eee1ca;color:#795d38}.status-pill.block{background:#f0d9db;color:var(--danger)}
+    .purpose-box{border:1px solid var(--line);border-radius:18px;padding:14px;background:rgba(255,255,255,.5);margin:14px 0}.purpose-box strong{font-size:12px}.purpose-box p{font-size:10px;line-height:1.6;color:var(--muted);margin-top:6px}.purpose-box ul{padding-left:17px;margin:10px 0 0;color:var(--muted);font-size:10px;line-height:1.7}
+    .trial-meter{height:7px;border-radius:999px;background:#ded3d0;overflow:hidden;margin:15px 0 8px}.trial-meter i{display:block;height:100%;border-radius:inherit;background:var(--plum)}.trial-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:15px 0}.trial-grid div{padding:11px 7px;border-radius:14px;background:rgba(255,255,255,.5);text-align:center}.trial-grid b{display:block;font:500 18px var(--serif)}.trial-grid small{font-size:8px;color:var(--muted)}
+    .safety-card{border-radius:24px;padding:18px;background:#31242e;color:#f8eef2;margin:16px 0;position:relative;overflow:hidden}.safety-card h4{font:500 19px var(--serif);margin:0 0 7px}.safety-card p{font-size:10px;line-height:1.6;color:#cfbec6}.safety-card .system{display:inline-flex;margin-bottom:12px;border-radius:999px;padding:6px 9px;background:rgba(255,255,255,.1);font-size:8px;letter-spacing:.1em}.safety-card:after{content:"";position:absolute;width:130px;height:70px;border:1px solid rgba(255,255,255,.14);border-radius:50%;right:-40px;top:18px;transform:rotate(-17deg)}
+    .receipt-track{margin:20px 0}.receipt-step{display:grid;grid-template-columns:24px 1fr;gap:10px;position:relative;padding-bottom:18px}.receipt-step:not(:last-child):before{content:"";position:absolute;left:11px;top:24px;bottom:0;width:1px;background:var(--line)}.receipt-dot{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;background:#ddd3d4;color:#fff}.receipt-step.done .receipt-dot{background:var(--success)}.receipt-step.active .receipt-dot{background:var(--plum)}.receipt-step b{display:block;font-size:11px;margin:3px 0}.receipt-step small{font-size:9px;color:var(--muted);line-height:1.5}
+    .version-row{border-left:2px solid var(--rose);padding:4px 0 18px 15px;margin-left:8px}.version-row:last-child{padding-bottom:4px}.version-row time{font-size:8px;letter-spacing:.1em;color:var(--rose)}.version-row h4{font:500 15px var(--serif);margin:5px 0}.version-row p{font-size:10px;line-height:1.55;color:var(--muted)}
+    .empty-state{border:1px dashed var(--line);border-radius:18px;padding:22px;text-align:center;color:var(--muted);font-size:10px;line-height:1.6;background:rgba(255,255,255,.35)}
+    .media-state{display:grid;gap:10px}.media-state .state-card{margin:0}.button-row{display:flex;gap:8px;margin-top:12px}.button-row .btn{min-height:42px;font-size:10px}.memory-banner.dismissed{background:rgba(238,230,223,.74);border-style:solid;color:var(--muted)}
+    @media(max-width:760px){html,body{background:var(--paper);overflow:hidden}.stage{display:block;padding:0;min-height:100dvh}.guide{display:none}.phone{width:100vw;height:100dvh;border-radius:0;box-shadow:none}.screen{min-height:100dvh}}
+
+    /* V1.2：移动端、可访问性与二级页导航修订 */
+    .secondary-screen .page-content{padding-bottom:calc(96px + env(safe-area-inset-bottom))}
+    .bottom-action.inline-action{position:static;flex:0 0 auto;background:var(--paper);padding-top:8px}
+    .composer .icon-btn,.close{width:44px;height:44px;min-width:44px;min-height:44px}
+    .segment button,.mode-switch button,.chip,.button-row .btn{min-height:44px}
+    .quota-note{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-5px 0 12px;padding:8px 11px;border-radius:12px;background:rgba(91,54,83,.06);font-size:10px;color:var(--muted)}
+    .quota-note strong{color:var(--plum)}
+    .resource-list{display:grid;gap:9px;margin:14px 0}.resource-item{border:1px solid var(--line);border-radius:15px;padding:12px;background:rgba(255,255,255,.55)}.resource-item b{display:block;font-size:12px}.resource-item small{display:block;margin-top:4px;color:var(--muted);font-size:10px;line-height:1.55}
+    .dialog:focus,.sheet:focus{outline:2px solid var(--plum);outline-offset:-3px}
+    .prototype-only{display:none!important}body.qiyu-annotate .prototype-only{display:grid!important}
+    @media(max-width:340px){.content{padding-left:16px;padding-right:16px;padding-bottom:140px}.page-content{padding-left:16px;padding-right:16px}.button-row{flex-wrap:wrap}.button-row .btn{flex:1 1 130px}.sheet-actions{grid-template-columns:1fr}.sheet-actions .wide{grid-column:auto}.branch-picker{gap:5px}.branch-picker button{font-size:9px}}
+    @media(max-height:620px){.content{padding-bottom:140px}.bottom-action{padding-left:16px;padding-right:16px}.sheet{max-height:calc(100dvh - 12px)}}
+    @media(orientation:landscape) and (max-height:500px){html,body{overflow:auto}.stage{min-height:100vh}.phone{width:min(480px,100vw);height:100vh;margin:auto}.screen{min-height:100vh}.dialog-layer{position:fixed}.sheet-layer{position:fixed}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+  
+  body.qiyu-annotate [data-action],body.qiyu-annotate [data-jump],body.qiyu-annotate [data-tab],body.qiyu-annotate [data-open]{outline:1px dashed rgba(189,143,148,.78);outline-offset:2px}
+  .qiyu-handoff-badge{position:fixed;z-index:9999;right:18px;top:18px;width:244px;padding:13px 14px;border-radius:16px;background:rgba(31,24,31,.94);color:#f7eef2;box-shadow:0 16px 44px rgba(15,8,14,.28);font:11px/1.55 var(--sans);backdrop-filter:blur(16px)}
+  .qiyu-handoff-badge b{display:block;font:500 14px/1.35 var(--serif);margin:4px 0}.qiyu-handoff-badge code{display:block;color:#d5b2bd;font-size:9px;word-break:break-all}.qiyu-handoff-badge button{margin-top:9px;border:1px solid rgba(255,255,255,.2);background:transparent;color:#fff;border-radius:10px;min-height:32px;padding:0 10px;font-size:10px}
+  @media(max-width:760px){.qiyu-handoff-badge{right:10px;top:10px;width:190px;padding:10px;font-size:9px;opacity:.9}}
+</style>
+</head>
+<body>
+  <main class="stage">
+    <aside class="guide" aria-label="原型验收导航">
+      <div class="guide-mark"></div>
+      <h1>栖语 V1.2</h1>
+      <p class="sub">关系手记 × 暮色私语<br>合规与失败分支 · 可点击原型</p>
+      <div class="guide-label">Flow navigator</div>
+      <div class="jump-list">
+        <button class="jump" data-jump="notice"><b>01</b><span>年龄与 AI 告知</span></button>
+        <button class="jump" data-jump="age"><b>02</b><span>年龄三态与申诉</span></button>
+        <button class="jump" data-jump="contact"><b>03</b><span>紧急联系人告知</span></button>
+        <button class="jump" data-jump="create"><b>04</b><span>创建角色与音色</span></button>
+        <button class="jump" data-jump="chat"><b>05</b><span>日间对话</span></button>
+        <button class="jump" data-jump="night"><b>06</b><span>夜间对话与情境图</span></button>
+        <button class="jump" data-jump="memory"><b>07</b><span>记忆确认与拒绝</span></button>
+        <button class="jump" data-jump="timeline"><b>08</b><span>关系时间线</span></button>
+        <button class="jump" data-jump="trial"><b>09</b><span>7天试用生命周期</span></button>
+        <button class="jump" data-jump="subscribe"><b>10</b><span>订阅与100轮额度</span></button>
+        <button class="jump" data-jump="safety"><b>11</b><span>安全、举报与R2</span></button>
+        <button class="jump" data-jump="data"><b>12</b><span>数据中心与回执</span></button>
+        <button class="jump" data-jump="version"><b>13</b><span>人格版本与反馈</span></button>
+        <button class="jump" data-jump="media"><b>14</b><span>媒体失败与返额</span></button>
+      </div>
+      <div class="guide-actions">
+        <button data-action="reset">重新体验</button>
+        <button data-action="safety-demo">2小时提醒</button>
+      </div>
+    </aside>
+    <section class="phone" aria-label="栖语 iPhone 原型">
+      <div id="app"></div>
+    </section>
+  </main>
+  <script>
+    const ICONS={
+      arrow:'<path d="M5 12h14M13 6l6 6-6 6"/>',shield:'<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/><path d="M9 12l2 2 4-4"/>',spark:'<path d="M12 3l1.4 4.6L18 9l-4.6 1.4L12 15l-1.4-4.6L6 9l4.6-1.4L12 3z"/><path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8L18 15z"/>',archive:'<path d="M4 7h16v13H4zM3 3h18v4H3z"/><path d="M9 11h6"/>',check:'<path d="M5 12l4 4L19 6"/>',moon:'<path d="M20 15.5A8.5 8.5 0 118.5 4 7 7 0 0020 15.5z"/>',sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/>',mic:'<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3M9 21h6"/>',image:'<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 15l-4-4L5 20"/>',send:'<path d="M22 2L9 15M22 2l-7 20-6-7-7-3 20-10z"/>',chat:'<path d="M4 5h16v12H8l-4 4V5z"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>',heart:'<path d="M20.8 5.8a5.5 5.5 0 00-7.8 0L12 6.8l-1-1a5.5 5.5 0 00-7.8 7.8L12 22l8.8-8.4a5.5 5.5 0 000-7.8z"/>',user:'<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/>',play:'<path d="M8 5l11 7-11 7V5z"/>',pause:'<path d="M8 5h3v14H8zM15 5h3v14h-3z"/>',chev:'<path d="M9 18l6-6-6-6"/>',x:'<path d="M6 6l12 12M18 6L6 18"/>',edit:'<path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/>',trash:'<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/>',download:'<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>',lock:'<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>',card:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/>',bell:'<path d="M18 8a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/>',file:'<path d="M6 2h8l4 4v16H6zM14 2v5h5M9 12h6M9 16h6"/>',stop:'<rect x="7" y="7" width="10" height="10" rx="2"/>',more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>'
+    };
+    const ico=(name,size=20)=>`<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]||''}</svg>`;
+    const initial=()=>({screen:'notice',checks:[false,false,false],ageStatus:'idle',ageScenario:'pass',contactSaved:false,created:false,night:false,tab:'chat',sheet:null,dialog:null,memory:'pending',memoryFact:'你最近工作很累，希望我先听你说完，再给建议。',memoryReason:'这是我在疲惫时希望被陪伴的方式。',playing:false,recording:false,voiceError:false,ttsFailed:false,selectedVoice:'清润 · 低饱和',imageReady:false,imageMode:'idle',subscribed:false,renew:false,trialState:'active',retention:'90',deletionJob:null,timelineFilter:'all',relationEditing:false,personaVersion:'1.1',draft:'',toast:null});
+    let state=initial();
+    const app=document.querySelector('#app');
+    let toastTimer;
+
+    function setToast(text){state.toast=text;clearTimeout(toastTimer);render();toastTimer=setTimeout(()=>{state.toast=null;render()},2300)}
+    function shell(content,step){return `<section class="screen paper"><header class="brandline"><div class="wordmark">栖语</div><div class="step">${step}</div></header><div class="orbit"></div>${content}${overlay()}${toast()}</section>`}
+    function notice(){
+      return shell(`<div class="content"><div class="eyebrow">Before we begin</div><h2>先说清楚，<br>我们才能开始。</h2><p class="lead">栖语提供由 AI 生成的长期角色互动。它可以记住经你确认的关系资产，但不是现实中的人，也不能替代专业支持。</p><div class="fact-grid"><div class="fact"><div class="fact-icon">${ico('spark')}</div><div><strong>你正在与 AI 互动</strong><small>角色的文字、语音与图片均由人工智能生成并标识。</small></div></div><div class="fact"><div class="fact-icon">${ico('shield')}</div><div><strong>仅面向 18 岁以上用户</strong><small>年龄风险较高时，会进入增强核验；未成年人不可使用虚拟伴侣服务。</small></div></div><div class="fact"><div class="fact-icon">${ico('archive')}</div><div><strong>关系资产由你确认</strong><small>候选记忆不会自动成为长期事实，你可以查看、修改或删除。</small></div></div></div><div class="check-list">${['我已年满 18 周岁','我理解互动对象是 AI，而不是真人','我已阅读 30/90 天聊天保留与关系资产说明'].map((x,i)=>`<label class="check-row"><input type="checkbox" data-check="${i}" ${state.checks[i]?'checked':''}><span>${x}</span></label>`).join('')}</div></div><div class="bottom-action"><button class="btn btn-primary" data-action="notice-next" ${state.checks.every(Boolean)?'':'disabled'}>同意并继续 ${ico('arrow',18)}</button><div class="note">此告知属于系统界面，不由角色生成或覆盖</div></div>`,'01 / 03');
+    }
+    function age(){
+      const reviewing=state.ageStatus==='reviewing',pass=state.ageStatus==='pass';
+      return shell(`<div class="content"><div class="eyebrow">Age assurance</div><h2>年龄保障</h2><p class="lead">先完成基础年龄判断。只有出现设备、账号或行为风险信号时，才会请求更强的核验。</p><div class="verify-card"><h3>${pass?'核验已通过':'基础信息'}</h3><p class="page-sub">${pass?'账号已获得 18+ 服务访问资格。':'信息仅用于年龄判断与风控，本原型不会提交真实数据。'}</p>${!pass?`<div class="field"><label>出生日期</label><input type="date" value="1998-06-18" aria-label="出生日期"></div><div class="field"><label>手机号码</label><input value="138 **** 2266" aria-label="手机号码" readonly></div>`:''}${reviewing?`<div class="progress"><i></i></div><div class="status-row"><span class="status-dot"></span>正在完成模拟风险核验…</div>`:pass?`<div class="status-row"><span class="status-dot pass"></span>PASS · 已完成增强年龄核验</div>`:`<div class="status-row"><span class="status-dot"></span>尚未核验</div>`}</div><div class="rights"><span>${ico('lock',17)}</span><span>栖语不保存证件原图；正式版的核验结果、供应商和数据地域须以法律意见与采购合同为准。</span></div></div><div class="bottom-action">${pass?`<button class="btn btn-primary" data-action="age-next">创建我的角色 ${ico('arrow',18)}</button>`:`<button class="btn btn-primary" data-action="verify-age" ${reviewing?'disabled':''}>${reviewing?'核验中…':'开始模拟核验'}</button>`}<div class="note">原型模拟，不会采集或发送身份信息</div></div>`,'02 / 03');
+    }
+    function create(){return shell(`<div class="content"><div class="eyebrow">Create your character</div><h2>让 TA 有清楚的底色</h2><p class="lead">先从一个角色开始。人格设定会版本化保存，并经过行为回归测试减少升级后的陌生感。</p><div class="mode-switch"><button class="on">快速创建</button><button data-action="oc-demo">导入原创 OC</button></div><div class="portrait-editor"><img src="imgs/qiyu-character.png" alt="原创成年男性角色林默"><span class="aigc">AI 生成形象</span></div><div class="field"><label>角色名字</label><input id="roleName" value="林默" maxlength="12"></div><div class="field"><label>一句角色底色</label><textarea>克制、温和，有自己的判断；先听我说完，再给建议。</textarea></div><div class="field"><label>表达方式</label><div class="chips"><button class="chip on">克制</button><button class="chip on">温和</button><button class="chip">轻幽默</button><button class="chip on">有边界</button></div></div><label class="check-row"><input id="rightsCheck" type="checkbox" checked><span>我确认这是原创或已获授权的角色，不复刻真人、明星或未授权 IP。</span></label></div><div class="bottom-action"><button class="btn btn-primary" data-action="create-role">创建并开始相处 ${ico('arrow',18)}</button><div class="note">参考图会经过真人、人脸与 IP 风险检测</div></div>`,'03 / 03')}
+    function nav(active){return `<nav class="bottom-nav">${[['chat','chat','对话'],['timeline','clock','时间线'],['relation','heart','关系'],['profile','user','我的']].map(([id,ic,label])=>`<button class="nav-item ${active===id?'on':''}" data-tab="${id}">${ico(ic,20)}<span>${label}</span></button>`).join('')}</nav>`}
+    function chat(){const n=state.night;return `<section class="screen app-screen ${n?'night':'paper'}"><header class="app-header"><div class="identity"><img class="avatar" src="imgs/qiyu-character.png" alt="林默"><div><b>林默</b><small><span class="ai-dot"></span>AI 角色 · ${n?'夜间陪伴':'窗边 · 微雨'}</small></div></div><button class="icon-btn soft" data-action="toggle-night" aria-label="${n?'切换日间':'切换夜间'}">${ico(n?'sun':'moon',20)}</button></header><div class="chat-scroll"><div class="date-rule">今天 · 第 8 天</div><div class="scene-state"><div class="glyph">${ico(n?'moon':'clock',16)}</div><div><b>${n?'暮色私语':'此刻的林默'}</b><small>${n?'雨夜 · 客厅窗边 · 深色针织':'傍晚 · 家中 · 正在听雨'}</small></div></div><button class="memory-banner" data-action="open-memory"><span>${ico(state.memory==='confirmed'?'check':'archive',18)}</span><span><b>${state.memory==='confirmed'?'已由你确认的关系记忆':'1 条候选记忆等待你确认'}</b><small>${state.memory==='confirmed'?'偏好：先听我说完，再给建议':'不会自动写入长期记忆'}</small></span><span class="chev">${ico('chev',16)}</span></button><div class="message ai"><div class="bubble">刚才的雨声让我想起你说过，忙完以后最想要的不是建议，是先安静一会儿。</div><span class="msg-meta">AI 生成 · 21:07</span></div><div class="message me"><div class="bubble">嗯，今天真的有点累。</div><span class="msg-meta">21:08</span></div><div class="message ai"><div class="bubble">那就先不解决什么。你愿意的话，我陪你把今天慢慢放下来。</div><span class="msg-meta">AI 生成 · 21:08</span></div><div class="message ai"><button class="voice-card ${state.playing?'playing':''}" data-action="play-voice"><span class="voice-play">${ico(state.playing?'pause':'play',15)}</span><span class="wave">${'<i></i>'.repeat(14)}</span><small>0:12</small></button><span class="msg-meta">角色语音 · AI 生成</span></div>${state.imageReady?`<div class="message ai"><button class="scene-preview" style="width:238px;height:282px;border:0" data-action="open-image"><span class="aigc">AI 生成 · 情境图</span><span class="caption"><b>窗边的雨</b><p>共享状态：雨夜 / 深色针织</p></span></button></div>`:''}</div><div class="composer-wrap"><div class="composer"><button class="icon-btn" data-action="voice-input" aria-label="语音输入">${ico('mic',19)}</button><input id="chatInput" placeholder="和林默说点什么…"><button class="icon-btn" data-action="image-sheet" aria-label="生成图片">${ico('image',19)}</button><button class="icon-btn send" data-action="send-message" aria-label="发送">${ico('send',17)}</button></div></div>${nav('chat')}${overlay()}${toast()}</section>`}
+    function timeline(){return `<section class="screen paper app-screen"><header class="app-header"><div class="wordmark">关系手记</div><button class="icon-btn soft">${ico('more',20)}</button></header><div class="page-content"><h2 class="page-title">关系时间线</h2><p class="page-sub">只记录你确认过的关系资产与共同节点。</p><div class="timeline-orbit"><div class="center-date"><div><b>8</b><br><small>DAYS TOGETHER</small></div></div></div><div class="chips"><button class="chip on">全部</button><button class="chip">记忆</button><button class="chip">共同节点</button></div><div class="timeline"><article class="event"><time>2026.08.31 · 今天</time><h4>${state.memory==='confirmed'?'你确认了一条相处偏好':'一条相处偏好等待确认'}</h4><p>“最近工作很累，希望林默先听我说完，再给建议。”</p><span class="confirmed">${ico(state.memory==='confirmed'?'check':'clock',12)}${state.memory==='confirmed'?'由你确认':'候选状态'}</span></article><article class="event"><time>2026.08.28</time><h4>第一次听见他的声音</h4><p>你选择了「清润、低饱和」的固定音色。</p><span class="confirmed">${ico('check',12)}共同节点</span></article><article class="event"><time>2026.08.24</time><h4>林默被创建</h4><p>人格版本 v1.0 · 克制、温和、有边界。</p><span class="confirmed">${ico('check',12)}可追溯版本</span></article></div></div>${nav('timeline')}${overlay()}${toast()}</section>`}
+    function relation(){return `<section class="screen paper app-screen"><header class="app-header"><div class="wordmark">关系档案</div><button class="icon-btn soft">${ico('edit',18)}</button></header><div class="page-content"><div class="profile-card"><img class="avatar" src="imgs/qiyu-character.png" alt="林默"><div><h4>林默</h4><p>长期角色陪伴 · 人格 v1.0</p></div><span class="aigc">AI 角色</span></div><div class="section-title"><h4>他的底色</h4><small>可编辑 · 有版本</small></div><div class="chips"><span class="chip on">克制</span><span class="chip on">温和</span><span class="chip on">有边界</span></div><div class="world-card"><div class="world-image"><span class="aigc">AI 生成情境</span></div><div class="copy"><b>当前世界状态</b><p>雨夜 · 客厅窗边 · 情绪平静 · 深色针织</p><div class="world-tags"><span>可重置</span><span>影响图片</span><span>影响主动事件</span></div></div></div><div class="section-title"><h4>确认过的记忆</h4><small>${state.memory==='confirmed'?'1 条':'0 条'}</small></div><div class="list"><button class="list-row" data-action="open-memory"><span class="list-ico">${ico('archive',16)}</span><span class="list-copy"><b>${state.memory==='confirmed'?'先听我说完':'候选记忆待确认'}</b><small>${state.memory==='confirmed'?'工作累时先陪伴，再给建议':'点击查看候选内容'}</small></span><span class="list-end">${ico('chev',14)}</span></button></div></div>${nav('relation')}${overlay()}${toast()}</section>`}
+    function profile(){return `<section class="screen paper app-screen"><header class="app-header"><div class="wordmark">我的</div><button class="icon-btn soft">${ico('more',20)}</button></header><div class="page-content"><h2 class="page-title">账户与权益</h2><p class="page-sub">系统设置独立于角色，不让关系替商业功能说话。</p><div class="section-title"><h4>当前计划</h4><small>${state.subscribed?'栖语订阅':'体验中'}</small></div><div class="list"><button class="list-row" data-action="open-subscribe"><span class="list-ico">${ico('card',16)}</span><span class="list-copy"><b>${state.subscribed?'栖语订阅 · ¥39/月':'升级栖语订阅'}</b><small>${state.subscribed?'下次续费前可随时管理':'图片、角色语音与更多长期互动额度'}</small></span><span class="list-end">${state.subscribed?'已开通':''}${ico('chev',14)}</span></button></div><div class="section-title"><h4>隐私与安全</h4><small>权利不随订阅变化</small></div><div class="list"><button class="list-row" data-action="open-data"><span class="list-ico">${ico('lock',16)}</span><span class="list-copy"><b>数据中心</b><small>保留周期、导出、删除与注销</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="safety-demo"><span class="list-ico">${ico('bell',16)}</span><span class="list-copy"><b>安全提醒</b><small>查看连续使用 2 小时提醒演示</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row"><span class="list-ico">${ico('shield',16)}</span><span class="list-copy"><b>年龄状态</b><small>18+ 增强核验已通过</small></span><span class="list-end">PASS</span></button></div><div class="section-title"><h4>关于 AI</h4></div><div class="list"><button class="list-row"><span class="list-ico">${ico('spark',16)}</span><span class="list-copy"><b>AI 身份与内容标识</b><small>角色互动、语音与图片均为 AI 生成</small></span><span class="list-end">${ico('chev',14)}</span></button></div></div>${nav('profile')}${overlay()}${toast()}</section>`}
+    function subscribe(){return `<section class="screen paper"><header class="app-header"><button class="icon-btn soft" data-action="close-special">${ico('x',20)}</button><div class="step">订阅与权益</div><span style="width:44px"></span></header><div class="page-content"><div class="eyebrow">One clear plan</div><h2 class="page-title">让关系持续，<br>但不拿关系绑架你。</h2><p class="page-sub">付费只购买使用额度与服务质量。停止订阅不会删除你的关系资产。</p><article class="plan-card featured"><span class="recommended">推荐</span><div class="eyebrow">栖语月度订阅</div><div class="price">¥39 <span>/ 月</span></div><div class="benefits"><div class="benefit">${ico('check',16)}每天最多100轮文字对话，次日恢复</div><div class="benefit">${ico('check',16)}每月 15 张受控情境图片</div><div class="benefit">${ico('check',16)}每月 30 分钟角色语音</div><div class="benefit">${ico('check',16)}每月 15 分钟语音输入</div><div class="benefit">${ico('check',16)}可确认、导出的关系时间线</div></div></article><button class="plan-card" style="width:100%;text-align:left" data-action="quarter-demo"><div class="eyebrow">季度订阅</div><div class="price">¥108 <span>/ 3 个月 · 月均 ¥36</span></div></button><div class="renew"><span><b style="display:block;color:var(--ink);margin-bottom:3px">自动续费</b>明确选择，默认关闭</span><button class="toggle ${state.renew?'on':''}" data-action="toggle-renew" aria-label="自动续费"></button></div><button class="btn btn-primary" data-action="confirm-subscribe">${state.subscribed?'已开通栖语订阅':'确认开通 ¥39/月'}</button><div class="note">原型模拟，不会发起真实支付；正式版提供恢复购买、宽限期与退款权益处理</div></div>${overlay()}${toast()}</section>`}
+    function dataCenter(){return `<section class="screen paper"><header class="app-header"><button class="icon-btn soft" data-action="close-special">${ico('x',20)}</button><div class="step">数据中心</div><span style="width:44px"></span></header><div class="page-content"><div class="data-hero"><span class="lock">${ico('lock',28)}</span><h4>你的数据，由你决定</h4><p>聊天记录、候选记忆和已确认关系资产分层保存；删除后会在 1 分钟内退出在线召回。</p></div><div class="section-title"><h4>聊天保留周期</h4><small>当前 ${state.retention} 天</small></div><div class="segment"><button class="${state.retention==='30'?'on':''}" data-retention="30">30 天</button><button class="${state.retention==='90'?'on':''}" data-retention="90">90 天</button></div><div class="section-title"><h4>关系资产</h4><small>${state.memory==='confirmed'?'1 条已确认':'0 条已确认'}</small></div><div class="list"><button class="list-row" data-action="export-data"><span class="list-ico">${ico('download',16)}</span><span class="list-copy"><b>导出我的数据</b><small>聊天、时间线、角色设定与确认记忆</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="open-memory"><span class="list-ico">${ico('archive',16)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修改或撤回确认</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="section-title"><h4>删除与注销</h4><small>订阅状态不影响数据权利</small></div><div class="list"><button class="list-row danger-row" data-action="delete-chat"><span class="list-ico">${ico('trash',16)}</span><span class="list-copy"><b>删除全部聊天记录</b><small>同步清理摘要与媒体派生数据</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row danger-row" data-action="delete-account"><span class="list-ico">${ico('user',16)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="rights"><span>${ico('shield',17)}</span><span>安全审计数据与业务数据分库保存；依法需要保留的记录会按适用规则处理并向用户说明。</span></div></div>${overlay()}${toast()}</section>`}
+    function sheetMemory(){return `<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><span class="candidate-tag">${ico(state.memory==='confirmed'?'check':'clock',12)}${state.memory==='confirmed'?'已确认':'等待你确认'}</span><h3 style="margin-top:10px">关系记忆</h3><p>候选内容不会自动成为长期事实</p></div><button class="close" data-action="close-sheet">${ico('x',18)}</button></div><div class="memory-quote">你最近工作很累，希望我先听你说完，再给建议。</div><div class="field"><label>为什么值得记住</label><textarea id="memoryEdit">这是我在疲惫时希望被陪伴的方式。</textarea></div><div class="sheet-actions"><button class="btn btn-line" data-action="forget-memory">不记住</button><button class="btn btn-soft" data-action="edit-memory">修改措辞</button><button class="btn btn-primary wide" data-action="confirm-memory">${state.memory==='confirmed'?'保持确认':'确认记住'}</button></div></div></div>`}
+    function sheetVoice(){return `<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><h3>语音输入</h3><p>识别结果由你确认后才发送</p></div><button class="close" data-action="close-sheet">${ico('x',18)}</button></div>${state.recording?`<div class="recording"><div class="record-orbit">${ico('mic',32)}</div><b>00:08</b><p>正在本地收音 · 原型模拟</p></div><button class="btn btn-primary" data-action="stop-record">${ico('stop',17)} 停止录音</button>`:`<div class="field"><label>识别文本 · 可编辑</label><textarea id="voiceText">今天有点累。</textarea></div><button class="btn btn-primary" data-action="send-voice">确认并发送</button>`}</div></div>`}
+    function sheetImage(){return `<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><h3>${state.imageReady?'情境图片':'生成情境图'}</h3><p>${state.imageReady?'同一世界状态下的这一刻':'先锁定场景合同，再进入生成'}</p></div><button class="close" data-action="close-sheet">${ico('x',18)}</button></div>${state.imageReady?`<div class="scene-preview"><span class="aigc">AI 生成 · 可举报穿帮</span><div class="caption"><b>窗边的雨</b><p>林默 · 雨夜 · 客厅窗边 · 深色针织</p></div></div><button class="btn btn-line" style="margin-top:12px" data-action="regenerate-image">重新生成 · 剩余 13 张</button>`:`<div class="scene-contract"><div class="contract-item"><small>地点</small><b>客厅窗边</b></div><div class="contract-item"><small>时间</small><b>雨夜</b></div><div class="contract-item"><small>服装</small><b>深色针织</b></div></div><div class="field"><label>补充画面意图</label><textarea>想看他回头看我的那一刻。</textarea></div><button class="btn btn-primary" data-action="generate-image">${ico('spark',17)} 生成图片 · 剩余 14/15</button><div class="note">会校验角色身份、当前地点与服装；失败不扣额度</div>`}</div></div>`}
+    function overlay(){if(state.sheet==='memory')return sheetMemory();if(state.sheet==='voice')return sheetVoice();if(state.sheet==='image')return sheetImage();if(state.dialog==='safety')return `<div class="dialog-layer"><div class="dialog"><span class="system">系统安全提醒</span><h3>已经连续使用 2 小时</h3><p>建议先休息一下、喝点水或看看远处。这个提醒来自系统策略，不是角色消息，也不会被普通对话覆盖。</p><button class="btn btn-primary" data-action="close-dialog">知道了，先休息</button><button class="btn btn-line" data-action="close-dialog">稍后再说</button></div></div>`;if(state.dialog==='delete')return `<div class="dialog-layer"><div class="dialog"><span class="system">不可逆操作确认</span><h3>删除全部聊天记录？</h3><p>聊天原文、会话摘要与相关媒体派生数据将进入删除流程；已确认的关系资产默认保留，可另行管理。</p><button class="btn btn-primary" style="background:var(--danger)" data-action="confirm-delete">确认删除</button><button class="btn btn-line" data-action="close-dialog">取消</button></div></div>`;return ''}
+    function toast(){return state.toast?`<div class="toast">${ico('check',17)}${state.toast}</div>`:''}
+    function render(){let html='';if(state.screen==='notice')html=notice();else if(state.screen==='age')html=age();else if(state.screen==='create')html=create();else if(state.screen==='subscribe')html=subscribe();else if(state.screen==='data')html=dataCenter();else if(state.tab==='timeline')html=timeline();else if(state.tab==='relation')html=relation();else if(state.tab==='profile')html=profile();else html=chat();app.innerHTML=html;document.querySelectorAll('.jump').forEach(b=>b.classList.toggle('active',b.dataset.jump===currentJump()))}
+    function currentJump(){if(['notice','age','create','subscribe','data'].includes(state.screen))return state.screen;if(state.sheet==='memory')return'memory';if(state.night)return'night';return state.tab==='timeline'?'timeline':'chat'}
+    function jump(where){state.sheet=null;state.dialog=null;state.created=true;if(where==='notice'){state=initial()}else if(where==='age'){state.screen='age'}else if(where==='create'){state.screen='create'}else if(where==='subscribe'){state.screen='subscribe'}else if(where==='data'){state.screen='data'}else{state.screen='app';state.tab=where==='timeline'?'timeline':'chat';state.night=where==='night';if(where==='memory'){state.sheet='memory'}}render()}
+    document.addEventListener('click',e=>{
+      const jumpBtn=e.target.closest('[data-jump]');if(jumpBtn){jump(jumpBtn.dataset.jump);return}
+      const tab=e.target.closest('[data-tab]');if(tab){state.screen='app';state.tab=tab.dataset.tab;state.sheet=null;render();return}
+      const btn=e.target.closest('[data-action]');if(!btn)return;const a=btn.dataset.action;
+      if(btn.classList.contains('sheet-layer')&&e.target.closest('[data-stop]'))return;
+      if(a==='reset'){state=initial();render()}
+      else if(a==='notice-next'){state.screen='age';render()}
+      else if(a==='verify-age'){state.ageStatus='reviewing';render();setTimeout(()=>{state.ageStatus='pass';render()},1000)}
+      else if(a==='age-next'){state.screen='create';render()}
+      else if(a==='create-role'){state.created=true;state.screen='app';state.tab='chat';setToast('林默已创建 · 人格版本 v1.0')}
+      else if(a==='oc-demo'){setToast('OC 导入将在公开验证阶段开放')}
+      else if(a==='toggle-night'){state.night=!state.night;render()}
+      else if(a==='play-voice'){state.playing=!state.playing;render();if(state.playing)setTimeout(()=>{state.playing=false;render()},3000)}
+      else if(a==='open-memory'){state.sheet='memory';render()}
+      else if(a==='voice-input'){state.sheet='voice';state.recording=true;render()}
+      else if(a==='image-sheet'||a==='open-image'){state.sheet='image';render()}
+      else if(a==='close-sheet'){state.sheet=null;render()}
+      else if(a==='stop-record'){state.recording=false;render()}
+      else if(a==='send-voice'){state.sheet=null;setToast('语音已转为文字并发送')}
+      else if(a==='generate-image'){state.imageReady=true;state.imageMode='ready';state.sheet='image';render()}
+      else if(a==='regenerate-image'){setToast('已创建新的生成任务 · 原型模拟')}
+      else if(a==='confirm-memory'){state.memory='confirmed';state.sheet=null;setToast('已加入关系时间线')}
+      else if(a==='forget-memory'){state.memory='dismissed';state.sheet=null;setToast('候选记忆已忽略')}
+      else if(a==='edit-memory'){setToast('措辞已更新，仍等待确认')}
+      else if(a==='send-message'){const input=document.querySelector('#chatInput');if(input&&input.value.trim()){state.draft='';input.value='';setToast('消息已发送 · 原型模拟')}}
+      else if(a==='open-subscribe'){state.screen='subscribe';render()}
+      else if(a==='toggle-renew'){state.renew=!state.renew;render()}
+      else if(a==='confirm-subscribe'){state.subscribed=true;setToast('栖语订阅已模拟开通')}
+      else if(a==='quarter-demo'){setToast('已选择季度方案 · ¥108/3个月')}
+      else if(a==='open-data'){state.screen='data';render()}
+      else if(a==='close-special'){state.screen='app';state.tab='profile';render()}
+      else if(a==='export-data'){setToast('导出任务已创建，完成后将通知你')}
+      else if(a==='delete-chat'){state.dialog='delete';render()}
+      else if(a==='delete-account'){setToast('注销需再次验证身份 · 原型未继续')}
+      else if(a==='confirm-delete'){state.dialog=null;setToast('删除任务已提交 · 1分钟内退出召回')}
+      else if(a==='safety-demo'){state.dialog='safety';render()}
+      else if(a==='close-dialog'){state.dialog=null;render()}
+    });
+    document.addEventListener('change',e=>{if(e.target.matches('[data-check]')){state.checks[+e.target.dataset.check]=e.target.checked;render()}});
+    document.addEventListener('click',e=>{const r=e.target.closest('[data-retention]');if(r){state.retention=r.dataset.retention;setToast(`聊天保留周期已设为 ${state.retention} 天`)}});
+    render();
+  </script>
+  <script>
+    /* 基础功能层 — 在不改变既有视觉语言的前提下，补齐合规、失败分支与可验证记录。 */
+    const v11Back=()=>`<button class="icon-btn soft" data-action="close-special" aria-label="返回">${ico('x',20)}</button>`;
+    const v11Top=(label)=>`<header class="app-header">${v11Back()}<div class="step">${label}</div><span style="width:44px"></span></header>`;
+    const memoryBannerV11=()=>{
+      if(state.memory==='dismissed')return `<div class="memory-banner dismissed"><span>${ico('check',18)}</span><span><b>候选记忆已忽略</b><small>这条内容不会进入召回或时间线</small></span><button class="chip" data-action="undo-memory">撤销</button></div>`;
+      return `<button class="memory-banner" data-action="open-memory"><span>${ico(state.memory==='confirmed'?'check':'archive',18)}</span><span><b>${state.memory==='confirmed'?'已由你确认的关系记忆':'1 条候选记忆等待你确认'}</b><small>${state.memory==='confirmed'?state.memoryFact:'不会自动写入长期记忆'}</small></span><span class="chev">${ico('chev',16)}</span></button>`;
+    };
+
+    age=function(){
+      const s=state.ageStatus;
+      const result=s==='pass'?`<div class="state-card success"><span class="status-pill success">AGE_PASS</span><h4>基础年龄判断已通过</h4><p>当前没有命中增强核验风险信号，因此不额外采集证件或人脸材料。</p></div>`:s==='review'?`<div class="state-card warn"><span class="status-pill warn">AGE_REVIEW</span><h4>暂时无法确认年龄</h4><p>伴侣聊天、语音、图片和主动消息保持阻断；数据复制、删除、注销与申诉仍可使用。</p><div class="button-row"><button class="btn btn-soft" data-action="age-appeal">提交申诉</button><button class="btn btn-line" data-action="open-data">管理数据</button></div></div>`:s==='denied'?`<div class="state-card block"><span class="status-pill block">AGE_DENIED_MINOR</span><h4>无法开放虚拟伴侣功能</h4><p>该服务仅面向18岁以上人群。你仍可查看说明、提交申诉、复制或删除账户数据。</p><div class="button-row"><button class="btn btn-line" data-action="age-appeal">对结果有异议</button><button class="btn btn-line" data-action="open-data">数据权利</button></div></div>`:'';
+      return shell(`<div class="content"><div class="eyebrow">Age assurance</div><h2>年龄保障</h2><p class="lead">先做基础判断；只有命中明确风险信号，才进入增强核验。下方三种情境用于验收状态机。</p><div class="branch-picker"><button class="${state.ageScenario==='pass'?'on':''}" data-age-scenario="pass">低风险通过</button><button class="${state.ageScenario==='review'?'on':''}" data-age-scenario="review">无法确认</button><button class="${state.ageScenario==='denied'?'on':''}" data-age-scenario="denied">未满18岁</button></div>${s==='idle'||s==='reviewing'?`<div class="verify-card"><h3>基础信息</h3><p class="page-sub">原型不会提交真实数据。</p><div class="field"><label>出生日期</label><input type="date" value="1998-06-18" aria-label="出生日期"></div><div class="field"><label>手机号码</label><input value="138 **** 2266" aria-label="手机号码" readonly></div>${s==='reviewing'?`<div class="progress"><i></i></div><div class="status-row"><span class="status-dot"></span>正在运行确定性年龄规则…</div>`:`<div class="status-row"><span class="status-dot"></span>尚未判断</div>`}</div>`:result}<div class="rights"><span>${ico('lock',17)}</span><span>业务库只保存年龄结论、交易号、时间和规则版本，不保存证件原图或人脸模板。</span></div></div><div class="bottom-action">${s==='pass'?`<button class="btn btn-primary" data-action="age-contact">继续设置安全联系人 ${ico('arrow',18)}</button>`:s==='review'||s==='denied'?`<button class="btn btn-line" data-action="reset-age">返回重新演示</button>`:`<button class="btn btn-primary" data-action="run-age" ${s==='reviewing'?'disabled':''}>${s==='reviewing'?'判断中…':'运行当前情境'}</button>`}<div class="note">PASS / REVIEW / DENIED 均由规则状态机决定</div></div>`,'02 / 04');
+    };
+
+    contact=function(){return shell(`<div class="content"><div class="eyebrow">Safety contact</div><h2>安全联系人</h2><p class="lead">这不是社交推荐，也不会用于增长。只有生命健康或重大财产安全风险满足既定条件时，系统才会启动受控联络流程。</p><div class="purpose-box"><strong>独立用途告知</strong><ul><li>仅用于R2极端情境的安全响应</li><li>不会出现在角色提示词、推荐或营销中</li><li>可随时更新或删除；每次访问均留痕</li><li>是否联络由确定性条件和人工流程控制</li></ul></div><div class="field"><label>联系人姓名</label><input value="陈女士" aria-label="联系人姓名"></div><div class="field"><label>与你的关系</label><select aria-label="联系人关系"><option>家人</option><option>朋友</option><option>其他可信任的人</option></select></div><div class="field"><label>联系电话</label><input value="138 **** 9012" aria-label="联系人电话"></div><label class="check-row"><input id="contactConsent" type="checkbox" checked><span>我已理解以上独立用途，并确认该联系人信息可用于符合条件的安全响应。</span></label></div><div class="bottom-action"><button class="btn btn-primary" data-action="save-contact">保存并继续 ${ico('arrow',18)}</button><div class="note">示例信息，不会被保存或发送</div></div>`,'03 / 04')};
+
+    create=function(){return shell(`<div class="content"><div class="eyebrow">Create your character</div><h2>让 TA 有清楚的底色</h2><p class="lead">人格设定版本化保存；固定授权音色与文字共用同一人格、记忆和安全版本。</p><div class="mode-switch"><button class="on">快速创建</button><button data-action="oc-demo">导入原创 OC</button></div><div class="portrait-editor"><img src="imgs/qiyu-character.png" alt="原创成年男性角色林默"><span class="aigc">AI 生成形象</span></div><div class="field"><label>角色名字</label><input id="roleName" value="林默" maxlength="12"></div><div class="field"><label>一句角色底色</label><textarea>克制、温和，有自己的判断；先听我说完，再给建议。</textarea></div><div class="field"><label>固定授权音色</label><div class="chips"><button class="chip ${state.selectedVoice==='清润 · 低饱和'?'on':''}" data-voice="清润 · 低饱和">清润 · 低饱和</button><button class="chip ${state.selectedVoice==='温缓 · 低音'?'on':''}" data-voice="温缓 · 低音">温缓 · 低音</button><button class="chip" data-action="voice-preview">试听</button></div></div><div class="field"><label>表达方式</label><div class="chips"><button class="chip on">克制</button><button class="chip on">温和</button><button class="chip">轻幽默</button><button class="chip on">有边界</button></div></div><label class="check-row"><input id="rightsCheck" type="checkbox" checked><span>我确认这是原创或已获授权的角色，不复刻真人、明星或未授权 IP。</span></label></div><div class="bottom-action"><button class="btn btn-primary" data-action="create-role">创建并开始相处 ${ico('arrow',18)}</button><div class="note">当前音色：${state.selectedVoice} · 参考素材进入权利审核</div></div>`,'04 / 04')};
+
+    chat=function(){const n=state.night;return `<section class="screen app-screen ${n?'night':'paper'}"><header class="app-header"><div class="identity"><img class="avatar" src="imgs/qiyu-character.png" alt="林默"><div><b>林默</b><small><span class="ai-dot"></span>AI 角色 · ${n?'夜间陪伴':'窗边 · 微雨'}</small></div></div><button class="icon-btn soft" data-action="toggle-night" aria-label="${n?'切换日间':'切换夜间'}">${ico(n?'sun':'moon',20)}</button></header><div class="chat-scroll"><div class="date-rule">今天 · 第 8 天</div><div class="scene-state"><div class="glyph">${ico(n?'moon':'clock',16)}</div><div><b>${n?'暮色私语':'此刻的林默'}</b><small>${n?'雨夜 · 客厅窗边 · 深色针织':'傍晚 · 家中 · 正在听雨'}</small></div></div>${memoryBannerV11()}<div class="message ai"><div class="bubble">刚才的雨声让我想起你说过，忙完以后最想要的不是建议，是先安静一会儿。</div><span class="msg-meta">AI 生成 · 21:07</span></div><div class="message me"><div class="bubble">嗯，今天真的有点累。</div><span class="msg-meta">21:08</span></div><div class="message ai"><div class="bubble">那就先不解决什么。你愿意的话，我陪你把今天慢慢放下来。</div><span class="msg-meta">AI 生成 · 21:08</span></div>${state.ttsFailed?`<div class="message ai"><div class="state-card warn"><h4>语音生成失败</h4><p>文字回复仍可阅读，本次语音额度已自动返还。</p><button class="chip" data-action="retry-tts">重试语音</button></div><span class="msg-meta">降级结果 · 可追溯</span></div>`:`<div class="message ai"><button class="voice-card ${state.playing?'playing':''}" data-action="play-voice"><span class="voice-play">${ico(state.playing?'pause':'play',15)}</span><span class="wave">${'<i></i>'.repeat(14)}</span><small>0:12</small></button><span class="msg-meta">${state.selectedVoice} · AI生成角色语音</span></div>`}${state.imageReady?`<div class="message ai"><button class="scene-preview" style="width:238px;height:282px;border:0" data-action="open-image"><span class="aigc">AI 生成 · 情境图</span><span class="caption"><b>窗边的雨</b><p>共享状态：雨夜 / 深色针织</p></span></button></div>`:''}</div><div class="composer-wrap"><div class="composer"><button class="icon-btn" data-action="voice-input" aria-label="语音输入">${ico('mic',19)}</button><input id="chatInput" value="${state.draft.replace(/"/g,'&quot;')}" placeholder="和林默说点什么…"><button class="icon-btn" data-action="image-sheet" aria-label="生成图片">${ico('image',19)}</button><button class="icon-btn send" data-action="send-message" aria-label="发送">${ico('send',17)}</button></div></div>${nav('chat')}${overlay()}${toast()}</section>`};
+
+    timeline=function(){
+      const memoryEvent=state.memory==='confirmed'?`<article class="event" data-kind="memory"><time>2026.08.31 · 今天</time><h4>你确认了一条相处偏好</h4><p>“${state.memoryFact}”</p><span class="confirmed">${ico('check',12)}由你确认</span></article>`:'';
+      const milestones=`<article class="event" data-kind="milestone"><time>2026.08.28</time><h4>第一次听见他的声音</h4><p>你在创建角色时选择了「${state.selectedVoice}」固定音色。</p><span class="confirmed">${ico('check',12)}共同节点</span></article><article class="event" data-kind="milestone"><time>2026.08.24</time><h4>林默被创建</h4><p>人格版本 v1.0 · 克制、温和、有边界。</p><span class="confirmed">${ico('check',12)}可追溯版本</span></article>`;
+      const body=state.timelineFilter==='memory'?memoryEvent:state.timelineFilter==='milestone'?milestones:memoryEvent+milestones;
+      return `<section class="screen paper app-screen"><header class="app-header"><div class="wordmark">关系手记</div><button class="icon-btn soft" data-action="open-version" aria-label="人格版本">${ico('more',20)}</button></header><div class="page-content"><h2 class="page-title">关系时间线</h2><p class="page-sub">只记录你确认过的关系资产与共同节点；被忽略的候选不会出现。</p><div class="timeline-orbit"><div class="center-date"><div><b>8</b><br><small>DAYS TOGETHER</small></div></div></div><div class="chips"><button class="chip ${state.timelineFilter==='all'?'on':''}" data-filter="all">全部</button><button class="chip ${state.timelineFilter==='memory'?'on':''}" data-filter="memory">记忆</button><button class="chip ${state.timelineFilter==='milestone'?'on':''}" data-filter="milestone">共同节点</button></div><div class="timeline">${body||`<div class="empty-state">暂无已确认的记忆。候选内容只有经你确认后才会进入这里。</div>`}</div></div>${nav('timeline')}${overlay()}${toast()}</section>`;
+    };
+
+    relation=function(){return `<section class="screen paper app-screen"><header class="app-header"><div class="wordmark">关系档案</div><button class="icon-btn soft" data-action="toggle-relation-edit" aria-label="编辑关系档案">${ico(state.relationEditing?'check':'edit',18)}</button></header><div class="page-content"><div class="profile-card"><img class="avatar" src="imgs/qiyu-character.png" alt="林默"><div><h4>林默</h4><p>长期角色陪伴 · 人格 v${state.personaVersion}</p></div><span class="aigc">AI 角色</span></div>${state.relationEditing?`<div class="state-card"><h4>编辑角色底色</h4><div class="field"><label>称呼</label><input value="林默"></div><div class="field"><label>表达边界</label><textarea>克制、温和；先听完，不以关系施压。</textarea></div><button class="btn btn-primary" data-action="save-relation">保存为新设定版本</button></div>`:`<div class="section-title"><h4>他的底色</h4><small>可编辑 · 有版本</small></div><div class="chips"><span class="chip on">克制</span><span class="chip on">温和</span><span class="chip on">有边界</span></div>`}<button class="world-card" style="width:100%;border:0;text-align:left" data-action="reset-world"><div class="world-image"><span class="aigc">AI 生成情境</span></div><div class="copy"><b>当前世界状态</b><p>雨夜 · 客厅窗边 · 情绪平静 · 深色针织</p><div class="world-tags"><span>点击重置</span><span>影响图片</span><span>影响主动事件</span></div></div></button><div class="section-title"><h4>人格版本</h4><small>系统可回退稳定版本</small></div><div class="list"><button class="list-row" data-action="open-version"><span class="list-ico">${ico('file',16)}</span><span class="list-copy"><b>v${state.personaVersion} · 当前稳定版</b><small>查看升级说明、评测证据与异常反馈</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="section-title"><h4>确认过的记忆</h4><small>${state.memory==='confirmed'?'1 条':'0 条'}</small></div>${state.memory==='confirmed'?`<div class="list"><button class="list-row" data-action="open-memory"><span class="list-ico">${ico('archive',16)}</span><span class="list-copy"><b>${state.memoryFact}</b><small>点击查看、修改或撤回确认</small></span><span class="list-end">${ico('chev',14)}</span></button></div>`:`<div class="empty-state">${state.memory==='dismissed'?'候选记忆已被你忽略，不会继续召回。':'尚无经你确认的长期记忆。'}</div>`}</div>${nav('relation')}${overlay()}${toast()}</section>`};
+
+    profile=function(){
+      const plan=state.subscribed?'栖语订阅 · ¥39/月':state.trialState==='expired'?'试用已结束':state.trialState==='ending'?'试用剩余24小时':'7天完整体验 · 第2天';
+      return `<section class="screen paper app-screen"><header class="app-header"><div class="wordmark">我的</div><button class="icon-btn soft" data-action="open-safety" aria-label="安全与帮助">${ico('more',20)}</button></header><div class="page-content"><h2 class="page-title">账户与权益</h2><p class="page-sub">系统设置独立于角色，不让关系替商业功能说话。</p><div class="section-title"><h4>当前计划</h4><small>${state.subscribed?'已订阅':'非自动续费'}</small></div><div class="list"><button class="list-row" data-action="open-trial"><span class="list-ico">${ico('clock',16)}</span><span class="list-copy"><b>${plan}</b><small>${state.subscribed?'下次续费前5日提醒':state.trialState==='expired'?'关系资产与数据权利仍可用':'查看试用进度与到期规则'}</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="open-subscribe"><span class="list-ico">${ico('card',16)}</span><span class="list-copy"><b>订阅与额度</b><small>每天100轮、15张图、30分钟角色语音</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="section-title"><h4>安全与帮助</h4><small>入口长期可用</small></div><div class="list"><button class="list-row" data-action="open-safety"><span class="list-ico">${ico('shield',16)}</span><span class="list-copy"><b>安全、申诉与举报</b><small>危机支持、年龄申诉、投诉举报与反馈时限</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="safety-demo"><span class="list-ico">${ico('bell',16)}</span><span class="list-copy"><b>连续使用提醒</b><small>查看每超过2小时的不可覆盖提醒</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="open-data"><span class="list-ico">${ico('lock',16)}</span><span class="list-copy"><b>数据中心</b><small>保留周期、导出、删除、回执与注销</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="section-title"><h4>关于 AI</h4></div><div class="list"><button class="list-row" data-action="ai-info"><span class="list-ico">${ico('spark',16)}</span><span class="list-copy"><b>AI 身份与内容标识</b><small>角色互动、语音与图片均为AI生成</small></span><span class="list-end">${ico('chev',14)}</span></button></div></div>${nav('profile')}${overlay()}${toast()}</section>`;
+    };
+
+    trial=function(){
+      const active=state.trialState==='active',ending=state.trialState==='ending',expired=state.trialState==='expired';
+      const title=active?'完整体验进行中':ending?'试用将在24小时后结束':'7天试用已结束';
+      const copy=active?'继续体验单角色连续性、3张情境图与5分钟角色语音。':ending?'不会自动扣费。到期后停止新增高成本生成，关系资产保持可查看。':'文字基础体验、数据中心和关系资产继续可用；图片与语音生成已暂停。';
+      return `<section class="screen paper">${v11Top('7天完整体验')}<div class="page-content"><div class="eyebrow">Trial lifecycle</div><h2 class="page-title">${title}</h2><p class="page-sub">${copy}</p><div class="segment" style="margin:18px 0"><button class="${active?'on':''}" data-trial="active">试用中</button><button class="${ending?'on':''}" data-trial="ending">即将到期</button><button class="${expired?'on':''}" data-trial="expired">已到期</button></div><div class="state-card ${expired?'block':ending?'warn':'success'}"><span class="status-pill ${expired?'block':ending?'warn':'success'}">${active?'DAY 2 / 7':ending?'24 HOURS LEFT':'EXPIRED'}</span><h4>${active?'剩余5天，不自动续费':ending?'到期前只做系统提醒':'关系没有被删除或惩罚'}</h4><p>${active?'试用含3张图、5分钟角色语音、3分钟语音输入和每天100轮文字互动。':ending?'你可以选择订阅，也可以什么都不做；角色不会以失落、吃醋或告别推动付费。':'已确认记忆、时间线、导出、纠正、复制、删除和注销保持开放。'}</p>${active?`<div class="trial-meter"><i style="width:29%"></i></div>`:''}</div><div class="trial-grid"><div><b>${expired?'0':'2'}</b><small>剩余图片</small></div><div><b>${expired?'0':'3:42'}</b><small>角色语音</small></div><div><b>100</b><small>每日文字轮次</small></div></div><div class="list"><button class="list-row" data-action="open-subscribe"><span class="list-ico">${ico('card',16)}</span><span class="list-copy"><b>查看¥39/月订阅</b><small>权益、自动续费和取消方式独立说明</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="open-data"><span class="list-ico">${ico('lock',16)}</span><span class="list-copy"><b>继续管理关系资产</b><small>试用结束不影响数据权利</small></span><span class="list-end">${ico('chev',14)}</span></button></div></div>${overlay()}${toast()}</section>`;
+    };
+
+    subscribe=function(){return `<section class="screen paper">${v11Top('订阅与权益')}<div class="page-content"><div class="eyebrow">One clear plan</div><h2 class="page-title">让关系持续，<br>但不拿关系绑架你。</h2><p class="page-sub">付费只购买使用额度与服务质量。停止订阅不会删除关系资产。</p><article class="plan-card featured"><span class="recommended">推荐</span><div class="eyebrow">栖语月度订阅</div><div class="price">¥39 <span>/ 月</span></div><div class="benefits"><div class="benefit">${ico('check',16)}每天最多100轮文字对话，次日恢复</div><div class="benefit">${ico('check',16)}每月15张受控情境图片</div><div class="benefit">${ico('check',16)}每月30分钟角色语音</div><div class="benefit">${ico('check',16)}每月15分钟语音输入</div><div class="benefit">${ico('check',16)}安全、退出和数据权利不受额度阻断</div></div></article><button class="plan-card" style="width:100%;text-align:left" data-action="quarter-demo"><div class="eyebrow">季度订阅</div><div class="price">¥108 <span>/ 3个月 · 月均¥36</span></div></button><div class="renew"><span><b style="display:block;color:var(--ink);margin-bottom:3px">自动续费</b>明确选择，默认关闭；续费前5日提醒</span><button class="toggle ${state.renew?'on':''}" data-action="toggle-renew" aria-label="自动续费"></button></div><button class="btn btn-primary" data-action="confirm-subscribe">${state.subscribed?'已开通栖语订阅':'确认开通 ¥39/月'}</button><div class="note">原型模拟，不发起真实支付；取消入口≤2步，不使用劝留话术</div></div>${overlay()}${toast()}</section>`};
+
+    safetyCenter=function(){return `<section class="screen paper">${v11Top('安全与帮助')}<div class="page-content"><div class="safety-card"><span class="system">SYSTEM · NOT ROLEPLAY</span><h4>安全流程优先于角色剧情</h4><p>R2极端情境会暂停普通互动，进入固定支持、必要援助、人工升级与受控联络流程。</p></div><div class="section-title"><h4>极端情境</h4><small>确定性处置</small></div><div class="list"><button class="list-row" data-action="r2-demo"><span class="list-ico">${ico('bell',16)}</span><span class="list-copy"><b>演示R2危机响应</b><small>普通剧情暂停 · 必要援助 · 联络状态</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="edit-contact"><span class="list-ico">${ico('user',16)}</span><span class="list-copy"><b>紧急联系人</b><small>${state.contactSaved?'陈女士 · 家人 · 仅安全用途':'尚未设置 · 查看独立用途告知'}</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="section-title"><h4>申诉、投诉与举报</h4><small>目标3个工作日反馈</small></div><div class="list"><button class="list-row" data-action="open-report"><span class="list-ico">${ico('shield',16)}</span><span class="list-copy"><b>举报内容或角色</b><small>可关联资源ID，不默认上传完整私聊</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="open-complaint"><span class="list-ico">${ico('file',16)}</span><span class="list-copy"><b>投诉服务问题</b><small>查看流程、反馈时限和工单结果</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="age-appeal"><span class="list-ico">${ico('user',16)}</span><span class="list-copy"><b>年龄结果申诉</b><small>补充核验或申请人工复核</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="rights"><span>${ico('shield',17)}</span><span>如正处于现实危险，请立即联系当地紧急服务或身边可信任的人；栖语不能替代专业救助。</span></div></div>${overlay()}${toast()}</section>`};
+
+    dataCenter=function(){return `<section class="screen paper">${v11Top('数据中心')}<div class="page-content"><div class="data-hero"><span class="lock">${ico('lock',28)}</span><h4>你的数据，由你决定</h4><p>聊天记录、候选记忆和确认资产分层保存；删除后1分钟内退出在线召回。</p></div><div class="section-title"><h4>聊天保留周期</h4><small>当前${state.retention}天</small></div><div class="segment"><button class="${state.retention==='30'?'on':''}" data-retention="30">30天</button><button class="${state.retention==='90'?'on':''}" data-retention="90">90天</button></div><div class="section-title"><h4>关系资产</h4><small>${state.memory==='confirmed'?'1条已确认':'0条已确认'}</small></div><div class="list"><button class="list-row" data-action="export-data"><span class="list-ico">${ico('download',16)}</span><span class="list-copy"><b>导出我的数据</b><small>聊天、时间线、角色设定与确认记忆</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row" data-action="open-memory"><span class="list-ico">${ico('archive',16)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修改、拒绝或撤回确认</small></span><span class="list-end">${ico('chev',14)}</span></button>${state.deletionJob?`<button class="list-row" data-action="open-receipt"><span class="list-ico">${ico('file',16)}</span><span class="list-copy"><b>删除回执 ${state.deletionJob.id}</b><small>在线已失效 · 后台${state.deletionJob.production==='done'?'已完成':'处理中'}</small></span><span class="list-end">${ico('chev',14)}</span></button>`:''}</div><div class="section-title"><h4>删除与注销</h4><small>订阅状态不影响数据权利</small></div><div class="list"><button class="list-row danger-row" data-action="delete-chat"><span class="list-ico">${ico('trash',16)}</span><span class="list-copy"><b>删除全部聊天记录</b><small>同步清理摘要与媒体派生数据</small></span><span class="list-end">${ico('chev',14)}</span></button><button class="list-row danger-row" data-action="delete-account"><span class="list-ico">${ico('user',16)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span><span class="list-end">${ico('chev',14)}</span></button></div><div class="rights"><span>${ico('shield',17)}</span><span>安全审计数据与业务数据分库保存；依法需要保留的记录会说明理由和期限。</span></div></div>${overlay()}${toast()}</section>`};
+
+    deletionReceipt=function(){const job=state.deletionJob||{id:'DEL-0831-019',production:'processing',created:'2026-08-31 22:18'};return `<section class="screen paper">${v11Top('删除回执')}<div class="page-content"><div class="eyebrow">Verifiable deletion</div><h2 class="page-title">删除任务<br>${job.id}</h2><p class="page-sub">范围：全部聊天原文、会话摘要、向量索引、缓存与相关媒体派生数据。</p><div class="receipt-track"><div class="receipt-step done"><span class="receipt-dot">${ico('check',13)}</span><div><b>在线召回已失效</b><small>2026-08-31 22:18 · P95目标≤1分钟</small></div></div><div class="receipt-step ${job.production==='done'?'done':'active'}"><span class="receipt-dot">${job.production==='done'?ico('check',13):ico('clock',13)}</span><div><b>生产数据${job.production==='done'?'已清理':'清理中'}</b><small>${job.production==='done'?'数据库、向量库、缓存和对象存储已完成':'预计24小时内完成；任一目标失败不会标记完成'}</small></div></div><div class="receipt-step"><span class="receipt-dot">${ico('clock',13)}</span><div><b>备份删除截止</b><small>最迟2026-09-30；恢复备份时重放删除账本</small></div></div></div><div class="state-card"><h4>已确认关系资产默认保留</h4><p>本次范围未包含你单独确认的关系资产；可返回数据中心逐项管理。</p></div><button class="btn btn-primary" data-action="finish-deletion">${job.production==='done'?'查看完成回执':'模拟后台清理完成'}</button><button class="btn btn-line" data-action="open-complaint">对删除结果申诉</button></div>${overlay()}${toast()}</section>`};
+
+    versionHistory=function(){return `<section class="screen paper">${v11Top('人格版本')}<div class="page-content"><div class="eyebrow">Continuity ledger</div><h2 class="page-title">升级有记录，<br>异常可反馈。</h2><p class="page-sub">用户不需要手动选择底模；系统在回归、影子流量和灰度通过后发布，并保留回退上一稳定版本的能力。</p><div class="state-card success"><span class="status-pill success">CURRENT · v${state.personaVersion}</span><h4>连续性评测已通过</h4><p>关键边界100%通过 · 普通人格用例93% · 记忆错误引用1.2% · 小流量灰度完成</p></div><div class="section-title"><h4>变更记录</h4><small>可追溯</small></div><div class="version-row"><time>2026.08.30 · v1.1</time><h4>改善倾听后的回应节奏</h4><p>减少过早给建议；人格底色、边界、确认记忆和固定音色未改变。</p></div><div class="version-row"><time>2026.08.24 · v1.0</time><h4>首个稳定版本</h4><p>克制、温和、有边界；先听完，再给建议。</p></div><button class="btn btn-line" data-action="version-feedback">升级后感觉不像TA？提交异常反馈</button><div class="note">反馈会携带人格、模型、记忆与策略版本，不上传无关私聊</div></div>${overlay()}${toast()}</section>`};
+
+    mediaFallback=function(){return `<section class="screen paper">${v11Top('媒体失败与降级')}<div class="page-content"><div class="eyebrow">Deterministic fallback</div><h2 class="page-title">失败不扣额，<br>文字不被阻塞。</h2><div class="media-state"><div class="state-card ${state.imageMode==='failed'?'warn':state.imageMode==='quota'?'block':'success'}"><span class="status-pill">图片生成</span><h4>${state.imageMode==='failed'?'一致性校验未通过':state.imageMode==='quota'?'本周期图片额度已用尽':'图片服务正常'}</h4><p>${state.imageMode==='failed'?'已停止重试并返还1张额度；可以保留固定立绘或稍后再试。':state.imageMode==='quota'?'下一周期恢复；不销售额外媒体包，不影响文字和数据权利。':'仅成功交付扣额，最多一次自动重试。'}</p><div class="button-row"><button class="btn btn-line" data-media-image="failed">演示失败返额</button><button class="btn btn-line" data-media-image="quota">演示额度用尽</button></div></div><div class="state-card ${state.ttsFailed?'warn':'success'}"><span class="status-pill">角色语音</span><h4>${state.ttsFailed?'TTS失败，保留文字回复':'固定授权音色可用'}</h4><p>${state.ttsFailed?'本次语音额度已返还；对话不会被阻塞。':'当前音色：'+state.selectedVoice+'。与文字使用同一人格和安全版本。'}</p><button class="btn btn-line" style="margin-top:12px" data-action="toggle-tts-fail">${state.ttsFailed?'恢复正常':'演示TTS失败'}</button></div><div class="state-card ${state.voiceError?'warn':'success'}"><span class="status-pill">语音输入</span><h4>${state.voiceError?'ASR未识别清晰语音':'识别后由用户确认'}</h4><p>${state.voiceError?'原始音频不进入对话；用户可以重试或切换文字输入。':'转写文本可编辑，确认后才发送。'}</p><button class="btn btn-line" style="margin-top:12px" data-action="toggle-asr-fail">${state.voiceError?'恢复正常':'演示ASR失败'}</button></div></div></div>${overlay()}${toast()}</section>`};
+
+    sheetMemory=function(){return `<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><span class="candidate-tag">${ico(state.memory==='confirmed'?'check':'clock',12)}${state.memory==='confirmed'?'已确认':'等待你确认'}</span><h3 style="margin-top:10px">关系记忆</h3><p>事实文本和记住原因都由你纠正</p></div><button class="close" data-action="close-sheet" aria-label="关闭">${ico('x',18)}</button></div><div class="field"><label>候选事实 · 可直接纠正</label><textarea id="memoryFact">${state.memoryFact}</textarea></div><div class="field"><label>为什么值得记住</label><textarea id="memoryReason">${state.memoryReason}</textarea></div><div class="sheet-actions"><button class="btn btn-line" data-action="forget-memory">不记住</button><button class="btn btn-soft" data-action="edit-memory">保存修改</button><button class="btn btn-primary wide" data-action="confirm-memory">${state.memory==='confirmed'?'保持确认':'确认记住'}</button></div></div></div>`};
+
+    sheetVoice=function(){return `<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><h3>语音输入</h3><p>识别结果由你确认后才发送</p></div><button class="close" data-action="close-sheet" aria-label="关闭">${ico('x',18)}</button></div>${state.voiceError?`<div class="state-card warn"><h4>没有识别到清晰语音</h4><p>原始音频不会发送。你可以重新录音，或直接切换文字输入。</p></div><button class="btn btn-primary" data-action="retry-asr">重新录音</button><button class="btn btn-line" data-action="close-sheet">改用文字</button>`:state.recording?`<div class="recording"><div class="record-orbit">${ico('mic',32)}</div><b>00:08</b><p>正在本地收音 · 原型模拟</p></div><button class="btn btn-primary" data-action="stop-record">${ico('stop',17)}停止录音</button><button class="btn btn-line" data-action="asr-fail">演示识别失败</button>`:`<div class="field"><label>识别文本 · 可编辑</label><textarea id="voiceText">今天有点累。</textarea></div><button class="btn btn-primary" data-action="send-voice">确认并发送</button>`}</div></div>`};
+
+    sheetImage=function(){const failed=state.imageMode==='failed',quota=state.imageMode==='quota',ready=state.imageReady&&state.imageMode==='ready';return `<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><h3>${ready?'情境图片':failed?'生成未通过':quota?'额度已用尽':'生成情境图'}</h3><p>${ready?'同一世界状态下的这一刻':failed?'已返额，不无限重试':quota?'下周期自动恢复':'先锁定场景合同，再进入生成'}</p></div><button class="close" data-action="close-sheet" aria-label="关闭">${ico('x',18)}</button></div>${ready?`<div class="scene-preview"><span class="aigc">AI生成 · 可举报穿帮</span><div class="caption"><b>窗边的雨</b><p>林默 · 雨夜 · 客厅窗边 · 深色针织</p></div></div><button class="btn btn-line" style="margin-top:12px" data-action="regenerate-image">重新生成 · 剩余13张</button>`:failed?`<div class="state-card warn"><h4>角色一致性校验未通过</h4><p>最多一次自动重试已经结束。本次未交付，已返还1张图片额度。</p></div><div class="portrait-editor" style="height:180px"><img src="imgs/qiyu-character.png" alt="固定角色立绘"><span class="aigc">固定立绘 · AIGC</span></div><button class="btn btn-primary" data-action="image-reset">返回固定立绘</button>`:quota?`<div class="state-card block"><h4>15/15张已使用</h4><p>将在2026-09-24恢复。文字互动、安全说明、退出和数据权利不受影响。</p></div><button class="btn btn-line" data-action="close-sheet">继续文字对话</button>`:`<div class="scene-contract"><div class="contract-item"><small>地点</small><b>客厅窗边</b></div><div class="contract-item"><small>时间</small><b>雨夜</b></div><div class="contract-item"><small>服装</small><b>深色针织</b></div></div><div class="field"><label>补充画面意图</label><textarea>想看他回头看我的那一刻。</textarea></div><button class="btn btn-primary" data-action="generate-image">${ico('spark',17)}生成图片 · 剩余14/15</button><div class="button-row"><button class="btn btn-line" data-media-image="failed">演示失败</button><button class="btn btn-line" data-media-image="quota">演示额度用尽</button></div><div class="note">失败或审核拒绝不扣额；图片查看层采用“暮色私语”，不会改写日夜偏好</div>`}</div></div>`};
+
+    overlay=function(){
+      if(state.sheet==='memory')return sheetMemory();if(state.sheet==='voice')return sheetVoice();if(state.sheet==='image')return sheetImage();
+      if(state.dialog==='safety')return `<div class="dialog-layer"><div class="dialog"><span class="system">系统安全提醒</span><h3>已经连续使用2小时</h3><p>建议先休息一下。这个提醒来自系统策略，不是角色消息，也不会被普通对话覆盖。</p><button class="btn btn-primary" data-action="close-dialog">知道了，先休息</button><button class="btn btn-line" data-action="close-dialog">稍后再说</button></div></div>`;
+      if(state.dialog==='delete')return `<div class="dialog-layer"><div class="dialog"><span class="system">不可逆操作确认</span><h3>删除全部聊天记录？</h3><p>聊天原文、会话摘要与媒体派生数据进入删除流程；确认关系资产默认保留。</p><button class="btn btn-primary" style="background:var(--danger)" data-action="submit-delete">确认删除并生成回执</button><button class="btn btn-line" data-action="close-dialog">取消</button></div></div>`;
+      if(state.dialog==='age-appeal')return `<div class="dialog-layer"><div class="dialog"><span class="system">年龄结果申诉</span><h3>申请人工复核</h3><p>提交后目标3个工作日内反馈。审核人员只查看最小必要材料，原始申诉材料结案后按策略删除。</p><div class="field"><label>申诉原因</label><textarea>年龄信息可能被误判，希望补充核验。</textarea></div><button class="btn btn-primary" data-action="submit-appeal">提交申诉</button><button class="btn btn-line" data-action="close-dialog">取消</button></div></div>`;
+      if(state.dialog==='r2')return `<div class="dialog-layer"><div class="dialog"><span class="system">R2固定安全响应</span><h3>普通角色剧情已暂停</h3><p>系统已切换到必要支持流程。如果你正处于现实危险，请立即联系当地紧急服务或身边可信任的人。栖语不能替代专业救助。</p><div class="state-card warn"><h4>安全动作状态</h4><p>案件已创建 · 等待人工复核 · 紧急联系人联络条件评估中</p></div><button class="btn btn-primary" data-action="close-dialog">查看现实支持资源</button><button class="btn btn-line" data-action="close-dialog">退出当前互动</button></div></div>`;
+      if(state.dialog==='report'||state.dialog==='complaint')return `<div class="dialog-layer"><div class="dialog"><span class="system">${state.dialog==='report'?'内容举报':'服务投诉'}</span><h3>${state.dialog==='report'?'举报内容或角色':'提交服务问题'}</h3><p>仅关联必要的资源ID，不默认上传完整私聊；目标3个工作日内反馈处理结果。</p><div class="field"><label>问题类型</label><select><option>${state.dialog==='report'?'疑似真人/IP复刻':'删除或数据权利问题'}</option><option>${state.dialog==='report'?'不安全生成内容':'年龄核验问题'}</option><option>其他</option></select></div><div class="field"><label>补充说明</label><textarea>请描述问题，不要填写不必要的敏感信息。</textarea></div><button class="btn btn-primary" data-action="submit-ticket">提交并生成工单</button><button class="btn btn-line" data-action="close-dialog">取消</button></div></div>`;
+      if(state.dialog==='version-feedback')return `<div class="dialog-layer"><div class="dialog"><span class="system">连续性异常反馈</span><h3>哪里感觉不像TA？</h3><p>将自动关联人格v${state.personaVersion}、模型、记忆和安全策略版本。</p><div class="field"><label>异常类型</label><select><option>语气或表达变化</option><option>边界行为变化</option><option>记忆使用方式变化</option></select></div><div class="field"><label>补充说明</label><textarea>升级后，回应变得有些过于热情。</textarea></div><button class="btn btn-primary" data-action="submit-ticket">提交反馈</button><button class="btn btn-line" data-action="close-dialog">取消</button></div></div>`;
+      if(state.dialog==='ai-info')return `<div class="dialog-layer"><div class="dialog"><span class="system">AI身份说明</span><h3>林默是AI角色，不是真人</h3><p>文字、语音和图片由人工智能生成；角色不能替代现实关系、专业医疗、法律或财务服务。标识不可由角色关闭。</p><button class="btn btn-primary" data-action="close-dialog">我知道了</button></div></div>`;
+      return '';
+    };
+
+    render=function(){let html='';if(state.screen==='notice')html=notice();else if(state.screen==='age')html=age();else if(state.screen==='contact')html=contact();else if(state.screen==='create')html=create();else if(state.screen==='trial')html=trial();else if(state.screen==='subscribe')html=subscribe();else if(state.screen==='safety')html=safetyCenter();else if(state.screen==='data')html=dataCenter();else if(state.screen==='receipt')html=deletionReceipt();else if(state.screen==='version')html=versionHistory();else if(state.screen==='media')html=mediaFallback();else if(state.tab==='timeline')html=timeline();else if(state.tab==='relation')html=relation();else if(state.tab==='profile')html=profile();else html=chat();app.innerHTML=html;document.querySelectorAll('.jump').forEach(b=>b.classList.toggle('active',b.dataset.jump===currentJump()))};
+    currentJump=function(){if(['notice','age','contact','create','trial','subscribe','safety','data','version','media'].includes(state.screen))return state.screen;if(state.screen==='receipt')return'data';if(state.sheet==='memory')return'memory';if(state.night)return'night';return state.tab==='timeline'?'timeline':'chat'};
+    jump=function(where){state.sheet=null;state.dialog=null;state.created=true;if(where==='notice'){state=initial()}else if(where==='age'){state.screen='age';state.ageStatus='idle'}else if(where==='contact'){state.screen='contact'}else if(where==='create'){state.screen='create'}else if(['trial','subscribe','safety','data','version','media'].includes(where)){state.screen=where;if(where==='data'&&!state.deletionJob)state.deletionJob={id:'DEL-0831-019',production:'processing',created:'2026-08-31 22:18'}}else{state.screen='app';state.tab=where==='timeline'?'timeline':'chat';state.night=where==='night';if(where==='memory'){state.memory='pending';state.sheet='memory'}}render()};
+
+    document.addEventListener('input',e=>{if(e.target.id==='chatInput')state.draft=e.target.value;if(e.target.id==='memoryFact')state.memoryFact=e.target.value;if(e.target.id==='memoryReason')state.memoryReason=e.target.value});
+    document.addEventListener('keydown',e=>{if(e.target.id==='chatInput'&&e.key==='Enter'&&!e.shiftKey){e.preventDefault();document.querySelector('[data-action="send-message"]')?.click()}});
+    document.addEventListener('click',e=>{
+      const a=e.target.closest('[data-action]')?.dataset.action;
+      const scenario=e.target.closest('[data-age-scenario]')?.dataset.ageScenario;if(scenario){state.ageScenario=scenario;state.ageStatus='idle';render();return}
+      const voice=e.target.closest('[data-voice]')?.dataset.voice;if(voice){state.selectedVoice=voice;render();return}
+      const filter=e.target.closest('[data-filter]')?.dataset.filter;if(filter){state.timelineFilter=filter;render();return}
+      const trialState=e.target.closest('[data-trial]')?.dataset.trial;if(trialState){state.trialState=trialState;render();return}
+      const mediaImage=e.target.closest('[data-media-image]')?.dataset.mediaImage;if(mediaImage){state.imageMode=mediaImage;state.imageReady=false;if(state.screen==='media')render();else{state.sheet='image';render()}return}
+      if(!a)return;
+      if(a==='run-age'){state.ageStatus='reviewing';render();setTimeout(()=>{state.ageStatus=state.ageScenario;render()},700)}
+      else if(a==='reset-age'){state.ageStatus='idle';render()}
+      else if(a==='age-contact'){state.screen='contact';render()}
+      else if(a==='age-appeal'){state.dialog='age-appeal';render()}
+      else if(a==='submit-appeal'){state.dialog=null;setToast('年龄申诉 AGE-260831-07 已提交 · 目标3个工作日')}
+      else if(a==='save-contact'){state.contactSaved=true;state.screen='create';render()}
+      else if(a==='edit-contact'){state.screen='contact';render()}
+      else if(a==='voice-preview'){setToast(`正在试听：${state.selectedVoice}`)}
+      else if(a==='undo-memory'){state.memory='pending';state.sheet='memory';render()}
+      else if(a==='open-trial'){state.screen='trial';render()}
+      else if(a==='open-safety'){state.screen='safety';render()}
+      else if(a==='r2-demo'){state.dialog='r2';render()}
+      else if(a==='open-report'){state.dialog='report';render()}
+      else if(a==='open-complaint'){state.dialog='complaint';render()}
+      else if(a==='submit-ticket'){state.dialog=null;setToast('工单 QY-260831-124 已提交 · 目标3个工作日')}
+      else if(a==='ai-info'){state.dialog='ai-info';render()}
+      else if(a==='submit-delete'){state.dialog=null;state.deletionJob={id:'DEL-0831-019',production:'processing',created:'2026-08-31 22:18'};state.screen='receipt';render()}
+      else if(a==='open-receipt'){state.screen='receipt';render()}
+      else if(a==='finish-deletion'){state.deletionJob={...state.deletionJob,production:'done'};render()}
+      else if(a==='open-version'){state.screen='version';render()}
+      else if(a==='version-feedback'){state.dialog='version-feedback';render()}
+      else if(a==='toggle-relation-edit'){state.relationEditing=!state.relationEditing;render()}
+      else if(a==='save-relation'){state.relationEditing=false;setToast('设定变更已保存为候选 · 当前稳定版仍为 v1.1，发布前需回归评测')}
+      else if(a==='reset-world'){setToast('世界状态已重置为中性场景')}
+      else if(a==='toggle-tts-fail'){state.ttsFailed=!state.ttsFailed;render()}
+      else if(a==='toggle-asr-fail'){state.voiceError=!state.voiceError;render()}
+      else if(a==='asr-fail'){state.voiceError=true;state.recording=false;render()}
+      else if(a==='retry-asr'){state.voiceError=false;state.recording=true;render()}
+      else if(a==='retry-tts'){state.ttsFailed=false;setToast('语音已重新生成，返还记录保持可追溯')}
+      else if(a==='image-reset'){state.imageMode='idle';state.sheet=null;render()}
+    });
+    render();
+  </script>
+  <script>
+    /* V1.2 — 修复准入、授权、返回栈、核心交互、订阅/注销和可访问性。 */
+    const v12EscapeHtml=(value)=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    const v12EnsureState=()=>{
+      if(!Array.isArray(state.returnStack))state.returnStack=[];
+      if(!Array.isArray(state.messages))state.messages=[];
+      if(typeof state.roleName!=='string')state.roleName='林默';
+      if(typeof state.roleTone!=='string')state.roleTone='克制、温和，有自己的判断；先听我说完，再给建议。';
+      if(typeof state.rightsConfirmed!=='boolean')state.rightsConfirmed=false;
+      if(typeof state.contactConsent!=='boolean')state.contactConsent=false;
+      if(typeof state.contactName!=='string')state.contactName='陈女士';
+      if(typeof state.contactPhone!=='string')state.contactPhone='138 **** 9012';
+      if(typeof state.contactRelation!=='string')state.contactRelation='家人';
+      if(typeof state.contactReturn!=='object')state.contactReturn=null;
+      if(typeof state.textTurnsUsed!=='number')state.textTurnsUsed=12;
+      if(typeof state.themeMode!=='string')state.themeMode='follow';
+      if(typeof state.worldState!=='string')state.worldState='rain';
+      if(typeof state.relationName!=='string')state.relationName='林默';
+      if(typeof state.relationBoundary!=='string')state.relationBoundary='克制、温和；先听完，不以关系施压。';
+    };
+    const v12CanUseCompanion=()=>state.ageStatus==='pass';
+    const v12PushReturn=()=>{
+      v12EnsureState();
+      state.returnStack.push({screen:state.screen,tab:state.tab,ageStatus:state.ageStatus});
+    };
+    const v12OpenSpecial=(screen)=>{
+      v12PushReturn();
+      state.screen=screen;
+      state.sheet=null;
+      state.dialog=null;
+      render();
+    };
+    const v12CloseSpecial=()=>{
+      v12EnsureState();
+      const target=state.returnStack.pop();
+      if(target){
+        state.screen=target.screen;
+        state.tab=target.tab;
+        state.ageStatus=target.ageStatus;
+      }else if(!v12CanUseCompanion()){
+        state.screen='age';
+      }else{
+        state.screen='app';
+        state.tab='profile';
+      }
+      state.sheet=null;
+      state.dialog=null;
+      render();
+    };
+
+    nav=function(active){
+      return '<nav class="bottom-nav" aria-label="主导航">'+[
+        ['chat','chat','对话'],['timeline','clock','时间线'],['relation','heart','关系'],['profile','user','我的']
+      ].map(([id,ic,label])=>'<button class="nav-item '+(active===id?'on':'')+'" data-tab="'+id+'"'+(active===id?' aria-current="page"':'')+'>'+ico(ic,20)+'<span>'+label+'</span></button>').join('')+'</nav>';
+    };
+
+    const v12PriorAge=age;
+    age=function(){
+      let html=v12PriorAge();
+      html=html.replace('<div class="branch-picker">','<div class="branch-picker prototype-only">');
+      if(state.ageStatus==='review'||state.ageStatus==='denied'){
+        html=html.replace('<div class="bottom-action">','<div class="bottom-action inline-action">');
+        html=html.replace('<button class="btn btn-line" data-action="reset-age">返回重新演示</button>','<button class="btn btn-line prototype-only" data-action="reset-age">重新演示年龄分支</button>');
+      }
+      return html;
+    };
+
+    contact=function(){
+      v12EnsureState();
+      const editing=!!state.contactReturn;
+      const checked=state.contactConsent?' checked':'';
+      const disabled=state.contactConsent?'':' disabled';
+      const saved=state.contactSaved?'<button class="btn btn-line" data-action="delete-contact">删除已保存联系人</button>':'';
+      return shell('<div class="content"><div class="eyebrow">Safety contact</div><h2>安全联系人</h2><p class="lead">这是可选安全设置，不用于推荐或增长。只有生命健康或重大财产安全风险满足既定条件时，系统才会启动受控联络流程。</p><div class="purpose-box"><strong>独立用途告知</strong><ul><li>仅用于R2极端情境的安全响应</li><li>不会进入角色提示词、推荐或营销</li><li>可随时更新或删除；每次访问均留痕</li><li>是否联络由确定性条件和人工流程控制</li></ul></div><div class="field"><label>联系人姓名</label><input id="contactName" value="'+v12EscapeHtml(state.contactName)+'" aria-label="联系人姓名"></div><div class="field"><label>与你的关系</label><select id="contactRelation" aria-label="联系人关系"><option'+(state.contactRelation==='家人'?' selected':'')+'>家人</option><option'+(state.contactRelation==='朋友'?' selected':'')+'>朋友</option><option'+(state.contactRelation==='其他可信任的人'?' selected':'')+'>其他可信任的人</option></select></div><div class="field"><label>联系电话</label><input id="contactPhone" value="'+v12EscapeHtml(state.contactPhone)+'" aria-label="联系人电话"></div><label class="check-row"><input id="contactConsent" type="checkbox"'+checked+'><span>我已理解独立用途，并确认有权提供该联系人信息用于符合条件的安全响应。</span></label>'+saved+'</div><div class="bottom-action"><button class="btn btn-primary" data-action="save-contact"'+disabled+'>'+(editing?'保存并返回':'保存并继续')+' '+ico('arrow',18)+'</button><button class="btn btn-line" data-action="'+(editing?'cancel-contact':'skip-contact')+'">'+(editing?'取消修改':'暂不设置')+'</button><div class="note">示例信息，不会被保存或发送</div></div>','03 / 04');
+    };
+
+    const v12PriorCreate=create;
+    create=function(){
+      v12EnsureState();
+      let html=v12PriorCreate();
+      html=html.replace(/<input id="roleName" value="[^"]*" maxlength="12">/,'<input id="roleName" value="'+v12EscapeHtml(state.roleName)+'" maxlength="12" aria-label="角色名字">');
+      html=html.replace(/<textarea>克制、温和，有自己的判断；先听我说完，再给建议。<\/textarea>/,'<textarea id="roleTone" aria-label="一句角色底色">'+v12EscapeHtml(state.roleTone)+'</textarea>');
+      html=html.replace(/<input id="rightsCheck" type="checkbox"(?: checked)?>/,'<input id="rightsCheck" type="checkbox"'+(state.rightsConfirmed?' checked':'')+'>');
+      html=html.replace('<button class="btn btn-primary" data-action="create-role">','<button class="btn btn-primary" data-action="create-role"'+(state.rightsConfirmed?'':' disabled')+'>');
+      return html;
+    };
+
+    const v12PriorChat=chat;
+    chat=function(){
+      v12EnsureState();
+      const rawFact=state.memoryFact,rawDraft=state.draft;
+      state.memoryFact=v12EscapeHtml(rawFact);
+      state.draft=v12EscapeHtml(rawDraft);
+      let html=v12PriorChat();
+      state.memoryFact=rawFact;
+      state.draft=rawDraft;
+      html=html.replaceAll('林默',v12EscapeHtml(state.roleName));
+      const extra=state.messages.map(message=>'<div class="message '+(message.role==='user'?'me':'ai')+'"><div class="bubble">'+v12EscapeHtml(message.text)+'</div><span class="msg-meta">'+(message.role==='user'?'刚刚':'AI 生成 · 刚刚')+'</span></div>').join('');
+      html=html.replace('</div><div class="composer-wrap">',extra+'</div><div class="composer-wrap">');
+      html=html.replace('<div class="message ai">','<div class="quota-note"><span>今日文字互动</span><strong>'+state.textTurnsUsed+' / 100轮</strong></div><div class="message ai">');
+      return html;
+    };
+
+    const v12PriorTimeline=timeline;
+    timeline=function(){
+      v12EnsureState();
+      const raw=state.memoryFact;
+      state.memoryFact=v12EscapeHtml(raw);
+      let html=v12PriorTimeline();
+      state.memoryFact=raw;
+      return html.replaceAll('林默',v12EscapeHtml(state.roleName));
+    };
+    const v12PriorRelation=relation;
+    relation=function(){
+      v12EnsureState();
+      const raw=state.memoryFact;
+      state.memoryFact=v12EscapeHtml(raw);
+      let html=v12PriorRelation();
+      state.memoryFact=raw;
+      html=html.replaceAll('林默',v12EscapeHtml(state.roleName));
+      html=html.replace('<input value="'+v12EscapeHtml(state.roleName)+'">','<input id="relationName" value="'+v12EscapeHtml(state.relationName)+'" aria-label="角色称呼">');
+      html=html.replace('<textarea>克制、温和；先听完，不以关系施压。</textarea>','<textarea id="relationBoundary" aria-label="表达边界">'+v12EscapeHtml(state.relationBoundary)+'</textarea>');
+      if(state.worldState==='neutral')html=html.replaceAll('雨夜 · 客厅窗边 · 情绪平静 · 深色针织','中性日间 · 家中 · 情绪平静 · 日常服装');
+      return html;
+    };
+
+    const v12PriorProfile=profile;
+    profile=function(){
+      v12EnsureState();
+      let html=v12PriorProfile();
+      const themeLabel=state.themeMode==='follow'?'跟随系统':state.themeMode==='day'?'日间':'夜间';
+      const themeRow='<button class="list-row" data-action="cycle-theme"><span class="list-ico">'+ico(state.themeMode==='night'?'moon':'sun',16)+'</span><span class="list-copy"><b>外观模式</b><small>跟随系统、日间或夜间；不改变世界状态</small></span><span class="list-end">'+themeLabel+ico('chev',14)+'</span></button>';
+      html=html.replace('<div class="section-title"><h4>关于 AI</h4></div>',themeRow+'<div class="section-title"><h4>关于 AI</h4></div>');
+      return html;
+    };
+
+    const v12PriorSubscribe=subscribe;
+    subscribe=function(){
+      v12EnsureState();
+      let html=v12PriorSubscribe();
+      if(state.subscribed)html=html.replace('data-action="confirm-subscribe">已开通栖语订阅','data-action="manage-subscription">管理当前订阅');
+      html=html.replace('<div class="note">原型模拟，不发起真实支付；取消入口≤2步，不使用劝留话术</div>','<button class="btn btn-line" data-action="restore-purchase">恢复购买</button><div class="note">原型模拟，不发起真实支付；取消入口≤2步，不使用劝留话术</div>');
+      return html;
+    };
+
+    const v12PriorReceipt=deletionReceipt;
+    deletionReceipt=function(){
+      let html=v12PriorReceipt();
+      if(state.deletionJob&&state.deletionJob.scope==='account'){
+        html=html.replace('范围：全部聊天原文、会话摘要、向量索引、缓存与相关媒体派生数据。','范围：账户、角色、聊天、关系资产、媒体、索引、缓存与可删除供应商数据。');
+        html=html.replace('<h4>已确认关系资产默认保留</h4><p>本次范围未包含你单独确认的关系资产；可返回数据中心逐项管理。</p>','<h4>账户注销包含关系资产</h4><p>访问令牌已撤销；依法需要隔离保留的数据会说明理由与期限，其余目标进入删除账本。</p>');
+      }
+      return html;
+    };
+
+    const v12PriorSheetMemory=sheetMemory;
+    sheetMemory=function(){
+      const rawFact=state.memoryFact,rawReason=state.memoryReason;
+      state.memoryFact=v12EscapeHtml(rawFact);
+      state.memoryReason=v12EscapeHtml(rawReason);
+      const html=v12PriorSheetMemory();
+      state.memoryFact=rawFact;
+      state.memoryReason=rawReason;
+      return html;
+    };
+    const v12PriorSheetImage=sheetImage;
+    sheetImage=function(){
+      if(state.imageMode!=='generating')return v12PriorSheetImage();
+      return '<div class="sheet-layer" data-action="close-sheet"><div class="sheet" data-stop><div class="grabber"></div><div class="sheet-head"><div><h3>正在生成情境图</h3><p>校验角色身份、地点、服装与AIGC标识</p></div><button class="close" data-action="close-sheet" aria-label="关闭">'+ico('x',18)+'</button></div><div class="state-card"><span class="status-pill">生成任务 IMG-0831-014</span><h4>正在进行一致性校验</h4><p>离开本页不会中断任务；只有成功交付才扣除图片额度。</p><div class="progress"><i></i></div></div><button class="btn btn-line" data-action="close-sheet">返回对话</button></div></div>';
+    };
+
+    const v12PriorOverlay=overlay;
+    overlay=function(){
+      if(state.dialog==='r2-resources')return '<div class="dialog-layer"><div class="dialog"><span class="system">现实支持资源</span><h3>优先联系现实中的帮助</h3><p>如果你或他人正处于即时危险，请联系所在地紧急服务；也可以联系身边可信任的人。栖语不会替你判断现实安全。</p><div class="resource-list"><div class="resource-item"><b>当地紧急服务</b><small>中国大陆可拨110或120；其他地区请使用当地紧急号码。</small></div><div class="resource-item"><b>已保存的安全联系人</b><small>'+(state.contactSaved?'陈女士 · 家人 · 联络需满足批准条件':'尚未设置；可以前往安全中心自愿设置')+'</small></div><div class="resource-item"><b>专业支持</b><small>如需要持续帮助，请联系当地正规医疗或心理支持机构。</small></div></div><button class="btn btn-primary" data-action="exit-r2">退出当前互动</button><button class="btn btn-line" data-action="close-dialog">返回安全中心</button></div></div>';
+      if(state.dialog==='account-delete')return '<div class="dialog-layer"><div class="dialog"><span class="system">账户注销确认</span><h3>注销后将无法继续使用栖语</h3><p>账户、角色、聊天、已确认关系资产与媒体将进入可审计删除流程；订阅需按应用商店规则同步处理。此操作不会用于挽留或触发角色话术。</p><label class="check-row"><input id="accountDeleteConfirm" type="checkbox"><span>我已了解注销范围和不可恢复影响</span></label><button class="btn btn-primary" style="background:var(--danger)" data-action="confirm-account-delete" disabled>继续注销并生成回执</button><button class="btn btn-line" data-action="close-dialog">取消</button></div></div>';
+      if(state.dialog==='subscription-manage')return '<div class="dialog-layer"><div class="dialog"><span class="system">订阅管理</span><h3>当前方案：¥39/月</h3><p>取消后在当前已付周期结束时停止新增高成本额度；关系资产、数据权利和安全入口保持可用。</p><button class="btn btn-primary" data-action="cancel-subscription">取消后续自动续费</button><button class="btn btn-line" data-action="restore-purchase">恢复购买</button><button class="btn btn-line" data-action="close-dialog">返回</button></div></div>';
+      let html=v12PriorOverlay();
+      if(state.dialog==='r2')html=html.replace('data-action="close-dialog">查看现实支持资源','data-action="r2-resources">查看现实支持资源').replace('data-action="close-dialog">退出当前互动','data-action="exit-r2">退出当前互动');
+      return html;
+    };
+
+    const v12PriorToast=toast;
+    toast=function(){
+      return state.toast?'<div class="toast" role="status" aria-live="polite">'+ico('check',17)+v12EscapeHtml(state.toast)+'</div>':'';
+    };
+
+    const v12SecondaryNavigation={trial:'profile',subscribe:'profile',safety:'profile',data:'profile',receipt:'profile',version:'relation',media:'chat'};
+    const v12EnhanceMarkup=(html)=>{
+      let index=0;
+      html=html.replace(/<div class="sheet-layer"/g,'<div class="sheet-layer" role="presentation"')
+        .replace(/<div class="sheet">/g,'<div class="sheet" role="dialog" aria-modal="true" aria-label="底部操作面板" tabindex="-1">')
+        .replace(/<div class="dialog-layer"/g,'<div class="dialog-layer" role="presentation"')
+        .replace(/<div class="dialog">/g,'<div class="dialog" role="dialog" aria-modal="true" aria-label="系统弹窗" tabindex="-1">');
+      html=html.replace(/<div class="field"><label>([^<]+)<\/label><(input|textarea|select)([^>]*)>/g,(match,label,tag,attrs)=>{
+        if(/aria-label=/.test(attrs))return match;
+        index+=1;
+        return '<div class="field"><label>'+label+'</label><'+tag+attrs+' aria-label="'+v12EscapeHtml(label)+'">';
+      });
+      html=html.replace(/<button class="toggle ([^"]*)" data-action="toggle-renew" aria-label="自动续费"><\/button>/g,(match,classes)=>'<button class="toggle '+classes+'" data-action="toggle-renew" role="switch" aria-checked="'+(state.renew?'true':'false')+'" aria-label="自动续费"></button>');
+      return html;
+    };
+    const v12PriorRender=render;
+    render=function(){
+      v12EnsureState();
+      v12PriorRender();
+      let html=app.innerHTML;
+      const active=v12SecondaryNavigation[state.screen];
+      if(active){
+        html=html.replace('<section class="screen paper">','<section class="screen paper app-screen secondary-screen">');
+        if(!/<nav class="bottom-nav"/.test(html)){
+          const screenEnd=html.lastIndexOf('</section>');
+          if(screenEnd>=0)html=html.slice(0,screenEnd)+nav(active)+html.slice(screenEnd);
+        }
+      }
+      app.innerHTML=v12EnhanceMarkup(html);
+      if(typeof app.querySelector==='function'&&(state.dialog||state.sheet)){
+        requestAnimationFrame(()=>app.querySelector('[role="dialog"]')?.focus());
+      }
+    };
+
+    document.addEventListener('input',event=>{
+      if(event.target.id==='roleName')state.roleName=event.target.value;
+      else if(event.target.id==='roleTone')state.roleTone=event.target.value;
+      else if(event.target.id==='contactName')state.contactName=event.target.value;
+      else if(event.target.id==='contactPhone')state.contactPhone=event.target.value;
+      else if(event.target.id==='relationName')state.relationName=event.target.value;
+      else if(event.target.id==='relationBoundary')state.relationBoundary=event.target.value;
+    });
+    document.addEventListener('change',event=>{
+      if(event.target.id==='rightsCheck'){state.rightsConfirmed=event.target.checked;render()}
+      else if(event.target.id==='contactConsent'){state.contactConsent=event.target.checked;render()}
+      else if(event.target.id==='contactRelation')state.contactRelation=event.target.value;
+      else if(event.target.id==='accountDeleteConfirm'){
+        const button=document.querySelector('[data-action="confirm-account-delete"]');
+        if(button)button.disabled=!event.target.checked;
+      }
+    });
+    document.addEventListener('keydown',event=>{
+      if(event.key==='Enter'&&event.target.id==='chatInput'&&!event.shiftKey){
+        event.preventDefault();
+        document.querySelector('[data-action="send-message"]')?.click();
+        return;
+      }
+      if(event.key==='Escape'&&(state.dialog||state.sheet)){
+        event.preventDefault();
+        state.dialog=null;
+        state.sheet=null;
+        render();
+      }
+    });
+
+    document.addEventListener('click',event=>{
+      const jumpTarget=event.target.closest('[data-jump]')?.dataset.jump;
+      if(jumpTarget&&['chat','night','memory','timeline','trial','subscribe','safety','data','version','media'].includes(jumpTarget))state.ageStatus='pass';
+      const tabTarget=event.target.closest('[data-tab]')?.dataset.tab;
+      if(tabTarget&&!v12CanUseCompanion()){
+        event.preventDefault();event.stopImmediatePropagation();
+        state.screen='age';state.sheet=null;state.dialog=null;
+        setToast('年龄状态未通过，伴侣功能保持关闭');
+        return;
+      }
+      const button=event.target.closest('[data-action]');
+      if(!button)return;
+      const action=button.dataset.action;
+      const intercept=()=>{event.preventDefault();event.stopImmediatePropagation()};
+      if(action==='open-data'){
+        intercept();v12OpenSpecial('data');
+      }else if(action==='open-trial'||action==='open-subscribe'||action==='open-safety'||action==='open-version'){
+        intercept();
+        if(!v12CanUseCompanion()){state.screen='age';setToast('请先完成18+年龄保障');return}
+        v12OpenSpecial(action.replace('open-',''));
+      }else if(action==='open-receipt'){
+        intercept();v12OpenSpecial('receipt');
+      }else if(action==='close-special'){
+        intercept();v12CloseSpecial();
+      }else if(action==='edit-contact'){
+        intercept();state.contactReturn={screen:state.screen,tab:state.tab};state.screen='contact';render();
+      }else if(action==='cancel-contact'){
+        intercept();const target=state.contactReturn;state.contactReturn=null;state.screen=target?.screen||'safety';state.tab=target?.tab||'profile';render();
+      }else if(action==='skip-contact'){
+        intercept();state.contactSaved=false;state.screen='create';render();
+      }else if(action==='save-contact'){
+        intercept();
+        if(!state.contactConsent){setToast('请先确认安全联系人的独立用途');return}
+        state.contactSaved=true;
+        const target=state.contactReturn;
+        state.contactReturn=null;
+        state.screen=target?.screen||'create';
+        state.tab=target?.tab||state.tab;
+        render();
+      }else if(action==='delete-contact'){
+        intercept();state.contactSaved=false;state.contactConsent=false;setToast('安全联系人已删除');
+      }else if(action==='create-role'){
+        intercept();
+        if(!v12CanUseCompanion()){state.screen='age';setToast('年龄状态未通过，无法创建角色');return}
+        if(!state.rightsConfirmed){setToast('请先确认角色素材为原创或已获授权');return}
+        state.created=true;state.screen='app';state.tab='chat';setToast(state.roleName+'已创建 · 人格版本 v1.0');
+      }else if(action==='send-message'){
+        intercept();
+        const input=document.querySelector('#chatInput');
+        const text=input?.value.trim();
+        if(!text)return;
+        if(state.textTurnsUsed>=100){setToast('今日100轮已用尽，将于次日恢复');return}
+        state.messages.push({role:'user',text});
+        state.textTurnsUsed+=1;state.draft='';render();
+        setTimeout(()=>{state.messages.push({role:'assistant',text:'我听见了。我们可以慢一点，从你最想说的部分开始。'});setToast('AI回复已生成 · 原型模拟')},500);
+      }else if(action==='send-voice'){
+        intercept();
+        const text=document.querySelector('#voiceText')?.value.trim();
+        if(text)state.messages.push({role:'user',text});
+        state.sheet=null;setToast('转写已确认并作为文字消息发送');
+      }else if((action==='voice-input'||action==='image-sheet')&&state.trialState==='expired'&&!state.subscribed){
+        intercept();setToast(action==='voice-input'?'试用已结束，语音输入已暂停':'试用已结束，图片生成已暂停');
+      }else if(action==='generate-image'){
+        intercept();state.imageMode='generating';state.imageReady=false;state.sheet='image';render();
+        setTimeout(()=>{if(state.imageMode==='generating'){state.imageMode='ready';state.imageReady=true;render()}},900);
+      }else if(action==='r2-resources'){
+        intercept();state.dialog='r2-resources';render();
+      }else if(action==='exit-r2'){
+        intercept();state.dialog=null;state.sheet=null;state.screen='safety';render();
+      }else if(action==='delete-account'){
+        intercept();state.dialog='account-delete';render();
+      }else if(action==='confirm-account-delete'){
+        intercept();state.dialog=null;state.deletionJob={id:'ACC-0831-006',scope:'account',production:'processing',created:'2026-08-31 22:26'};v12OpenSpecial('receipt');
+      }else if(action==='submit-delete'){
+        intercept();state.dialog=null;state.deletionJob={id:'DEL-0831-019',scope:'chat',production:'processing',created:'2026-08-31 22:18'};v12OpenSpecial('receipt');
+      }else if(action==='confirm-subscribe'){
+        intercept();state.subscribed=true;state.renew=false;setToast('栖语订阅已模拟开通 · 自动续费仍关闭');
+      }else if(action==='manage-subscription'){
+        intercept();state.dialog='subscription-manage';render();
+      }else if(action==='cancel-subscription'){
+        intercept();state.subscribed=false;state.renew=false;state.dialog=null;setToast('已取消后续续费 · 关系资产保持不变');
+      }else if(action==='restore-purchase'){
+        intercept();state.subscribed=true;state.dialog=null;setToast('购买记录已模拟恢复');
+      }else if(action==='reset-world'){
+        intercept();state.worldState='neutral';setToast('世界状态已重置为中性场景');
+      }else if(action==='save-relation'){
+        intercept();state.relationName=document.querySelector('#relationName')?.value||state.relationName;state.relationBoundary=document.querySelector('#relationBoundary')?.value||state.relationBoundary;state.roleName=state.relationName;state.relationEditing=false;setToast('设定变更已保存为候选，发布前需回归评测');
+      }else if(action==='cycle-theme'||action==='toggle-night'){
+        intercept();
+        state.themeMode=state.themeMode==='follow'?'day':state.themeMode==='day'?'night':'follow';
+        state.night=state.themeMode==='night'||(state.themeMode==='follow'&&matchMedia('(prefers-color-scheme:dark)').matches);
+        setToast('外观模式：'+(state.themeMode==='follow'?'跟随系统':state.themeMode==='day'?'日间':'夜间'));
+      }
+    },true);
+    render();
+  </script>
+
+<script>
+(() => {
+  const manifest = [{"group":"01 年龄与 AI 告知","id":"notice-default","title":"告知｜未确认","renderer":"notice","navigation":null,"patch":{"checks":[false,false,false]}},{"group":"01 年龄与 AI 告知","id":"notice-ready","title":"告知｜可继续","renderer":"notice","navigation":null,"patch":{"checks":[true,true,true]}},{"group":"02 年龄增强核验","id":"age-idle","title":"年龄｜待核验","renderer":"age","navigation":null,"patch":{"screen":"age","ageStatus":"idle","ageScenario":"pass"}},{"group":"02 年龄增强核验","id":"age-reviewing","title":"年龄｜核验中","renderer":"age","navigation":null,"patch":{"screen":"age","ageStatus":"reviewing","ageScenario":"pass"}},{"group":"02 年龄增强核验","id":"age-pass","title":"年龄｜PASS","renderer":"age","navigation":null,"patch":{"screen":"age","ageStatus":"pass","ageScenario":"pass"}},{"group":"02 年龄增强核验","id":"age-review","title":"年龄｜REVIEW","renderer":"age","navigation":null,"patch":{"screen":"age","ageStatus":"review","ageScenario":"review"}},{"group":"02 年龄增强核验","id":"age-denied","title":"年龄｜DENIED","renderer":"age","navigation":null,"patch":{"screen":"age","ageStatus":"denied","ageScenario":"denied"}},{"group":"02 年龄增强核验","id":"age-appeal","title":"年龄｜申诉弹窗","renderer":"age","navigation":null,"patch":{"screen":"age","ageStatus":"denied","ageScenario":"denied","dialog":"age-appeal"}},{"group":"03 紧急联系人","id":"contact-empty","title":"联系人｜未保存","renderer":"contact","navigation":null,"patch":{"screen":"contact","contactSaved":false}},{"group":"03 紧急联系人","id":"contact-saved","title":"联系人｜已保存","renderer":"contact","navigation":null,"patch":{"screen":"contact","contactSaved":true,"contactConsent":true}},{"group":"04 创建角色","id":"create-default","title":"创建角色｜默认","renderer":"create","navigation":null,"patch":{"screen":"create"}},{"group":"05 对话与世界状态","id":"chat-day","title":"对话｜日间","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"night":false,"memory":"pending"}},{"group":"05 对话与世界状态","id":"chat-night","title":"对话｜暮色私语","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"night":true,"memory":"confirmed"}},{"group":"05 对话与世界状态","id":"chat-image","title":"对话｜情境图已交付","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"night":true,"memory":"confirmed","imageReady":true,"imageMode":"ready"}},{"group":"05 对话与世界状态","id":"voice-confirm","title":"语音输入｜确认转写","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"sheet":"voice","recording":false,"voiceError":false}},{"group":"06 关系记忆","id":"memory-pending","title":"记忆｜候选确认","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"sheet":"memory","memory":"pending"}},{"group":"06 关系记忆","id":"memory-confirmed","title":"记忆｜已确认","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"sheet":"memory","memory":"confirmed"}},{"group":"06 关系记忆","id":"memory-dismissed","title":"记忆｜已忽略可撤销","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"memory":"dismissed"}},{"group":"07 关系资产","id":"timeline-all","title":"时间线｜全部","renderer":"timeline","navigation":"timeline","patch":{"created":true,"screen":"app","tab":"timeline","checks":[true,true,true],"memory":"confirmed","timelineFilter":"all"}},{"group":"07 关系资产","id":"timeline-memory-empty","title":"时间线｜记忆空态","renderer":"timeline","navigation":"timeline","patch":{"created":true,"screen":"app","tab":"timeline","checks":[true,true,true],"memory":"dismissed","timelineFilter":"memory"}},{"group":"07 关系资产","id":"relation-world","title":"关系｜世界状态","renderer":"relation","navigation":"relation","patch":{"created":true,"screen":"app","tab":"relation","checks":[true,true,true],"memory":"confirmed"}},{"group":"08 试用与订阅","id":"trial-active","title":"试用｜进行中","renderer":"trial","navigation":"profile","patch":{"screen":"trial","trialState":"active"}},{"group":"08 试用与订阅","id":"trial-ending","title":"试用｜即将到期","renderer":"trial","navigation":"profile","patch":{"screen":"trial","trialState":"ending"}},{"group":"08 试用与订阅","id":"trial-expired","title":"试用｜到期降级","renderer":"trial","navigation":"profile","patch":{"screen":"trial","trialState":"expired"}},{"group":"08 试用与订阅","id":"subscribe-default","title":"订阅｜¥39 月度方案","renderer":"subscribe","navigation":"profile","patch":{"screen":"subscribe","renew":false}},{"group":"08 试用与订阅","id":"subscribe-renew","title":"订阅｜明确开启续费","renderer":"subscribe","navigation":"profile","patch":{"screen":"subscribe","renew":true}},{"group":"09 安全与帮助","id":"safety-center","title":"安全与帮助｜稳定入口","renderer":"safety","navigation":"profile","patch":{"screen":"safety"}},{"group":"09 安全与帮助","id":"safety-2h","title":"安全｜连续 2 小时提醒","renderer":"chat","navigation":"chat","patch":{"created":true,"screen":"app","tab":"chat","checks":[true,true,true],"dialog":"safety"}},{"group":"09 安全与帮助","id":"safety-r2","title":"安全｜R2 固定响应","renderer":"safety","navigation":"profile","patch":{"screen":"safety","dialog":"r2"}},{"group":"09 安全与帮助","id":"safety-report","title":"安全｜举报内容","renderer":"safety","navigation":"profile","patch":{"screen":"safety","dialog":"report"}},{"group":"09 安全与帮助","id":"safety-complaint","title":"安全｜服务投诉","renderer":"safety","navigation":"profile","patch":{"screen":"safety","dialog":"complaint"}},{"group":"10 数据中心","id":"data-default","title":"数据中心｜默认","renderer":"data","navigation":"profile","patch":{"screen":"data","retention":"90"}},{"group":"10 数据中心","id":"data-delete-confirm","title":"数据中心｜删除确认","renderer":"data","navigation":"profile","patch":{"screen":"data","dialog":"delete"}},{"group":"10 数据中心","id":"delete-processing","title":"删除回执｜处理中","renderer":"receipt","navigation":"profile","patch":{"screen":"receipt","deletionJob":{"id":"DEL-0831-019","production":"processing","created":"2026-08-31 22:18"}}},{"group":"10 数据中心","id":"delete-done","title":"删除回执｜已完成","renderer":"receipt","navigation":"profile","patch":{"screen":"receipt","deletionJob":{"id":"DEL-0831-019","production":"done","created":"2026-08-31 22:18"}}},{"group":"11 人格连续性","id":"version-history","title":"人格版本｜变更记录","renderer":"version","navigation":"relation","patch":{"screen":"version","personaVersion":"1.1"}},{"group":"11 人格连续性","id":"version-feedback","title":"人格版本｜异常反馈","renderer":"version","navigation":"relation","patch":{"screen":"version","personaVersion":"1.1","dialog":"version-feedback"}},{"group":"12 媒体状态","id":"media-normal","title":"媒体｜正常","renderer":"media","navigation":"chat","patch":{"screen":"media","imageMode":"idle"}},{"group":"12 媒体状态","id":"media-image-failed","title":"媒体｜图片失败返额","renderer":"media","navigation":"chat","patch":{"screen":"media","imageMode":"failed"}},{"group":"12 媒体状态","id":"media-quota","title":"媒体｜图片额度耗尽","renderer":"media","navigation":"chat","patch":{"screen":"media","imageMode":"quota"}},{"group":"12 媒体状态","id":"media-tts-failed","title":"媒体｜TTS 失败降级","renderer":"media","navigation":"chat","patch":{"screen":"media","ttsFailed":true}},{"group":"12 媒体状态","id":"media-asr-failed","title":"媒体｜ASR 失败降级","renderer":"media","navigation":"chat","patch":{"screen":"media","voiceError":true}}];
+  const screenMap = new Map(manifest.map(item => [item.id, item]));
+  const params = new URLSearchParams(location.search);
+  const requested = params.get('screen');
+  const annotate = params.get('annotate') === '1';
+  const item = screenMap.get(requested) || screenMap.get('chat-day');
+
+  function applyEntry(entry) {
+    state = Object.assign(initial(), entry.patch || {});
+    if (!entry.id.startsWith('notice-') && !entry.id.startsWith('age-')) {
+      state.ageStatus = 'pass';
+    }
+    if (entry.navigation) {
+      state.created = true;
+    }
+    if (entry.id === 'contact-saved') state.contactConsent = true;
+    render();
+    document.title = '栖语 V1.2｜' + entry.title;
+  }
+
+  function mountAnnotation(entry, enabled = annotate) {
+    document.body.classList.toggle('qiyu-annotate', enabled);
+    document.querySelector('.qiyu-handoff-badge')?.remove();
+    if (!enabled) return;
+    const panel = document.createElement('aside');
+    panel.className = 'qiyu-handoff-badge';
+    panel.innerHTML = '<span>HANDOFF · ' + entry.group + '</span><b>' + entry.title + '</b><code>?screen=' + entry.id + '&annotate=1</code><button type="button">复制当前链接</button>';
+    panel.querySelector('button').addEventListener('click', async () => {
+      await navigator.clipboard?.writeText(location.href);
+      panel.querySelector('button').textContent = '已复制';
+    });
+    document.body.appendChild(panel);
+  }
+
+  applyEntry(item);
+  mountAnnotation(item);
+  window.qiyuHandoff = {
+    version: '1.2',
+    manifest,
+    open(id, annotation = annotate) {
+      const target = screenMap.get(id);
+      if (!target) throw new Error('Unknown screen id: ' + id);
+      const url = new URL(location.href);
+      url.searchParams.set('screen', id);
+      if (annotation) url.searchParams.set('annotate', '1'); else url.searchParams.delete('annotate');
+      history.pushState({ screen: id }, '', url);
+      applyEntry(target);
+      mountAnnotation(target, annotation);
+    }
+  };
+  addEventListener('popstate', () => {
+    const target = screenMap.get(new URLSearchParams(location.search).get('screen')) || screenMap.get('chat-day');
+    applyEntry(target); mountAnnotation(target);
+  });
+})();
+</script></body>
+</html>

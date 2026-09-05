@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="design_doc_mode" content="canvas">
+  <title>栖语 · 三种视觉方向</title>
+  <style>
+    :root {
+      --ink: #292236;
+      --paper: #f4efe7;
+      --mauve: #a99baa;
+      --rose: #d2a4a7;
+      --plum: #5b3f68;
+      --night: #17131d;
+      --coral: #e36f54;
+      font-family: -apple-system, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body, #root { margin: 0; min-height: 100%; }
+    body { background: #ece9e4; color: #201c27; }
+    body.direct-preview { width: 390px; min-height: 844px; overflow: hidden; background: transparent; zoom: 1.25; }
+    body.direct-preview #root { width: 390px; height: 844px; }
+    button { font: inherit; }
+    .phone {
+      position: relative;
+      width: 390px;
+      height: 844px;
+      overflow: hidden;
+      isolation: isolate;
+    }
+    .phone::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      pointer-events: none;
+      box-shadow: inset 0 0 0 1px rgba(40, 30, 50, .13);
+    }
+    .tap { cursor: pointer; user-select: none; }
+    .ai-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 28px;
+      padding: 0 11px;
+      border-radius: 999px;
+      font-size: 11px;
+      letter-spacing: .04em;
+      white-space: nowrap;
+    }
+    .ai-tag::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .65;
+    }
+    .bottom-nav {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 20;
+      height: 73px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      align-items: center;
+      padding: 6px 16px 9px;
+    }
+    .nav-item {
+      min-height: 44px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font-size: 10px;
+      opacity: .52;
+    }
+    .nav-item::before {
+      content: "";
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .6;
+    }
+    .nav-item.active { opacity: 1; }
+    .nav-item.active::before { width: 18px; border-radius: 3px; }
+
+    /* A · Relationship journal */
+    .journal {
+      background:
+        radial-gradient(circle at 82% 15%, rgba(186, 169, 189, .24), transparent 30%),
+        radial-gradient(circle at 16% 67%, rgba(222, 191, 176, .2), transparent 28%),
+        #f4efe7;
+      color: #2f293b;
+      padding: 24px 24px 76px;
+    }
+    .journal::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      opacity: .15;
+      pointer-events: none;
+      background-image: repeating-linear-gradient(90deg, rgba(61,49,69,.08) 0, rgba(61,49,69,.08) 1px, transparent 1px, transparent 5px);
+      mix-blend-mode: multiply;
+    }
+    .journal-top {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 8px;
+    }
+    .journal-brand {
+      font-family: "Songti SC", "Noto Serif SC", serif;
+      font-size: 22px;
+      letter-spacing: .16em;
+    }
+    .journal .ai-tag { border: 1px solid rgba(79, 65, 89, .32); color: #71667c; background: rgba(255,255,255,.36); }
+    .journal-date {
+      position: relative;
+      z-index: 2;
+      margin-top: 34px;
+      font-size: 10px;
+      letter-spacing: .18em;
+      color: #8c8191;
+      text-transform: uppercase;
+    }
+    .journal-hero {
+      position: relative;
+      z-index: 2;
+      height: 232px;
+      margin-top: 12px;
+      border-top: 1px solid rgba(57,45,68,.55);
+      border-bottom: 1px solid rgba(57,45,68,.24);
+    }
+    .journal-title {
+      position: absolute;
+      left: 0;
+      top: 20px;
+      z-index: 2;
+    }
+    .journal-title small { display: block; margin-bottom: 14px; color: #9a8da0; font-size: 11px; letter-spacing: .08em; }
+    .journal-title h2 {
+      margin: 0;
+      font-family: "Songti SC", "Noto Serif SC", serif;
+      font-size: 48px;
+      font-weight: 400;
+      letter-spacing: .04em;
+      line-height: 1;
+    }
+    .journal-title p { margin: 14px 0 0; width: 120px; font-size: 12px; color: #6f6576; line-height: 1.75; }
+    .journal-portrait {
+      position: absolute;
+      right: 0;
+      top: 17px;
+      width: 162px;
+      height: 196px;
+      object-fit: cover;
+      object-position: 55% 30%;
+      filter: saturate(.72) contrast(.94);
+      border-radius: 82px 82px 8px 8px;
+    }
+    .journal-orbit {
+      position: absolute;
+      right: -13px;
+      top: 4px;
+      width: 188px;
+      height: 188px;
+      border: 1px solid rgba(111,91,123,.28);
+      border-radius: 50%;
+      z-index: -1;
+    }
+    .journal-orbit::after { content: ""; position: absolute; width: 7px; height: 7px; border-radius: 50%; background: #b298b4; top: 21px; right: 28px; }
+    .journal-memory {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(57,45,68,.2);
+      font-size: 12px;
+    }
+    .journal-memory span:first-child { color: #b17e86; }
+    .journal-memory button { border: 0; background: transparent; color: #54485d; padding: 10px 0 10px 16px; }
+    .journal-chat { position: relative; z-index: 2; padding-top: 18px; }
+    .journal-line { display: grid; grid-template-columns: 51px 1fr; gap: 11px; padding: 11px 0; }
+    .journal-line .who { font-family: "Songti SC", serif; color: #9a8b9e; font-size: 11px; padding-top: 3px; }
+    .journal-line p { margin: 0; font-family: "Songti SC", "Noto Serif SC", serif; font-size: 15px; line-height: 1.75; }
+    .journal-voice { margin: 6px 0 0 62px; display: flex; align-items: center; gap: 9px; width: 174px; color: #6d5d73; font-size: 10px; }
+    .journal-wave { flex: 1; height: 17px; background: repeating-linear-gradient(90deg, currentColor 0 1px, transparent 1px 5px); opacity: .42; clip-path: polygon(0 45%,7% 20%,14% 65%,22% 5%,29% 72%,37% 26%,44% 56%,51% 14%,58% 70%,66% 30%,74% 59%,82% 12%,90% 68%,100% 39%,100% 61%,90% 42%,82% 87%,74% 41%,66% 71%,58% 30%,51% 85%,44% 44%,37% 74%,29% 28%,22% 95%,14% 35%,7% 80%,0 55%); }
+    .journal-composer { position: absolute; left: 24px; right: 24px; bottom: 72px; z-index: 5; height: 50px; display: flex; align-items: center; gap: 12px; border-top: 1px solid rgba(57,45,68,.5); }
+    .journal-composer span { flex: 1; color: #8f8292; font-size: 13px; }
+    .journal-composer button { width: 36px; height: 36px; border: 1px solid #574861; border-radius: 50%; background: transparent; color: #574861; }
+    .journal .bottom-nav { background: rgba(244,239,231,.93); border-top: 1px solid rgba(57,45,68,.16); backdrop-filter: blur(12px); }
+
+    /* B · Twilight whisper */
+    .twilight { background: #17131d; color: #f5eced; }
+    .twilight-image { position: absolute; inset: 0 0 auto; width: 100%; height: 468px; object-fit: cover; object-position: 50% 23%; filter: saturate(.72) brightness(.72) contrast(1.05); }
+    .twilight-shade { position: absolute; inset: 0; background: linear-gradient(180deg, rgba(17,12,22,.08) 5%, rgba(23,19,29,.22) 38%, #17131d 61%); }
+    .twilight-top { position: relative; z-index: 2; display: flex; justify-content: space-between; align-items: center; padding: 29px 20px 0; }
+    .twilight-brand { font-family: "Songti SC", serif; font-size: 18px; letter-spacing: .2em; }
+    .twilight .ai-tag { background: rgba(18,12,22,.3); border: 1px solid rgba(255,255,255,.24); color: rgba(255,255,255,.78); backdrop-filter: blur(12px); }
+    .twilight-name { position: absolute; left: 22px; top: 302px; z-index: 2; }
+    .twilight-name small { display: block; font-size: 10px; color: rgba(255,255,255,.62); letter-spacing: .16em; }
+    .twilight-name h2 { margin: 7px 0 0; font-family: "Songti SC", serif; font-weight: 400; font-size: 45px; letter-spacing: .08em; }
+    .twilight-presence { position: absolute; right: 23px; top: 326px; z-index: 2; width: 48px; height: 48px; border: 1px solid rgba(236,204,214,.52); border-radius: 50%; }
+    .twilight-presence::before, .twilight-presence::after { content: ""; position: absolute; border: 1px solid rgba(236,204,214,.25); border-radius: 50%; }
+    .twilight-presence::before { inset: -8px; }
+    .twilight-presence::after { inset: 15px; background: #d1a1ab; border: 0; box-shadow: 0 0 25px rgba(209,161,171,.7); }
+    .twilight-panel { position: absolute; z-index: 4; left: 16px; right: 16px; top: 396px; height: 354px; padding: 22px 18px; border-radius: 28px 28px 15px 15px; background: rgba(42,32,48,.72); border: 1px solid rgba(255,255,255,.11); box-shadow: 0 28px 70px rgba(0,0,0,.34); backdrop-filter: blur(24px); }
+    .twilight-context { display: flex; align-items: center; justify-content: space-between; color: #c9afbd; font-size: 11px; letter-spacing: .06em; }
+    .twilight-context button { border: 0; border-radius: 999px; padding: 7px 10px; background: rgba(222,173,185,.13); color: #e1bec7; font-size: 10px; }
+    .twilight-bubble { margin-top: 21px; font-family: "Songti SC", serif; font-size: 16px; line-height: 1.75; letter-spacing: .02em; }
+    .twilight-user { margin: 17px 0 0 auto; width: fit-content; max-width: 78%; padding: 10px 14px; border-radius: 16px 16px 4px 16px; background: rgba(255,255,255,.09); color: rgba(255,255,255,.76); font-size: 13px; }
+    .twilight-audio { margin-top: 20px; display: flex; align-items: center; gap: 11px; height: 46px; padding: 0 13px; border: 1px solid rgba(255,255,255,.1); border-radius: 14px; background: rgba(10,8,13,.21); }
+    .twilight-play { width: 25px; height: 25px; border-radius: 50%; display: grid; place-items: center; background: #d3a6b0; color: #261b2b; font-size: 10px; }
+    .twilight-audio .line { height: 1px; flex: 1; background: linear-gradient(90deg, #d3a6b0 41%, rgba(255,255,255,.14) 41%); position: relative; }
+    .twilight-audio .line::after { content: ""; position: absolute; width: 6px; height: 6px; border-radius: 50%; background: #f0d3d9; left: 39%; top: -2.5px; }
+    .twilight-audio small { color: rgba(255,255,255,.46); }
+    .twilight-composer { margin-top: 18px; height: 50px; display: flex; align-items: center; gap: 10px; border-radius: 18px; padding: 0 7px 0 16px; background: rgba(255,255,255,.07); color: rgba(255,255,255,.45); font-size: 13px; }
+    .twilight-composer span { flex: 1; }
+    .twilight-composer button { width: 38px; height: 38px; border: 0; border-radius: 14px; color: #2b1d30; background: #d4a6b0; }
+    .twilight .bottom-nav { color: #f2e8ed; background: rgba(23,19,29,.96); border-top: 1px solid rgba(255,255,255,.08); }
+
+    /* C · Contemporary magazine */
+    .magazine { background: #f3f0e8; color: #171518; padding-bottom: 74px; }
+    .mag-top { display: flex; align-items: flex-start; justify-content: space-between; padding: 22px 20px 0; }
+    .mag-issue { font-size: 9px; letter-spacing: .18em; line-height: 1.5; text-transform: uppercase; }
+    .mag-issue b { display: block; font-size: 20px; letter-spacing: -.03em; }
+    .magazine .ai-tag { color: #171518; border: 1px solid #171518; background: transparent; border-radius: 0; }
+    .mag-headline { position: relative; height: 279px; margin-top: 15px; }
+    .mag-number { position: absolute; left: 14px; top: -24px; font: 800 134px/.9 Georgia, serif; letter-spacing: -.08em; color: #171518; z-index: 0; }
+    .mag-photo { position: absolute; right: 0; top: 15px; width: 246px; height: 249px; object-fit: cover; object-position: 52% 23%; filter: saturate(.55) contrast(1.08); z-index: 1; }
+    .mag-red { position: absolute; width: 96px; height: 38px; background: #e36f54; top: 182px; left: 18px; z-index: 2; }
+    .mag-label { position: absolute; z-index: 3; left: 27px; top: 189px; color: #fff8ed; font-size: 10px; letter-spacing: .08em; line-height: 1.25; }
+    .mag-name { position: absolute; z-index: 3; left: 18px; bottom: -14px; font: 700 52px/1 "Songti SC", serif; letter-spacing: -.02em; }
+    .mag-meta { display: flex; justify-content: space-between; align-items: center; margin: 16px 20px 0; padding: 11px 0; border-top: 2px solid #171518; border-bottom: 1px solid #171518; font-size: 10px; letter-spacing: .08em; }
+    .mag-memory { background: #171518; color: #f7f2e8; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; font-size: 11px; }
+    .mag-memory b { color: #e8856e; font-weight: 600; }
+    .mag-chat { padding: 15px 20px 0; }
+    .mag-msg { display: grid; grid-template-columns: 44px 1fr; border-bottom: 1px solid rgba(23,21,24,.22); padding: 11px 0; gap: 8px; }
+    .mag-msg strong { font: 700 10px/1.5 -apple-system, "PingFang SC", sans-serif; text-transform: uppercase; }
+    .mag-msg p { margin: 0; font-size: 14px; line-height: 1.7; }
+    .mag-msg.character p { font-family: "Songti SC", serif; font-size: 15px; }
+    .mag-audio { display: grid; grid-template-columns: 44px 1fr 36px; align-items: center; gap: 8px; padding: 13px 0; border-bottom: 1px solid #171518; font-size: 10px; }
+    .mag-bars { height: 18px; background: repeating-linear-gradient(90deg, #171518 0 2px, transparent 2px 6px); clip-path: polygon(0 45%,6% 12%,12% 70%,18% 22%,24% 84%,30% 8%,36% 65%,42% 30%,48% 78%,54% 14%,60% 62%,66% 26%,72% 86%,78% 18%,84% 69%,90% 29%,96% 73%,100% 44%,100% 56%,96% 27%,90% 71%,84% 31%,78% 82%,72% 14%,66% 74%,60% 38%,54% 86%,48% 22%,42% 70%,36% 35%,30% 92%,24% 16%,18% 78%,12% 30%,6% 88%,0 55%); }
+    .mag-compose { margin: 14px 20px 0; display: grid; grid-template-columns: 1fr 48px; border: 1px solid #171518; min-height: 46px; }
+    .mag-compose span { padding: 13px; color: rgba(23,21,24,.55); font-size: 12px; }
+    .mag-compose button { border: 0; border-left: 1px solid #171518; background: #e36f54; color: #fff; font-weight: 700; }
+    .magazine .bottom-nav { background: #f3f0e8; border-top: 2px solid #171518; }
+    .magazine .nav-item { align-items: flex-start; padding-left: 8px; text-transform: uppercase; letter-spacing: .04em; }
+    .magazine .nav-item::before { border-radius: 0; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
