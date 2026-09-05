@@ -28,6 +28,20 @@ docker ps --format "{{.Names}} {{.Ports}}"   # 既有容器与资源
 判定：内存 ≥ 4GB 直接用；2-4GB 需先确认 AI 质检系统空闲内存；质检系统若跑大模型
 推理（常驻 >2GB），建议栖语换轻量新机（2C4G 约 ¥100/月内）。
 
+## 一点五、2GiB 小机贴线部署保护（你的情况：剩余 ~1.24GiB vs 栈峰值 ~1.2GiB）
+
+compose 已给三容器加内存上限（PG 768m / API 512m / Worker 384m）。**再补宿主 swap 兜底**（防瞬时峰值触发 OOM 杀进程）：
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab   # 重启持久
+free -h                                                       # 确认 Swap: 2.0Gi
+```
+
+若同机还有 AI 质检系统等常驻服务，部署后观察 `docker stats` 一天；若频繁贴上限，
+优先考虑停用闲置旧服务或升配到 2C4G（栖语公开阶段前无论如何建议升配）。
+
 ## 二、部署步骤
 
 ```bash

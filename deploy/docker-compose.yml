@@ -28,6 +28,8 @@ services:
     # docker compose exec postgres psql ... 或临时加端口映射。
     expose:
       - "5432"
+    # 2GiB 小机贴线部署：容器内存上限防 OOM 连坐（需配合宿主 swap，见 README）。
+    mem_limit: 768m
 
   api:
     build:
@@ -62,6 +64,7 @@ services:
     ports:
       # 与同机其他服务（如既有 AI 质检系统）错开端口：左侧宿主端口在 .env 可调。
       - "${API_PORT:-3000}:3000"
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
       interval: 10s
