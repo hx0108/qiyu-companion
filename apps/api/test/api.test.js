@@ -94,6 +94,13 @@ test('仅白名单开发壳资源由同源 API 服务托管，API 路由仍要�
   const styles = await rawRequest(base, '/styles.css');
   assert.equal(styles.status, 200);
   assert.match(styles.contentType, /^text\/css/);
+  const restoration = await rawRequest(base, '/prototype-restoration.css');
+  assert.equal(restoration.status, 200);
+  assert.match(restoration.contentType, /^text\/css/);
+  assert.match(restoration.text, /qiyu-prototype/);
+  const characterAsset = await rawRequest(base, '/assets/qiyu-character.png');
+  assert.equal(characterAsset.status, 200);
+  assert.match(characterAsset.contentType, /^image\/png/);
   const tokens = await rawRequest(base, '/tokens.css');
   assert.equal(tokens.status, 200);
   assert.match(tokens.contentType, /^text\/css/);

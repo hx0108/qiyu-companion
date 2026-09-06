@@ -1,0 +1,17 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+.pnpm-store
+**/.pnpm-store
+.playwright-cli
+.qiyu-dev-media
+output
+tmp
+*.log
+.env
+.env.*
+!*.env.example
+deploy/.env
+infra/postgres/.env
+外部验证包

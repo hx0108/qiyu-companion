@@ -16,6 +16,48 @@ paths:
       security: []
       responses:
         '200': { description: 服务已启动 }
+  /api/v1/trial-access:
+    get:
+      summary: 查询封闭试用入口状态
+      description: 公开且不含凭据。enabled=true 只表示邀请码试用技术入口已启用，不构成公开上线或合规许可。
+      security: []
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+  /api/v1/auth/trial-sessions:
+    post:
+      summary: 用运营线下签发的邀请码和初始口令创建封闭试用会话
+      description: 仅 QIYU_TRIAL_AUTH=invite 时启用。邀请码、初始口令、Access Token 和 Refresh Token 仅以哈希形式持久化；同一邀请码只绑定一个账户，后续登录会撤销旧会话。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invite_code, initial_secret]
+              properties:
+                invite_code: { type: string, example: QYABCDEF-123456-789ABC-DEF012 }
+                initial_secret: { type: string, writeOnly: true }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/auth/trial-sessions/refresh:
+    post:
+      summary: 轮换封闭试用会话令牌
+      description: Refresh Token 单次使用；轮换后旧 Access/Refresh Token 均失效。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties: { refresh_token: { type: string, writeOnly: true } }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
   /api/v1/dev/session:
     get:
       summary: 获取当前合成开发账户状态
@@ -83,6 +125,31 @@ paths:
       description: 返回服务端维护的公开 V1 价格、配额和默认非自动续费事实。
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/trial-feedback:
+    get:
+      summary: 查询本人提交的封闭试用反馈
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      summary: 提交封闭试用体验反馈
+      description: 仅追加、仅本人可读；反馈不会自动写入角色人格、关系记忆或安全状态。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, rating]
+              properties:
+                category: { type: string, enum: [ONBOARDING, PERSONA, MEMORY, SAFETY, USABILITY, OTHER] }
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                note: { type: string, maxLength: 1200 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
   /api/v1/checkout-sessions:
     post:

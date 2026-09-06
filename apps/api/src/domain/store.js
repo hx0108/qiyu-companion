@@ -32,6 +32,7 @@ class DevelopmentStore {
     this.worldStates = new Map();
     this.worldStateEvents = new Map();
     this.messageFeedback = new Map();
+    this.trialFeedback = new Map();
     this.ocImports = new Map();
     this.contentRightsReviews = new Map();
     this.contentRightsAppeals = new Map();

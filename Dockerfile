@@ -14,6 +14,8 @@ RUN cd apps/api && npm ci --omit=dev || npm install --omit=dev
 COPY apps/api ./apps/api
 COPY apps/web ./apps/web
 COPY designs/qiyu-v1-handoff/tokens ./designs/qiyu-v1-handoff/tokens
+# 仅复制运行时白名单映射的高保真视觉资产，不将原型页面本身暴露为通用静态目录。
+COPY designs/qiyu-v1-handoff/prototype/imgs ./designs/qiyu-v1-handoff/prototype/imgs
 
 ENV NODE_ENV=development
 # 非 root 运行。

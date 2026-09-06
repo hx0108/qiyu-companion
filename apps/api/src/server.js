@@ -18,6 +18,9 @@ const { startConversationSummaryWorker } = require('./domain/conversation-summar
 const { startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
 
 const port = Number(process.env.PORT || 3000);
+// Keep direct development launches local-only, while container deployments
+// can explicitly bind their published API port to the container interface.
+const host = process.env.HOST || '127.0.0.1';
 const runtime = assertLocalSyntheticRuntimeAllowed(assertRuntimeConfiguration(process.env));
 const store = createPersistenceFromEnvironment(process.env);
 const replyGenerator = createQwenReplyGenerator(process.env) || undefined;
@@ -36,8 +39,8 @@ const imageResultFetcher = imageGenerator ? fetchTencentGeneratedImage : undefin
 // 外层权益服务仅对进程内内存存储有效；Postgres 模式由 withAccountTransaction
 // 在每个请求作用域 store 上挂载实例（请求级账本与订阅都在其中加载）。
 const mediaEntitlementService = process.env.QIYU_PERSISTENCE === 'postgres' ? null : new MediaEntitlementService({ store });
-createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService }).listen(port, '127.0.0.1', () => {
-  console.log(`栖语 M1 本地合成 API 已监听 http://127.0.0.1:${port}`);
+createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService, trialAuthEnabled: process.env.QIYU_TRIAL_AUTH === 'invite' }).listen(port, host, () => {
+  console.log(`栖语 M1 本地合成 API 已监听 http://${host}:${port}`);
   console.log(`运行模式：${runtime.mode}；外部高风险能力默认关闭，必须经生产配置门禁启用。`);
   console.log(`持久化：${process.env.QIYU_PERSISTENCE || 'memory'}；模型：${process.env.QIYU_LLM_PROVIDER === 'qwen' ? 'qwen（本地开发接线）' : 'mock'}。`);
 });

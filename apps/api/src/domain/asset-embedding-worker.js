@@ -140,6 +140,12 @@ function replayAssetEmbeddingDeadLetter({ store, jobId, reviewerId, reasonHash, 
 // 删除/修订/撤销时立即失效：向量下线、未完成任务取消（技术设计 8.9 的
 // VECTOR_INDEX 目标），在线召回即刻不再命中该资产版本。
 function invalidateAssetEmbedding(store, assetId, reason, now = new Date().toISOString()) {
+  // PostgreSQL 请求作用域中的应用角色只允许创建任务和读取已过滤的
+  // 召回结果。派生向量的物理删除/任务取消由专用 Worker 完成；资产状态
+  // 本身已经先变为非 ACTIVE，因而在线召回会立即排除它。
+  if (store?.assetEmbeddingWritesDeferred) {
+    return { vector_removed: false, jobs_cancelled: 0, deferred_to_worker: true };
+  }
   const removed = store.assetEmbeddings.delete(assetId);
   let cancelled = 0;
   for (const job of store.assetEmbeddingJobs.values()) {

@@ -3,6 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { DevelopmentStore } = require('../domain/store');
 const { PostgresRepository } = require('./postgres-repository');
+const { PostgresTrialInviteAuthRepository } = require('./postgres-trial-invite-auth-repository');
 const { MediaEntitlementService } = require('../domain/media-entitlement-service');
 const { usageDate, usageKey } = require('../domain/daily-chat-usage');
 
@@ -15,17 +16,23 @@ class PostgresStore {
   constructor({ pool }) {
     if (!pool || typeof pool.connect !== 'function') throw new TypeError('PostgresStore requires a pg-compatible pool');
     this.pool = pool;
+    this.trialAuth = new PostgresTrialInviteAuthRepository({ pool });
   }
 
   resolveAccountId(developmentAccountId) { return DEVELOPMENT_DATABASE_ACCOUNT_IDS[developmentAccountId]; }
   account() { return undefined; }
+  createTrialSession(input) { return this.trialAuth.createSession(input); }
+  resolveTrialAccessToken(token) { return this.trialAuth.resolveAccessToken(token); }
+  refreshTrialSession(input) { return this.trialAuth.refreshSession(input); }
 
   async withAccountTransaction(accountId, operation, { lockDailyUsage = false } = {}) {
     const client = await this.pool.connect();
     const repository = new PostgresRepository(client);
     try {
       await repository.beginAccountScope(accountId);
-      await repository.seedDevelopmentAccount(accountId, noticeIdFor(accountId));
+      if (Object.values(DEVELOPMENT_DATABASE_ACCOUNT_IDS).includes(accountId)) {
+        await repository.seedDevelopmentAccount(accountId, noticeIdFor(accountId));
+      }
       const scopedStore = await PostgresRequestStore.load(client, accountId, { lockDailyUsage });
       // 媒体权益按请求作用域绑定：账本与订阅都在本请求加载的 store 内。
       scopedStore.mediaEntitlementService = new MediaEntitlementService({ store: scopedStore });
@@ -49,6 +56,7 @@ class PostgresRequestStore extends DevelopmentStore {
     this.accountId = accountId;
     this.baseline = null;
     this.recallSource = 'postgres-structured-development-store';
+    this.assetEmbeddingWritesDeferred = true;
   }
 
   resolveAccountId(developmentAccountId) { return DEVELOPMENT_DATABASE_ACCOUNT_IDS[developmentAccountId]; }
@@ -148,10 +156,12 @@ class PostgresRequestStore extends DevelopmentStore {
         occurred_at, last_replayed_at, last_replayed_by, last_replay_reason_sha256 FROM asset_embedding_dead_letters WHERE account_id = $1`, [accountId]]
       , [`SELECT asset_id, account_id, character_id, embedding::text AS embedding_text, embedding_model_version, created_at, updated_at, version
         FROM relationship_asset_embeddings WHERE account_id = $1`, [accountId]]
+      , [`SELECT feedback_id, account_id, category, rating, note, created_at FROM trial_feedback
+        WHERE account_id = $1 ORDER BY created_at DESC`, [accountId]]
     ];
     const results = [];
     for (const [sql, values] of queries) results.push(await client.query(sql, values));
-    const [accountRows, noticeRows, characterRows, personaVersionRows, worldStateRows, worldStateEventRows, conversationRows, messageRows, conversationSummaryRows, conversationSummaryJobRows, outboxEventRows, candidateRows, assetRows, mediaJobRows, mediaAssetRows, entitlementLedgerRows, subscriptionRows, subscriptionOrderRows, paymentEventRows, paymentQuarantineRows, deletionRows, contactRows, complaintRows, proactiveEventRows, proactiveMessageRows, dailyUsageRows, operationMetricRows, idempotencyRows, messageFeedbackRows, ocImportRows, contentRightsReviewRows, contentRightsAppealRows, contentRightsDecisionRows, ageReviewDecisionRows, assetEmbeddingJobRows, assetEmbeddingDeadLetterRows, assetEmbeddingRows] = results.map((result) => result.rows);
+    const [accountRows, noticeRows, characterRows, personaVersionRows, worldStateRows, worldStateEventRows, conversationRows, messageRows, conversationSummaryRows, conversationSummaryJobRows, outboxEventRows, candidateRows, assetRows, mediaJobRows, mediaAssetRows, entitlementLedgerRows, subscriptionRows, subscriptionOrderRows, paymentEventRows, paymentQuarantineRows, deletionRows, contactRows, complaintRows, proactiveEventRows, proactiveMessageRows, dailyUsageRows, operationMetricRows, idempotencyRows, messageFeedbackRows, ocImportRows, contentRightsReviewRows, contentRightsAppealRows, contentRightsDecisionRows, ageReviewDecisionRows, assetEmbeddingJobRows, assetEmbeddingDeadLetterRows, assetEmbeddingRows, trialFeedbackRows] = results.map((result) => result.rows);
     const account = accountRows[0];
     if (!account) throw new Error('Scoped development account was not available after seed');
     store.accounts.set(account.account_id, {
@@ -201,7 +211,18 @@ class PostgresRequestStore extends DevelopmentStore {
     for (const row of mediaJobRows) store.mediaJobs.set(row.job_id, { job_id: row.job_id, account_id: row.account_id, character_id: row.character_id, conversation_id: row.conversation_id, source_message_id: row.source_message_id, input_asset_id: row.input_asset_id, reference_asset_id: row.reference_asset_id, entitlement_id: row.entitlement_id, type: row.type, state: row.state, attempts: Number(row.attempts), provider: row.provider, provider_request_id: row.provider_request_id, provider_job_id: row.provider_job_id, moderation_policy_version: row.moderation_policy_version, result_asset_id: row.result_asset_id, transcript_text: row.transcript_text, transcript_state: row.transcript_state, failure_code: row.failure_code, provider_error_code: row.provider_error_code, world_state_id: row.world_state_id, world_state_version: row.world_state_version === null ? null : Number(row.world_state_version), scene_contract: row.scene_contract, voice_id: row.voice_id, voice_version: row.voice_version, authorization_record_id: row.authorization_record_id, rights_review_id: row.rights_review_id, rights_review_state: row.rights_review_state, created_at: row.created_at });
     for (const row of mediaAssetRows) store.mediaAssets.set(row.asset_id, { asset_id: row.asset_id, account_id: row.account_id, character_id: row.character_id, job_id: row.job_id, type: row.type, state: row.state, media_type: row.media_type, mime_type: row.mime_type, byte_length: Number(row.byte_length), checksum: row.checksum, object_key: row.object_key, provider: row.provider, provider_request_id: row.provider_request_id, ai_generated: row.ai_generated, aigc_mark_version: row.aigc_mark_version, confirmation_state: row.confirmation_state, moderation_policy_version: row.moderation_policy_version, failure_code: row.failure_code, created_at: row.created_at, deleted_at: row.deleted_at, rights_review_id: row.rights_review_id });
     for (const row of entitlementLedgerRows) store.entitlementLedgers.set(row.entitlement_ledger_id, { entitlement_ledger_id: row.entitlement_ledger_id, account_id: row.account_id, entitlement_id: row.entitlement_id, capability: row.capability, action: row.action, job_id: row.job_id, quantity: Number(row.quantity), reserved_quantity: row.reserved_quantity === null ? null : Number(row.reserved_quantity), idempotency_key: row.idempotency_key, source: row.source, source_event_id: row.source_event_id, created_at: row.created_at });
-    for (const row of subscriptionRows) store.subscriptions.set(row.subscription_id, { subscription_id: row.subscription_id, account_id: row.account_id, sku: row.sku, channel: row.channel, state: row.state, auto_renew: row.auto_renew, disclosure_version: row.disclosure_version, period_start: row.period_start, period_end: row.period_end, grace_period_end: row.grace_period_end, refund_status: row.refund_status, transaction_ref_hash: row.transaction_ref_hash, created_at: row.created_at, updated_at: row.updated_at });
+    // node-postgres returns timestamptz columns as Date objects by default.
+    // Domain entitlement checks intentionally use ISO strings, so normalize at
+    // the persistence boundary; otherwise a valid trial is treated as expired
+    // on the request immediately after it was granted.
+    for (const row of subscriptionRows) store.subscriptions.set(row.subscription_id, {
+      subscription_id: row.subscription_id, account_id: row.account_id, sku: row.sku, channel: row.channel, state: row.state,
+      auto_renew: row.auto_renew, disclosure_version: row.disclosure_version,
+      period_start: dateTimeValue(row.period_start), period_end: dateTimeValue(row.period_end),
+      grace_period_end: row.grace_period_end ? dateTimeValue(row.grace_period_end) : null,
+      refund_status: row.refund_status, transaction_ref_hash: row.transaction_ref_hash,
+      created_at: dateTimeValue(row.created_at), updated_at: dateTimeValue(row.updated_at)
+    });
     for (const row of subscriptionOrderRows) store.subscriptionOrders.set(row.order_id, { order_id: row.order_id, account_id: row.account_id, subscription_id: row.subscription_id, sku: row.sku, amount_fen: Number(row.amount_fen), currency: row.currency, state: row.state, channel: row.channel, auto_renew: row.auto_renew, disclosure_version: row.disclosure_version, created_at: row.created_at });
     for (const row of paymentEventRows) {
       const result = Object.freeze({ outcome: row.outcome, reason: row.quarantine_reason || undefined, subscription: row.outcome === 'APPLIED' ? store.subscriptions.get(row.subscription_id) || null : null, entitlement_grant: null });
@@ -212,6 +233,7 @@ class PostgresRequestStore extends DevelopmentStore {
     for (const row of deletionRows) store.deletionJobs.set(row.deletion_job_id, { deletion_job_id: row.deletion_job_id, account_id: row.account_id, asset_id: row.asset_id, scope: row.scope, state: row.state, revocation_epoch: Number(row.revocation_epoch), physical_cleanup_state: row.physical_cleanup_state, created_at: row.created_at, note: row.note });
     for (const row of idempotencyRows) store.idempotency.set(store.idempotencyKey(accountId, row.request_method, row.request_path, row.idempotency_key), { bodyHash: row.body_hash, result: { status: row.response_status, body: row.response_body } });
     for (const row of messageFeedbackRows) store.messageFeedback.set(row.feedback_id, { feedback_id: row.feedback_id, account_id: row.account_id, message_id: row.message_id, conversation_id: row.conversation_id, type: row.type, severity: row.severity, note: row.note, provider: row.provider, model_version: row.model_version, world_state_id: row.world_state_id, world_state_version: row.world_state_version === null ? null : Number(row.world_state_version), created_at: dateTimeValue(row.created_at) });
+    for (const row of trialFeedbackRows) store.trialFeedback.set(row.feedback_id, { feedback_id: row.feedback_id, account_id: row.account_id, category: row.category, rating: Number(row.rating), note: row.note, created_at: dateTimeValue(row.created_at) });
     for (const row of ocImportRows) store.ocImports.set(row.import_id, { import_id: row.import_id, account_id: row.account_id, source_text: row.source_text, declaration_version: row.declaration_version, state: row.state, proposed_persona: parseJson(row.proposed_persona) ?? {}, created_at: dateTimeValue(row.created_at), retention_expires_at: dateTimeValue(row.retention_expires_at) });
     for (const row of contentRightsReviewRows) store.contentRightsReviews.set(row.review_id, { review_id: row.review_id, account_id: row.account_id, subject_type: row.subject_type, subject_ref: row.subject_ref, declaration_version: row.declaration_version, risk_codes: row.risk_codes ?? [], state: row.state, reviewer_id: row.reviewer_id, decision_reason: row.decision_reason, created_at: dateTimeValue(row.created_at), updated_at: dateTimeValue(row.updated_at) });
     for (const row of contentRightsAppealRows) store.contentRightsAppeals.set(row.appeal_id, { appeal_id: row.appeal_id, account_id: row.account_id, review_id: row.review_id, statement: row.statement, state: row.state, created_at: dateTimeValue(row.created_at) });
@@ -232,6 +254,33 @@ class PostgresRequestStore extends DevelopmentStore {
   }
 
   next() { return randomUUID(); }
+
+  async rankActiveAssetsByVector({ accountId, characterId, queryVector, limit = 20 } = {}) {
+    if (accountId !== this.accountId || !characterId || !Array.isArray(queryVector) || queryVector.length !== 256) return [];
+    const safeLimit = Number.isInteger(limit) && limit > 0 && limit <= 50 ? limit : 20;
+    const literal = '[' + queryVector.join(',') + ']';
+    const result = await this.client.query(`SELECT embedding.asset_id,
+      (embedding.embedding::vector(256) <=> $3::vector(256))::double precision AS distance
+      FROM relationship_asset_embeddings AS embedding
+      JOIN relationship_assets AS asset
+        ON asset.asset_id = embedding.asset_id
+       AND asset.account_id = embedding.account_id
+       AND asset.character_id = embedding.character_id
+      WHERE embedding.account_id = $1
+        AND embedding.character_id = $2
+        AND embedding.deleted_at IS NULL
+        AND asset.account_id = $1
+        AND asset.character_id = $2
+        AND asset.state = 'ACTIVE'
+        AND asset.deleted_at IS NULL
+        AND asset.index_state = 'READY'
+        AND asset.version = embedding.version
+      ORDER BY embedding.embedding::vector(256) <=> $3::vector(256), embedding.asset_id
+      LIMIT $4`, [this.accountId, characterId, literal, safeLimit]);
+    return result.rows
+      .map((row) => ({ asset_id: row.asset_id, score: 1 - Number(row.distance) }))
+      .filter((row) => row.asset_id && Number.isFinite(row.score));
+  }
 
   async flush() {
     const before = this.baseline;
@@ -287,6 +336,7 @@ class PostgresRequestStore extends DevelopmentStore {
     await syncRows(this.client, this.paymentEventQuarantines, before.paymentEventQuarantines, persistPaymentQuarantine);
     await syncRows(this.client, this.deletionJobs, before.deletionJobs, persistDeletionJob);
     await syncRows(this.client, this.messageFeedback, before.messageFeedback, persistMessageFeedback);
+    await syncRows(this.client, this.trialFeedback, before.trialFeedback, persistTrialFeedback);
     await syncIdempotency(this.client, this, before.idempotency);
   }
 }
@@ -340,6 +390,12 @@ async function persistMessageFeedback(client, item, exists) {
   if (exists) throw new Error('Message feedback is append-only');
   return client.query('INSERT INTO message_feedback (feedback_id, account_id, message_id, conversation_id, type, severity, note, provider, model_version, world_state_id, world_state_version, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12::timestamptz, CURRENT_TIMESTAMP))', [item.feedback_id, item.account_id, item.message_id, item.conversation_id, item.type, item.severity, item.note || null, item.provider || null, item.model_version || null, item.world_state_id || null, item.world_state_version || null, item.created_at || null]);
 }
+async function persistTrialFeedback(client, item, exists) {
+  if (exists) throw new Error('Trial feedback is append-only');
+  return client.query(`INSERT INTO trial_feedback (feedback_id, account_id, category, rating, note, created_at)
+    VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, CURRENT_TIMESTAMP))`,
+  [item.feedback_id, item.account_id, item.category, item.rating, item.note, item.created_at || null]);
+}
 async function persistOcImport(client, item, exists) {
   if (exists) throw new Error('OC imports are immutable');
   // `source_bytes` is deliberately not called ciphertext: local development
@@ -383,13 +439,42 @@ async function persistCandidate(client, item, exists) { if (exists) return clien
 async function persistAsset(client, item, exists) { if (exists) return client.query('UPDATE relationship_assets SET state = $2, deleted_at = $3, superseded_by = $5, index_state = $6 WHERE asset_id = $1 AND account_id = $4', [item.asset_id, item.state, item.deleted_at || null, item.account_id, item.superseded_by || null, item.index_state || 'PENDING']); return client.query(`INSERT INTO relationship_assets (asset_id, account_id, character_id, type, value_json, display_text, state, index_state, source_candidate_id, activation_actor) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, 'USER')`, [item.asset_id, item.account_id, item.character_id, item.type, JSON.stringify(item.value), item.display_text, item.state, item.index_state || 'PENDING', item.source_candidate_id]); }
 async function persistMediaJob(client, item, exists) {
   const values = [item.job_id, item.account_id, item.character_id, item.conversation_id || null, item.source_message_id || null, item.input_asset_id || null, item.reference_asset_id || null, item.entitlement_id || null, item.type, item.state, item.attempts, item.provider || null, item.provider_request_id || null, item.provider_job_id || null, item.moderation_policy_version || null, item.result_asset_id || null, item.transcript_text || null, item.transcript_state || null, item.failure_code || null, item.provider_error_code || null, item.world_state_id || null, item.world_state_version || null, item.scene_contract ? JSON.stringify(item.scene_contract) : null, item.voice_id || null, item.voice_version || null, item.authorization_record_id || null, item.rights_review_id || null, item.rights_review_state || null, item.created_at || null];
-  if (exists) return client.query('UPDATE media_jobs SET conversation_id = $4, source_message_id = $5, input_asset_id = $6, reference_asset_id = $7, entitlement_id = $8, state = $10, attempts = $11, provider = $12, provider_request_id = $13, provider_job_id = $14, moderation_policy_version = $15, result_asset_id = $16, transcript_text = $17, transcript_state = $18, failure_code = $19, provider_error_code = $20, world_state_id = $21, world_state_version = $22, scene_contract = $23::jsonb, voice_id = $24, voice_version = $25, authorization_record_id = $26, rights_review_id = $27, rights_review_state = $28 WHERE job_id = $1 AND account_id = $2', values);
+  if (exists) {
+    // UPDATE must bind only referenced, consecutively numbered parameters.
+    // PostgreSQL otherwise raises 42P18 for unused null parameters such as the
+    // insert-only character_id/type/created_at values.
+    const updateValues = [
+      item.job_id, item.account_id, item.conversation_id || null, item.source_message_id || null,
+      item.input_asset_id || null, item.reference_asset_id || null, item.entitlement_id || null,
+      item.state, item.attempts, item.provider || null, item.provider_request_id || null,
+      item.provider_job_id || null, item.moderation_policy_version || null, item.result_asset_id || null,
+      item.transcript_text || null, item.transcript_state || null, item.failure_code || null,
+      item.provider_error_code || null, item.world_state_id || null, item.world_state_version || null,
+      item.scene_contract ? JSON.stringify(item.scene_contract) : null, item.voice_id || null,
+      item.voice_version || null, item.authorization_record_id || null, item.rights_review_id || null,
+      item.rights_review_state || null
+    ];
+    return client.query('UPDATE media_jobs SET conversation_id = $3, source_message_id = $4, input_asset_id = $5, reference_asset_id = $6, entitlement_id = $7, state = $8, attempts = $9, provider = $10, provider_request_id = $11, provider_job_id = $12, moderation_policy_version = $13, result_asset_id = $14, transcript_text = $15, transcript_state = $16, failure_code = $17, provider_error_code = $18, world_state_id = $19, world_state_version = $20, scene_contract = $21::jsonb, voice_id = $22, voice_version = $23, authorization_record_id = $24, rights_review_id = $25, rights_review_state = $26 WHERE job_id = $1 AND account_id = $2', updateValues);
+  }
   return client.query('INSERT INTO media_jobs (job_id, account_id, character_id, conversation_id, source_message_id, input_asset_id, reference_asset_id, entitlement_id, type, state, attempts, provider, provider_request_id, provider_job_id, moderation_policy_version, result_asset_id, transcript_text, transcript_state, failure_code, provider_error_code, world_state_id, world_state_version, scene_contract, voice_id, voice_version, authorization_record_id, rights_review_id, rights_review_state, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23::jsonb, $24, $25, $26, $27, $28, COALESCE($29::timestamptz, CURRENT_TIMESTAMP))', values);
 }
 async function persistMediaAsset(client, item, exists) {
-  const values = [item.asset_id, item.account_id, item.character_id, item.job_id || null, item.type, item.state, item.media_type, item.mime_type, item.byte_length, item.checksum, item.object_key, item.provider, item.provider_request_id || null, Boolean(item.ai_generated), item.aigc_mark_version, item.confirmation_state || null, item.moderation_policy_version || null, item.failure_code || null, item.deleted_at || null, item.created_at || null, item.rights_review_id || null];
-  if (exists) return client.query('UPDATE media_assets SET state = $6, byte_length = $9, checksum = $10, object_key = $11, provider_request_id = $13, confirmation_state = $16, moderation_policy_version = $17, failure_code = $18, deleted_at = $19, rights_review_id = $21 WHERE asset_id = $1 AND account_id = $2', values);
-  return client.query('INSERT INTO media_assets (asset_id, account_id, character_id, job_id, type, state, media_type, mime_type, byte_length, checksum, object_key, provider, provider_request_id, ai_generated, aigc_mark_version, confirmation_state, moderation_policy_version, failure_code, created_at, rights_review_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, COALESCE($20::timestamptz, CURRENT_TIMESTAMP), $21)', values);
+  if (exists) {
+    const updateValues = [
+      item.asset_id, item.account_id, item.state, item.byte_length, item.checksum, item.object_key,
+      item.provider_request_id || null, item.confirmation_state || null, item.moderation_policy_version || null,
+      item.failure_code || null, item.deleted_at || null, item.rights_review_id || null
+    ];
+    return client.query('UPDATE media_assets SET state = $3, byte_length = $4, checksum = $5, object_key = $6, provider_request_id = $7, confirmation_state = $8, moderation_policy_version = $9, failure_code = $10, deleted_at = $11::timestamptz, rights_review_id = $12 WHERE asset_id = $1 AND account_id = $2', updateValues);
+  }
+  const insertValues = [
+    item.asset_id, item.account_id, item.character_id, item.job_id || null, item.type, item.state,
+    item.media_type, item.mime_type, item.byte_length, item.checksum, item.object_key, item.provider,
+    item.provider_request_id || null, Boolean(item.ai_generated), item.aigc_mark_version,
+    item.confirmation_state || null, item.moderation_policy_version || null, item.failure_code || null,
+    item.created_at || null, item.rights_review_id || null
+  ];
+  return client.query('INSERT INTO media_assets (asset_id, account_id, character_id, job_id, type, state, media_type, mime_type, byte_length, checksum, object_key, provider, provider_request_id, ai_generated, aigc_mark_version, confirmation_state, moderation_policy_version, failure_code, created_at, rights_review_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, COALESCE($19::timestamptz, CURRENT_TIMESTAMP), $20)', insertValues);
 }
 async function persistEntitlementLedger(client, item, exists) {
   if (exists) return;
@@ -476,7 +561,7 @@ async function persistOperationMetric(client, item, exists) {
 }
 async function syncIdempotency(client, store, previous) { for (const [storageKey, item] of store.idempotency) { if (previous.has(storageKey)) continue; const segments = storageKey.split(':'); const method = segments[1]; const requestPath = segments[2]; const key = segments.slice(3).join(':'); await client.query(`INSERT INTO idempotency_keys (account_id, request_method, request_path, idempotency_key, request_hash, response_status, response_body) VALUES ($1, $2, $3, $4, decode($5, 'hex'), $6, $7::jsonb)`, [store.accountId, method, requestPath, key, item.bodyHash, item.result.status, JSON.stringify(item.result.body)]); } }
 
-function snapshot(store) { return Object.freeze({ accounts: cloneMap(store.accounts), characters: cloneMap(store.characters), worldStates: cloneMap(store.worldStates), worldStateEvents: cloneMap(store.worldStateEvents), conversations: cloneMap(store.conversations), messages: cloneMap(store.messages), conversationSummaries: cloneMap(store.conversationSummaries), conversationSummaryJobs: cloneMap(store.conversationSummaryJobs), outboxEvents: cloneMap(store.outboxEvents), candidates: cloneMap(store.candidates), assets: cloneMap(store.assets), mediaJobs: cloneMap(store.mediaJobs), mediaAssets: cloneMap(store.mediaAssets), entitlementLedgers: cloneMap(store.entitlementLedgers), subscriptions: cloneMap(store.subscriptions), subscriptionOrders: cloneMap(store.subscriptionOrders), paymentEvents: cloneMap(store.paymentEvents), paymentEventQuarantines: cloneMap(store.paymentEventQuarantines), deletionJobs: cloneMap(store.deletionJobs), complaints: cloneMap(store.complaints), proactiveEvents: cloneMap(store.proactiveEvents), proactiveMessages: cloneMap(store.proactiveMessages), dailyChatUsage: cloneMap(store.dailyChatUsage), operationMetrics: cloneMap(store.operationMetrics), messageFeedback: cloneMap(store.messageFeedback), ocImports: cloneMap(store.ocImports), contentRightsReviews: cloneMap(store.contentRightsReviews), contentRightsAppeals: cloneMap(store.contentRightsAppeals), contentRightsDecisions: cloneMap(store.contentRightsDecisions), ageReviewDecisions: cloneMap(store.ageReviewDecisions), assetEmbeddingJobs: cloneMap(store.assetEmbeddingJobs), assetEmbeddings: cloneMap(store.assetEmbeddings), assetEmbeddingDeadLetters: cloneMap(store.assetEmbeddingDeadLetters), idempotency: cloneMap(store.idempotency) }); }
+function snapshot(store) { return Object.freeze({ accounts: cloneMap(store.accounts), characters: cloneMap(store.characters), worldStates: cloneMap(store.worldStates), worldStateEvents: cloneMap(store.worldStateEvents), conversations: cloneMap(store.conversations), messages: cloneMap(store.messages), conversationSummaries: cloneMap(store.conversationSummaries), conversationSummaryJobs: cloneMap(store.conversationSummaryJobs), outboxEvents: cloneMap(store.outboxEvents), candidates: cloneMap(store.candidates), assets: cloneMap(store.assets), mediaJobs: cloneMap(store.mediaJobs), mediaAssets: cloneMap(store.mediaAssets), entitlementLedgers: cloneMap(store.entitlementLedgers), subscriptions: cloneMap(store.subscriptions), subscriptionOrders: cloneMap(store.subscriptionOrders), paymentEvents: cloneMap(store.paymentEvents), paymentEventQuarantines: cloneMap(store.paymentEventQuarantines), deletionJobs: cloneMap(store.deletionJobs), complaints: cloneMap(store.complaints), proactiveEvents: cloneMap(store.proactiveEvents), proactiveMessages: cloneMap(store.proactiveMessages), dailyChatUsage: cloneMap(store.dailyChatUsage), operationMetrics: cloneMap(store.operationMetrics), messageFeedback: cloneMap(store.messageFeedback), trialFeedback: cloneMap(store.trialFeedback), ocImports: cloneMap(store.ocImports), contentRightsReviews: cloneMap(store.contentRightsReviews), contentRightsAppeals: cloneMap(store.contentRightsAppeals), contentRightsDecisions: cloneMap(store.contentRightsDecisions), ageReviewDecisions: cloneMap(store.ageReviewDecisions), assetEmbeddingJobs: cloneMap(store.assetEmbeddingJobs), assetEmbeddings: cloneMap(store.assetEmbeddings), assetEmbeddingDeadLetters: cloneMap(store.assetEmbeddingDeadLetters), idempotency: cloneMap(store.idempotency) }); }
 function cloneMap(map) { return new Map([...map].map(([key, value]) => [key, JSON.parse(JSON.stringify(value))])); }
 function changed(previous, current) { return JSON.stringify(previous) !== JSON.stringify(current); }
 function noticeIdFor(accountId) { return accountId === DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice ? '00000000-0000-7000-8000-0000000000a3' : '00000000-0000-7000-8000-0000000000b3'; }

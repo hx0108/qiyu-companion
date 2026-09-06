@@ -13,6 +13,7 @@ const enabled = {
 
 test('图片链路完全未配置时保持关闭，完整配置才可启用', () => {
   assert.deepEqual(assertImagePipelineConfiguration({}), { enabled: false });
+  assert.deepEqual(assertImagePipelineConfiguration({ TENCENT_HUNYUAN_REGION: 'ap-guangzhou' }), { enabled: false });
   assert.deepEqual(assertImagePipelineConfiguration(enabled), { enabled: true, provider: 'tencent-hunyuan', moderationProvider: 'tencent', bucket: 'qiyu-1250000000', endpoint: 'https://qiyu-1250000000.cos.ap-guangzhou.myqcloud.com' });
 });
 

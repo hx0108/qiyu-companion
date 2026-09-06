@@ -21,7 +21,7 @@ test('QwenAdapter uses the compatible chat-completions contract without returnin
   assert.equal(requestBody.model, 'qwen3.8-flash');
   assert.equal(requestBody.messages.length, 2);
   assert.equal(requestBody.messages[0].role, 'system');
-  assert.match(requestBody.messages[0].content, /栖语的 AI 陪伴助手/);
+  assert.match(requestBody.messages[0].content, /栖语中的 AI 陪伴角色/);
   assert.deepEqual(requestBody.messages[1], { role: 'user', content: '你好' });
   assert.deepEqual({ enable_thinking: requestBody.enable_thinking, preserve_thinking: requestBody.preserve_thinking, stream: requestBody.stream }, { enable_thinking: false, preserve_thinking: false, stream: false });
   assert.equal(result.text, '你好，我在。');
@@ -88,6 +88,8 @@ test('QwenAdapter 把角色、有限历史与已确认资产组装进系统段�
   const [systemMessage, ...dialogue] = captured.messages;
   assert.equal(systemMessage.role, 'system');
   assert.match(systemMessage.content, /林默/);
+  assert.match(systemMessage.content, /我是林默/);
+  assert.match(systemMessage.content, /不得自称「栖语的 AI 陪伴助手」/);
   assert.match(systemMessage.content, /用户喜欢雨天/);
   assert.match(systemMessage.content, /安全规则优先/);
   assert.deepEqual(dialogue, [

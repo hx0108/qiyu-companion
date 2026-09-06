@@ -16,7 +16,9 @@ function assertImagePipelineConfiguration(environment = process.env) {
   // deployment must not accidentally enable (or fail) the image workflow.
   const configured = [
     'QIYU_IMAGE_PROVIDER', 'QIYU_IMAGE_MODERATION_PROVIDER',
-    'TENCENT_HUNYUAN_REGION', 'TENCENT_IMAGE_MODERATION_BIZ_TYPE'
+    // Region is shared deployment metadata and may carry a safe default. It
+    // cannot by itself opt the process into image generation.
+    'TENCENT_IMAGE_MODERATION_BIZ_TYPE'
   ].some((key) => nonBlank(environment[key]));
   if (!configured) return Object.freeze({ enabled: false });
   const required = [

@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
-    "eval:memory-recall": "node eval/run-memory-recall-regression.js"
+    "eval:memory-recall": "node eval/run-memory-recall-regression.js",
+    "verify:closed-trial-qwen": "node scripts/verify-closed-trial-qwen.js"
   },
   "dependencies": {
     "cos-nodejs-sdk-v5": "^3.0.0",

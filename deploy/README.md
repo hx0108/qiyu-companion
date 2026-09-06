@@ -1,7 +1,9 @@
 # 栖语封测环境部署（阿里云）
 
-三容器编排：API + 独立 Worker + PostgreSQL(pgvector)。已在本地 Docker 验证：
-compose 语法、全新卷自动应用全部 42 个迁移、容器命名与同机其他项目共存。
+三运行容器编排：API + 独立 Worker + PostgreSQL(pgvector)，另含一次性 `migrate`
+服务。它会在 API/Worker 启动前补齐未执行的 SQL 迁移；已执行的迁移仅按文件名跳过。
+已在本地 Docker 验证 compose 语法、全新卷自动应用全部 45 个迁移、已有卷的迁移账本
+可被安全读取，以及容器命名与同机其他项目共存。
 
 ## ⚠️ 诚实边界（先读）
 
@@ -9,8 +11,8 @@ compose 语法、全新卷自动应用全部 42 个迁移、容器命名与同�
 
 - `NODE_ENV=production` 会被启动门禁**主动拒绝**（`PRODUCTION_RUNTIME_NOT_WIRED`）——
   本地合成运行时（固定开发账户 token）禁止冒充生产。
-- 当前用户体系是两个开发账户（alice/bob token）。封测用户访问的是同一套 API，
-  尚无真实注册/登录；正式用户接入前需完成短信鉴权 + ICP/算法备案。
+- 默认用户体系是两个开发账户（alice/bob token）。设置 `QIYU_TRIAL_AUTH=invite` 后，
+  可启用邀请码 + 初始口令的持久化封闭试用会话；它不是公开注册、短信鉴权或正式身份认证。
 - 数据库/备份/监控按封测标准；对外建议仅在安全组放行白名单 IP 或走 VPN。
 
 ## 一、旧服务器可用性自检（部署前在服务器上跑）
@@ -55,9 +57,9 @@ cp deploy/.env.example deploy/.env && vim deploy/.env   # 必填 POSTGRES_PASSWO
 cd deploy && docker compose up -d --build
 
 # 4) 验证
-docker compose ps                                  # 三容器 healthy/running
+docker compose ps                                  # postgres/api healthy、worker running、migrate Exited (0)
 curl http://127.0.0.1:3000/health                  # {"status":"ok",...}
-docker exec qiyu-beta-postgres psql -U postgres -d qiyu -Atc "SELECT count(*) FROM schema_migrations;"  # 42
+docker exec qiyu-beta-postgres psql -U postgres -d qiyu -Atc "SELECT count(*) FROM schema_migrations;"  # 45
 docker compose logs -f api worker                  # 观察日志（Ctrl+C 退出）
 
 # 5) 对外：阿里云安全组放行 API_PORT（建议仅白名单 IP），浏览器访问 http://<服务器IP>:3000/
@@ -76,12 +78,67 @@ cd deploy
 docker compose logs -f api                     # API 日志
 docker compose logs -f worker                  # Worker（摘要/向量队列消费）
 docker compose restart api worker              # 重启应用
-docker compose pull && docker compose up -d --build   # 更新版本
+# 更新版本：先强制重建一次性服务，确保新迁移一定运行；再更新应用。
+docker compose pull && docker compose up -d --build --force-recreate migrate
+docker compose up -d --build
 docker compose down                            # 停止（保留数据）
 docker compose down -v                         # 停止并清空数据库（不可逆！）
 # 数据库备份
 docker exec qiyu-beta-postgres pg_dump -U postgres qiyu | gzip > qiyu-$(date +%F).sql.gz
 ```
+
+## 三点五、封闭试用操作（仅在书面适用性结论允许时）
+
+这不是公开上线：仅向你线下确认的成年试用者单独发送凭据，不开放搜索、投放、公开注册、
+真实支付或未成年人访问。请先在 `deploy/.env` 设置：
+
+```dotenv
+QIYU_TRIAL_AUTH=invite
+QIYU_LLM_PROVIDER=qwen
+QWEN_API_KEY=你的密钥
+```
+
+重建后，用 API 容器生成一个单人邀请码。命令会先打印数据库连接进度；成功后以
+`INVITE_CODE=...`、`INITIAL_SECRET=...` 的 ASCII 形式**只显示一次**凭据（不要粘贴进工单、
+聊天记录或 Git）：
+
+```bash
+docker compose up -d --build
+docker compose exec -T api node scripts/create-trial-invite.js --label "alpha-001" --days 14
+```
+
+将“邀请码”和“初始口令”通过单独、可信渠道发送给该试用者。浏览器会在首屏显示邀请码登录、
+AI 告知和年龄声明；会话令牌仅保留在浏览器会话中。试用者可在数据中心提交结构化反馈，
+也可针对具体助手回复提交 OOC/记忆/安全反馈。
+
+若遗失初始口令，无法找回：数据库只保存其哈希。先只读列出邀请元数据（不输出邀请码、
+初始口令或任何令牌），找到要处理的 `invite_id`：
+
+```bash
+docker compose exec api node scripts/list-trial-invites.js --limit 20
+```
+
+撤销时必须复制该 `invite_id` 并给出显式确认。该操作会撤销该邀请的所有活动试用会话，
+阻止后续登录；**不会**删除已绑定账户、对话、关系资产或反馈数据：
+
+```bash
+docker compose exec api node scripts/revoke-trial-invite.js --invite-id "<invite_id>" --confirm REVOKE
+```
+
+撤销旧邀请后，再创建新邀请。请在 API 容器内执行这些命令，且不要将命令输出中的任何
+凭据保存到工单、聊天记录或 Git。
+
+在邀请任何外部用户前，仍须按 PRD 7.0/7.1 取得“邀请制是否已构成向公众提供/上线服务、
+哪些安全评估/备案/许可被触发”的书面结论；未确认前仅限开发者本人和受控本机验证。
+
+在发出首个真实邀请码前，可运行不输出密钥、口令或模型正文的真实模型验收：
+
+```bash
+docker compose exec api npm run verify:closed-trial-qwen
+```
+
+只有该命令返回 `{"acceptance":"passed","provider":"qwen",...}`，才能把“真实 Qwen
+调用已验证”写入试用记录；失败时先保留封闭试用关闭状态并排查供应商配置或审核链路。
 
 ## 四、非 Docker 备选（systemd 直跑）
 

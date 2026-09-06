@@ -1,8 +1,10 @@
 const API_BASE = "/api/v1";
 const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
+const TRIAL_SESSION_STORAGE_KEY = "qiyu.closed-trial.session.v1";
 const app = document.querySelector("#app");
 
-// Deliberately no localStorage/sessionStorage: product facts are refetched from the API.
+// Only opaque closed-trial tokens live in sessionStorage. Product facts and
+// personal interaction data are always reloaded from the API.
 const state = {
   booting: true,
   busy: false,
@@ -51,10 +53,22 @@ const state = {
   continuousReminder: null,
   heartbeatTimer: null,
   lastComplaintId: null,
+  trialAccess: null,
+  trialSession: loadTrialSession(),
+  trialFeedback: [],
 };
 
 function isLocalDevelopment() {
-  return ["localhost", "127.0.0.1", "::1", ""].includes(location.hostname);
+  if (["localhost", "127.0.0.1", "::1", ""].includes(location.hostname)) return true;
+  // 同网段设备（手机试用）经私有地址访问：电脑启动时须显式 HOST=0.0.0.0 放开监听。
+  return isPrivateLanHost(location.hostname);
+}
+
+function isPrivateLanHost(hostname) {
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+  const match172 = /^172\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(hostname);
+  return Boolean(match172) && Number(match172[1]) >= 16 && Number(match172[1]) <= 31;
 }
 
 function escapeHtml(value) {
@@ -74,14 +88,50 @@ function uuid() {
   return globalThis.crypto?.randomUUID?.() ?? `dev-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function loadTrialSession() {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(TRIAL_SESSION_STORAGE_KEY) || "null");
+    return parsed && typeof parsed.access_token === "string" && typeof parsed.refresh_token === "string" ? parsed : null;
+  } catch { return null; }
+}
+
+function saveTrialSession(tokens) {
+  state.trialSession = { access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_in: tokens.expires_in };
+  sessionStorage.setItem(TRIAL_SESSION_STORAGE_KEY, JSON.stringify(state.trialSession));
+}
+
+function clearTrialSession() {
+  state.trialSession = null;
+  sessionStorage.removeItem(TRIAL_SESSION_STORAGE_KEY);
+}
+
+function isClosedTrial() { return state.trialAccess?.enabled === true; }
+
+function bearerToken() {
+  if (isClosedTrial()) return state.trialSession?.access_token || null;
+  return isLocalDevelopment() ? DEVELOPMENT_BEARER_TOKEN : null;
+}
+
+function authenticatedHeaders(accept) {
+  const token = bearerToken();
+  if (!token) throw apiError("试用会话已失效，请重新输入邀请码和初始口令。", 401);
+  const headers = new Headers({ Accept: accept });
+  headers.set("Authorization", `Bearer ${token}`);
+  if (!isClosedTrial()) headers.set("X-Qiyu-Client-Environment", "local-development-synthetic");
+  return headers;
+}
+
 async function api(path, options = {}) {
-  if (!isLocalDevelopment()) {
+  if (!options.public && !isClosedTrial() && !isLocalDevelopment()) {
     throw apiError("此构建仅允许在 localhost 使用明确标识的合成开发 Token。", 0);
   }
   const headers = new Headers(options.headers);
   headers.set("Accept", "application/json");
-  headers.set("Authorization", `Bearer ${DEVELOPMENT_BEARER_TOKEN}`);
-  headers.set("X-Qiyu-Client-Environment", "local-development-synthetic");
+  if (!options.public) {
+    const auth = authenticatedHeaders("application/json");
+    headers.set("Authorization", auth.get("Authorization"));
+    if (auth.has("X-Qiyu-Client-Environment")) headers.set("X-Qiyu-Client-Environment", auth.get("X-Qiyu-Client-Environment"));
+  }
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
   if (options.idempotent) headers.set("Idempotency-Key", options.idempotent);
   let response;
@@ -103,11 +153,7 @@ async function api(path, options = {}) {
 }
 
 async function apiAudio(path) {
-  if (!isLocalDevelopment()) throw apiError("此构建仅允许在 localhost 使用明确标识的合成开发 Token。", 0);
-  const response = await fetch(`${API_BASE}${path}`, { headers: {
-    Accept: "audio/mpeg", Authorization: `Bearer ${DEVELOPMENT_BEARER_TOKEN}`,
-    "X-Qiyu-Client-Environment": "local-development-synthetic"
-  } });
+  const response = await fetch(`${API_BASE}${path}`, { headers: authenticatedHeaders("audio/mpeg") });
   if (!response.ok || response.headers.get("content-type") !== "audio/mpeg") {
     throw apiError(`语音读取失败（HTTP ${response.status}）`, response.status);
   }
@@ -115,11 +161,7 @@ async function apiAudio(path) {
 }
 
 async function apiImage(path) {
-  if (!isLocalDevelopment()) throw apiError("此构建仅允许在 localhost 使用明确标识的合成开发 Token。", 0);
-  const response = await fetch(`${API_BASE}${path}`, { headers: {
-    Accept: "image/jpeg,image/png,image/webp", Authorization: `Bearer ${DEVELOPMENT_BEARER_TOKEN}`,
-    "X-Qiyu-Client-Environment": "local-development-synthetic"
-  } });
+  const response = await fetch(`${API_BASE}${path}`, { headers: authenticatedHeaders("image/jpeg,image/png,image/webp") });
   const contentType = response.headers.get("content-type") ?? "";
   if (!response.ok || !["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
     throw apiError(`图片读取失败（HTTP ${response.status}）`, response.status);
@@ -144,7 +186,7 @@ function setBusy(busy) { state.busy = busy; render(); }
 
 function serverMessage(error) {
   if (error.status === 428) return "服务端仍要求完成必要告知；请刷新告知状态后继续。";
-  if (error.status === 401) return "开发 Token 未被本地 API 接受；请检查 API 的合成账户配置。";
+  if (error.status === 401) return isClosedTrial() ? "试用会话已失效，请重新输入邀请码和初始口令。" : "开发 Token 未被本地 API 接受；请检查 API 的合成账户配置。";
   if (error.status === 403) return "服务端策略拒绝此操作（可能不是 AGE_PASS 或资源不属于当前账户）。";
   if (error.status === 409) return "服务端发现版本或幂等冲突；已保留服务端事实，请刷新后重试。";
   return error.message || "服务端未确认该操作。";
@@ -231,6 +273,12 @@ async function restoreSession() {
     state.messages = unwrap(history, "messages", "messages") ?? [];
     await refreshMemoryAndAssets();
   }
+  await refreshTrialFeedback();
+}
+
+async function refreshTrialFeedback() {
+  const payload = await api("/trial-feedback");
+  state.trialFeedback = unwrap(payload, "feedback", "feedback") ?? [];
 }
 
 async function restoreReferenceImage() {
@@ -249,6 +297,21 @@ async function bootstrap() {
   state.error = null;
   render();
   try {
+    state.trialAccess = await api("/trial-access", { public: true });
+    if (isClosedTrial()) {
+      if (!state.trialSession?.refresh_token) {
+        state.route = "trial-login";
+        return;
+      }
+      try {
+        const refreshed = await api("/auth/trial-sessions/refresh", { method: "POST", public: true, body: { refresh_token: state.trialSession.refresh_token } });
+        saveTrialSession(refreshed.tokens);
+      } catch {
+        clearTrialSession();
+        state.route = "trial-login";
+        return;
+      }
+    }
     await Promise.all([refreshNotices(), refreshAge()]);
     if (noticeReady() && isAgePass()) {
       await restoreSession();
@@ -263,6 +326,34 @@ async function bootstrap() {
     state.booting = false;
     render();
   }
+}
+
+async function submitTrialLogin(form) {
+  const inviteCode = form.elements.invite_code.value.trim();
+  const initialSecret = form.elements.initial_secret.value.trim();
+  if (!inviteCode || !initialSecret) return;
+  setBusy(true);
+  try {
+    const result = await api("/auth/trial-sessions", { method: "POST", public: true, body: { invite_code: inviteCode, initial_secret: initialSecret } });
+    saveTrialSession(result.tokens);
+    form.reset();
+    await bootstrap();
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
+function logoutTrial() {
+  clearTrialSession();
+  window.clearInterval(state.heartbeatTimer);
+  state.heartbeatTimer = null;
+  state.notices = [];
+  state.age = null;
+  state.character = null;
+  state.conversation = null;
+  state.messages = [];
+  state.trialFeedback = [];
+  state.route = "trial-login";
+  render();
 }
 
 async function submitNotices() {
@@ -493,10 +584,7 @@ async function consumeSseStream(url, onChunk) {
   // but never turn `/api/v1/...` into `/api/v1/api/v1/...`.
   const streamPath = String(url || "").startsWith(`${API_BASE}/`) ? url : `${API_BASE}${url}`;
   const response = await fetch(streamPath, {
-    headers: {
-      Accept: "text/event-stream", Authorization: `Bearer ${DEVELOPMENT_BEARER_TOKEN}`,
-      "X-Qiyu-Client-Environment": "local-development-synthetic"
-    }
+    headers: authenticatedHeaders("text/event-stream")
   });
   if (!response.ok || !response.body) throw apiError(`流式回放不可用（HTTP ${response.status}）`, response.status);
   const reader = response.body.getReader();
@@ -537,11 +625,12 @@ async function sendMessage(form) {
     if (live) {
       // 真流式：先渲染空的助手占位，SSE chunk 逐句填充；终态以 completed 后
       // 的消息终稿为准（replaced/failed 时占位被服务端安全文案替换）。
-      const streaming = { message_id: null, actor: "ASSISTANT", text: "", ai_generated: true, provider: "streaming" };
+      const streaming = { message_id: null, actor: "ASSISTANT", text: "", ai_generated: true };
       state.messages.push(streaming);
       render();
       let completedId = null;
       let terminalEvent = null;
+      let failure = null;
       try {
         await consumeSseStream(payload.stream.stream_url, (event, data) => {
           if (event === "message.chunk" && typeof data.text === "string") {
@@ -550,7 +639,7 @@ async function sendMessage(form) {
           }
           if (event === "message.accepted" && data.assistant_message_id) streaming.message_id = data.assistant_message_id;
           if (event === "message.replaced") { terminalEvent = "replaced"; }
-          if (event === "message.failed") { terminalEvent = "failed"; }
+          if (event === "message.failed") { terminalEvent = "failed"; failure = data; }
           if (event === "message.completed") completedId = data.message_id;
         });
       } catch {
@@ -563,7 +652,13 @@ async function sendMessage(form) {
         const index = state.messages.indexOf(streaming);
         if (index >= 0) state.messages[index] = finalMessage;
       } else if (terminalEvent === "failed") {
-        streaming.text = streaming.text || "这条回复暂时没有生成成功，可以稍后再试。";
+        // 失败的临时片段不是完整 AI 回复，不保留在对话里。
+        // 恢复用户输入并用 toast 说明原因，便于原样重试。
+        const index = state.messages.indexOf(streaming);
+        if (index >= 0) state.messages.splice(index, 1);
+        input.value = content;
+        const code = failure?.code ? `（${failure.code}）` : "";
+        setToast(`回复生成失败${code}，内容已保留，请直接重试。`);
       }
       render();
     } else if (assistant) {
@@ -622,7 +717,11 @@ async function synthesizeMessageAudio(message) {
     const job = payload?.tts_job ?? payload;
     if (job?.state !== "COMPLETED" || !job.result_asset_id) {
       state.lastTtsJob = { messageId: id, state: job?.state ?? "FAILED", failure_code: job?.failure_code ?? "TTS_NOT_DELIVERED" };
-      setToast(`语音未生成：${job?.failure_code ?? "服务端未返回可播放资源"}。文字回复仍可正常阅读。`);
+      if (job?.failure_code === "ENTITLEMENT_QUOTA_EXCEEDED") {
+        setToast("尚未领取语音试用额度，或当前额度已用完。可在权益页领取 7 天完整体验。");
+      } else {
+        setToast(`语音未生成：${job?.failure_code ?? "服务端未返回可播放资源"}。文字回复仍可正常阅读。`);
+      }
       return;
     }
     state.lastTtsJob = null;
@@ -997,6 +1096,20 @@ async function reportLatestAssistantMessage() {
   finally { setBusy(false); }
 }
 
+async function submitTrialFeedback(form) {
+  const category = form.elements.category.value;
+  const rating = Number(form.elements.rating.value);
+  const note = form.elements.note.value.trim();
+  setBusy(true);
+  try {
+    const payload = await api("/trial-feedback", { method: "POST", idempotent: uuid(), body: { category, rating, note } });
+    state.trialFeedback.unshift(payload.feedback);
+    form.reset();
+    setToast("试用反馈已记录。它不会自动改写角色人格、记忆或安全状态。");
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
 async function deleteAccount() {
   const confirmed = window.prompt("账户注销不可撤销。输入“注销”以二次确认：");
   if (confirmed !== "注销") return;
@@ -1318,14 +1431,26 @@ function noticeCard(notice) {
 function renderNotices() {
   const pending = pendingNotices();
   const allChecked = pending.length > 0 && pending.every((notice) => state.noticeChecks.has(String(notice.notice_id)));
-  return screen(`<div class="topline"><span class="wordmark">栖语</span><span class="dev-label">M1 / 01</span></div><div class="eyebrow">Required system notices</div><h1 id="app-title">先说清楚，<br>我们才能开始。</h1><p class="lead">以下内容必须由系统展示并由服务端记录；角色不能替代这些说明。</p><div class="stack">${state.notices.map(noticeCard).join("") || '<div class="empty-state">服务端未返回必要告知，普通互动保持不可用。</div>'}</div><div class="flow-actions"><button class="btn btn-primary" data-action="submit-notices" ${allChecked && !state.busy ? "" : "disabled"}>提交展示回执并继续</button><p class="muted">界面勾选不是事实；只有 API 返回的 displayed 状态才会解除告知门槛。</p></div>`);
+  const facts = [
+    ["spark", "你正在与 AI 互动", "角色的文字、语音与图片均由人工智能生成并标识。"],
+    ["shield", "仅面向 18 岁以上用户", "年龄风险较高时，会进入增强核验；未成年人不可使用虚拟伴侣服务。"],
+    ["archive", "关系资产由你确认", "候选记忆不会自动成为长期事实，你可以查看、修改或删除。"]
+  ].map(([icon, title, copy]) => `<article class="fact"><span class="fact-icon">${prototypeIcon(icon)}</span><div><strong>${title}</strong><small>${copy}</small></div></article>`).join("");
+  const noticeChecks = pending.map((notice) => {
+    const id = String(notice.notice_id);
+    return `<label class="check-row"><input type="checkbox" data-notice-check="${escapeHtml(id)}" ${state.noticeChecks.has(id) ? "checked" : ""}><span>我已阅读并理解系统告知（${escapeHtml(notice.notice_version ?? "当前版本")}）。</span></label>`;
+  }).join("");
+  return prototypeShell(`<div class="content"><div class="eyebrow">Before we begin</div><h1 id="app-title">先说清楚，<br>我们才能开始。</h1><p class="lead">栖语提供由 AI 生成的长期角色互动。它可以记住经你确认的关系资产，但不是现实中的人，也不能替代专业支持。</p><div class="fact-grid">${facts}</div><div class="check-list">${noticeChecks || '<div class="empty-state">服务端未返回必要告知，普通互动保持不可用。</div>'}</div></div><div class="bottom-action"><button class="btn btn-primary" data-action="submit-notices" ${allChecked && !state.busy ? "" : "disabled"}>同意并继续 ${prototypeIcon("arrow", 18)}</button><div class="note">此告知属于系统界面；只有 API 记录展示回执后才会解除门槛。</div></div>`, "01 / 03");
 }
 
 function renderAge() {
   const status = ageStatus();
   const blocked = status !== "AGE_UNVERIFIED";
-  const statusClass = status === "AGE_PASS" ? "pass" : status === "AGE_DENIED_MINOR" ? "denied" : "review";
-  return screen(`<div class="topline"><span class="wordmark">栖语</span><span class="dev-label">M1 / 02</span></div><div class="eyebrow">Age assurance</div><h1 id="app-title">年龄保障</h1><p class="lead">本地切片调用服务端的确定性开发策略；浏览器不会自行决定年龄结果。</p><section class="card status-card ${statusClass}"><b>服务端状态：${escapeHtml(status)}</b><code>${escapeHtml((state.age?.reason_codes ?? []).join(", ") || "等待服务端原因码")}</code><p class="muted">${status === "AGE_PASS" ? "已由 API 允许 M1 文字互动。" : status === "AGE_REVIEW" ? "需要合规年龄断言；聊天和记忆写入保持关闭。" : status === "AGE_DENIED_MINOR" ? "未成年人不可使用虚拟伴侣服务；数据权利不应因此被阻断。" : "请提交声明，由 API 返回最终状态。"}</p></section>${blocked ? `<div class="flow-actions">${status === "AGE_PASS" ? '<button class="btn btn-primary" data-action="continue-character">继续创建角色</button>' : '<button class="btn btn-primary" data-action="request-age-appeal">提交年龄复核</button><button class="btn btn-line" data-action="reload-age">刷新服务端年龄状态</button>'}</div>` : `<form id="age-form" class="stack"><label class="field"><span>出生日期</span><input name="birth_date" type="date" required></label><label class="check-row"><input name="adult_confirmed" type="checkbox" required><span>我确认本人已满 18 周岁，并提交年龄声明供服务端判断。</span></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>提交年龄声明</button></form>`}`);
+  const detail = status === "AGE_PASS" ? "账号已获得 18+ 服务访问资格。" : status === "AGE_REVIEW" ? "当前处于增强核验等待态，普通互动保持关闭。" : status === "AGE_DENIED_MINOR" ? "未成年人不可使用虚拟伴侣服务；数据权利不因此被阻断。" : "信息只提交给服务端进行确定性年龄判断。";
+  const form = blocked
+    ? (status === "AGE_PASS" ? '<button class="btn btn-primary" data-action="continue-character">创建我的角色 ${prototypeIcon("arrow", 18)}</button>' : '<button class="btn btn-primary" data-action="request-age-appeal">提交年龄复核</button><button class="btn btn-line" data-action="reload-age">刷新服务端状态</button>')
+    : `<form id="age-form"><label class="check-row"><input name="adult_confirmed" type="checkbox" required><span>我确认本人已满 18 周岁，并提交年龄声明供服务端判断。</span></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>提交年龄声明 ${prototypeIcon("arrow", 18)}</button></form>`;
+  return prototypeShell(`<div class="content"><div class="eyebrow">Age assurance</div><h1 id="app-title">年龄保障</h1><p class="lead">先完成基础年龄判断。只有出现账号或行为风险信号时，才会请求更强的核验。</p><section class="verify-card"><h3>${status === "AGE_PASS" ? "核验已通过" : "基础信息"}</h3><p class="page-sub">${detail}</p>${!blocked ? `<label class="field"><span>出生日期</span><input form="age-form" name="birth_date" type="date" required></label>` : ""}<div class="status-row"><span class="status-dot ${status === "AGE_PASS" ? "pass" : ""}"></span>${escapeHtml(status)} · ${escapeHtml((state.age?.reason_codes ?? []).join("、") || "等待服务端结果")}</div></section><div class="rights">${prototypeIcon("lock", 17)}<span>栖语不保存证件原图；增强年龄核验的供应商接入与结果以服务端状态为准。</span></div></div><div class="bottom-action">${form}<div class="note">浏览器不自行判定年龄结果，也不展示原型模拟的核验成功。</div></div>`, "02 / 03");
 }
 
 function personaFields(persona = {}) {
@@ -1340,10 +1465,8 @@ function personaFields(persona = {}) {
 }
 
 function renderCharacter() {
-  const templateButtons = PERSONA_TEMPLATES.map((template) => `<button type="button" class="btn btn-line" data-template="${template.id}" ${state.busy ? "disabled" : ""}>${escapeHtml(template.label)}</button>`).join("");
-  return screen(`<div class="topline"><span class="wordmark">栖语</span><span class="dev-label">M1 / 03</span></div><div class="eyebrow">One active character</div><h1 id="app-title">让 TA 有清楚的底色</h1><p class="lead">人格档案会随每轮对话注入模型；硬边界优先于任何剧情。也可以先用模板快速开始。</p>
-  <form id="character-form" class="stack"><div class="button-row">${templateButtons}</div><label class="field"><span>角色名字</span><input name="character_name" maxlength="80" required placeholder="例如：林默"></label>${personaFields({})}
-  <label class="check-row"><input name="rights_confirmed" type="checkbox" required><span>我确认角色设定为原创或已获授权，不复刻真人、明星或未授权 IP。</span></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>创建角色并进入对话</button></form><div class="flow-actions"><button class="btn btn-line" data-action="open-oc-import" ${state.busy ? "disabled" : ""}>导入我的 OC 设定</button></div><p class="muted">系统安全边界（危机处置等）由服务端持有，不随本表单修改。</p>`);
+  const templateButtons = PERSONA_TEMPLATES.map((template, index) => `<button type="button" class="chip ${index < 2 ? "on" : ""}" data-template="${template.id}" ${state.busy ? "disabled" : ""}>${escapeHtml(template.label)}</button>`).join("");
+  return prototypeShell(`<form id="character-form"><div class="content"><div class="eyebrow">Create your character</div><h1 id="app-title">让 TA 有清楚的底色</h1><p class="lead">先从一个角色开始。人格设定会版本化保存，并经过行为回归测试减少升级后的陌生感。</p><div class="mode-switch"><button type="button" class="on">快速创建</button><button type="button" data-action="open-oc-import">导入原创 OC</button></div><div class="portrait-editor"><img src="/assets/qiyu-character.png" alt="原创成年 AI 角色示意"><span class="aigc">AI 生成形象</span></div><label class="field"><span>角色名字</span><input name="character_name" maxlength="80" required placeholder="例如：林默"></label><div class="field"><span>人格模板</span><div class="chips">${templateButtons}</div></div>${personaFields({})}<label class="check-row"><input name="rights_confirmed" type="checkbox" required><span>我确认角色设定为原创或已获授权，不复刻真人、明星或未授权 IP。</span></label><div class="rights">${prototypeIcon("shield", 17)}<span>人格、年龄、安全和关系记忆均由服务端分别治理；此表单不能覆盖系统安全边界。</span></div></div><div class="bottom-action"><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>创建并开始相处 ${prototypeIcon("arrow", 18)}</button><div class="note">参考图、音色和内容权益会经过相应的受控审核流程。</div></div></form>`, "03 / 03");
 }
 
 function renderOcImport() {
@@ -1365,11 +1488,10 @@ function messageMarkup(message) {
   const actor = message.actor ?? message.role ?? "assistant";
   const isUser = actor === "user" || actor === "USER";
   const content = message.content ?? message.text ?? message.display_text ?? "";
-  const provider = message.provider ?? message.metadata?.provider;
   const id = messageId(message);
   const audio = !isUser && id ? state.audioUrls.get(id) : null;
   const voice = !isUser && id ? (audio ? `<div class="voice-message"><span class="aigc">AI 生成语音</span><audio controls src="${escapeHtml(audio.url)}"></audio><button class="btn btn-line" data-action="delete-message-audio" data-message-id="${escapeHtml(id)}">删除语音</button></div>` : `<button class="btn btn-line" data-action="synthesize-message-audio" data-message-id="${escapeHtml(id)}" ${state.busy ? "disabled" : ""}>生成角色语音</button>`) : "";
-  return `<article class="message ${isUser ? "user" : "assistant"}"><p>${escapeHtml(content) || '<span class="muted">…</span>'}</p>${voice}<div class="message-meta"><span>${isUser ? "你" : "AI 生成"}</span>${!isUser && provider ? `<span>provider=${escapeHtml(provider)}</span>` : ""}</div></article>`;
+  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${escapeHtml(content) || "…"}</div>${voice}<div class="msg-meta"><span>${isUser ? "你" : "AI 生成"}</span></div></article>`;
 }
 
 async function openWorldState() {
@@ -1418,8 +1540,12 @@ function renderWorldState() {
 function renderChat() {
   const characterName = state.character?.name ?? "当前角色";
   const candidate = state.candidates.find((item) => ["CANDIDATE", "PENDING"].includes(item.state));
-  const ttsFailure = state.lastTtsJob ? `<section class="card media-failure" data-media-type="TTS" data-state="${escapeHtml(state.lastTtsJob.state)}"><b>角色语音未生成</b><p class="muted">文字回复仍可正常阅读；未向页面提供可播放音频。</p><small>安全失败码：${escapeHtml(state.lastTtsJob.failure_code)}</small><button class="btn btn-line" data-action="open-subscription" ${state.busy ? "disabled" : ""}>查看权益与订阅</button></section>` : "";
-  return `<section class="screen screen-chat"><header class="chat-header"><div class="title-row"><div class="identity"><b>${escapeHtml(characterName)}</b><span class="aigc">AI 角色 · 本地开发 Adapter</span></div><button class="icon-button" data-action="toggle-theme" aria-label="切换日夜主题">◐</button></div></header><div class="system-note">系统提示：文字回复和候选记忆必须来自 API；语音转写确认后仍需你手动发送。</div>${state.userPaused ? `<button class="card candidate" data-action="resume-interaction"><b>普通互动已按你的请求暂停</b><span class="muted">关系档案与数据权利不受影响。点击这里恢复互动（服务端会重新核验年龄与安全状态）。</span></button>` : ""}${candidate ? `<button class="card candidate" data-action="open-candidate" data-candidate-id="${escapeHtml(candidateId(candidate))}"><b>有 1 条候选记忆等待你确认</b><span class="muted">候选不会自动写入长期关系资产。</span></button>` : ""}${ttsFailure}<section class="messages" aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">还没有已由 API 返回的消息。</div>'}</section><form id="message-form" class="composer"><input name="message" maxlength="2000" autocomplete="off" placeholder="和 TA 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>发送</button></form><div class="button-row"><button class="btn btn-line" data-action="open-asr" ${state.busy ? "disabled" : ""}>语音转文字</button><button class="btn btn-line" data-action="open-image" ${state.busy ? "disabled" : ""}>受控情境图</button><button class="btn btn-line" data-action="open-assets">时间线 (${state.assets.length})</button><button class="btn btn-line" data-action="open-character-profile" ${state.busy ? "disabled" : ""}>角色档案</button><button class="btn btn-line" data-action="open-subscription">订阅与额度</button><button class="btn btn-line" data-action="open-proactive" ${state.busy ? "disabled" : ""}>主动消息</button><button class="btn btn-line" data-action="open-safety" ${state.busy ? "disabled" : ""}>安全与帮助</button><button class="btn btn-line" data-action="refresh-chat">刷新 API 状态</button><button class="btn btn-danger" data-action="delete-conversation" ${conversationId() && !state.busy ? "" : "disabled"}>删除这段对话</button></div></section>`;
+  const ttsFailure = state.lastTtsJob ? `<section class="rights" data-media-type="TTS" data-state="${escapeHtml(state.lastTtsJob.state)}">${prototypeIcon("shield", 17)}<span><b>角色语音未生成</b><br>${state.lastTtsJob.failure_code === "ENTITLEMENT_QUOTA_EXCEEDED" ? '需先领取 7 天完整体验，或当前语音额度已用完。' : `文字回复仍可正常阅读。失败码：${escapeHtml(state.lastTtsJob.failure_code ?? "未返回")}。`}${state.lastTtsJob.failure_code === "ENTITLEMENT_QUOTA_EXCEEDED" ? `<br><button class="btn btn-line" data-action="open-subscription">查看权益与领取试用</button>` : ""}</span></section>` : "";
+  const world = state.worldState;
+  const worldText = world ? `${world.mood_code ?? "平静"} · ${world.location_code ?? "未设定"}` : "此刻由你决定";
+  const memoryBanner = candidate ? `<button class="memory-banner" data-action="open-candidate" data-candidate-id="${escapeHtml(candidateId(candidate))}"><span>${prototypeIcon("archive", 18)}</span><span><b>1 条候选记忆等待你确认</b><small>不会自动写入长期记忆</small></span><span class="chev">${prototypeIcon("chev", 16)}</span></button>` : "";
+  const paused = state.userPaused ? `<button class="memory-banner" data-action="resume-interaction"><span>${prototypeIcon("shield", 18)}</span><span><b>普通互动已暂停</b><small>由你恢复前，不会继续生成角色回复</small></span></button>` : "";
+  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap"><div class="composer"><button type="button" class="icon-btn" data-action="open-asr" aria-label="语音转文字">${prototypeIcon("mic", 19)}</button><input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}><button type="button" class="icon-btn" data-action="open-image" aria-label="受控情境图">${prototypeIcon("image", 19)}</button><button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button></div></form>${prototypeNav("chat")}</section>`;
 }
 
 function renderSubscription() {
@@ -1481,10 +1607,9 @@ function renderCandidate() {
   if (!candidate) { state.route = "chat"; return renderChat(); }
   const text = candidate.display_text ?? candidate.normalized_value ?? "服务端未返回候选文本";
   const conflicts = candidate.conflicts_with ?? [];
-  const conflictMarkup = conflicts.length > 0
-    ? `<section class="card conflict"><b>与已有资产可能冲突</b><p class="muted">确认不会自动覆盖旧内容；如需替换，请先在时间线中修订旧资产。</p>${conflicts.map((conflict) => `<blockquote>${escapeHtml(conflict.display_text)}</blockquote>`).join("")}</section>`
-    : "";
-  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button><span class="dev-label">Candidate</span></div><div class="eyebrow">User confirmation required</div><h1 id="app-title">这条关系记忆，<br>由你决定。</h1><section class="card candidate"><b>服务端候选 · ${escapeHtml(candidate.state)}</b><blockquote>${escapeHtml(text)}</blockquote><p class="muted">依据：${escapeHtml((candidate.evidence_message_ids ?? []).join(", ") || "API 未返回")}</p></section>${conflictMarkup}<label class="field"><span>修改后确认（可选）</span><textarea id="candidate-edit">${escapeHtml(state.confirmEdit || text)}</textarea></label><div class="flow-actions"><button class="btn btn-primary" data-action="confirm-candidate" ${state.busy ? "disabled" : ""}>按原文确认</button><button class="btn btn-secondary" data-action="confirm-edited-candidate" ${state.busy ? "disabled" : ""}>按修改内容确认</button><button class="btn btn-line" data-action="reject-candidate" ${state.busy ? "disabled" : ""}>不记住</button><p class="muted">确认、编辑确认和拒绝均须等待 API 返回；拒绝的候选不可重新作为新候选曝光。</p></div>`);
+  const conflictMarkup = conflicts.length > 0 ? `<div class="rights">${prototypeIcon("shield", 17)}<span>与已有关系资产可能冲突。确认不会自动覆盖旧内容，请在时间线中单独修订。</span></div>` : "";
+  const characterName = state.character?.name ?? "当前角色";
+  return `<section class="screen qiyu-prototype app-screen paper"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · 关系记忆</small></div></div><button class="icon-btn soft" data-action="back-chat" aria-label="关闭记忆确认">${prototypeIcon("x", 20)}</button></header><div class="chat-scroll"><div class="date-rule">关系资产需由你确认</div><div class="scene-state"><span class="glyph">${prototypeIcon("archive", 16)}</span><span><b>候选记忆等待确认</b><small>不会自动写入长期关系资产</small></span></div></div><div class="sheet-layer"><section class="sheet" role="dialog" aria-modal="true" aria-label="关系记忆确认"><div class="grabber"></div><div class="sheet-head"><div><span class="aigc">服务端候选 · ${escapeHtml(candidate.state)}</span><h3>关系记忆</h3><p>候选内容不会自动成为长期事实</p></div><button class="close" data-action="back-chat" aria-label="关闭">${prototypeIcon("x", 18)}</button></div><blockquote class="memory-quote">${escapeHtml(text)}</blockquote>${conflictMarkup}<label class="field"><span>修改后确认（可选）</span><textarea id="candidate-edit">${escapeHtml(state.confirmEdit || text)}</textarea></label><div class="sheet-actions"><button class="btn btn-line" data-action="reject-candidate" ${state.busy ? "disabled" : ""}>不记住</button><button class="btn btn-secondary" data-action="confirm-edited-candidate" ${state.busy ? "disabled" : ""}>修改措辞</button><button class="btn btn-primary wide" data-action="confirm-candidate" ${state.busy ? "disabled" : ""}>确认记住 ${prototypeIcon("check", 18)}</button></div><p class="note">确认、修改或拒绝的最终状态均以 API 返回为准。</p></section></div></section>`;
 }
 
 function deletionMarkup() {
@@ -1503,10 +1628,16 @@ function renderAssets() {
   return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button><span class="dev-label">Timeline</span></div><div class="eyebrow">Relationship timeline</div><h1 id="app-title">关系时间线</h1><p class="lead">只显示仍然有效的确认资产；被修订替代和已删除的版本不会出现在线。</p><div class="button-row">${chips}</div><div class="stack">${deletionMarkup()}${timelineCards || '<div class="empty-state">当前筛选下没有时间线条目。</div>'}</div><div class="flow-actions"><button class="btn btn-line" data-action="download-relationship-profile" ${state.busy ? "disabled" : ""}>下载关系档案 JSON</button><div class="button-row"><button class="btn btn-line" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>原始互动保留 30 天</button><button class="btn btn-line" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>原始互动保留 90 天</button></div><button class="btn btn-line" data-action="refresh-assets" ${state.busy ? "disabled" : ""}>刷新时间线</button></div>`);
 }
 
+function trialFeedbackMarkup() {
+  if (!isClosedTrial()) return "";
+  const recent = state.trialFeedback.slice(0, 3).map((item) => `<li>${escapeHtml(item.category)} · ${escapeHtml(item.rating)}/5${item.note ? ` · ${escapeHtml(item.note)}` : ""}</li>`).join("");
+  return `<section class="feedback-card"><h3>封闭试用反馈</h3><p class="page-sub">你的评价会进入试用改进看板；不会自动改写角色人格、关系记忆或安全状态。</p><form id="trial-feedback-form"><label class="field"><span>反馈分类</span><select name="category" required><option value="ONBOARDING">引导与注册</option><option value="PERSONA">角色人格</option><option value="MEMORY">记忆连续性</option><option value="SAFETY">安全与边界</option><option value="USABILITY" selected>易用性</option><option value="OTHER">其他</option></select></label><label class="field"><span>总体评分</span><select name="rating" required><option value="5">5 · 很满意</option><option value="4" selected>4 · 满意</option><option value="3">3 · 一般</option><option value="2">2 · 不满意</option><option value="1">1 · 很不满意</option></select></label><label class="field"><span>补充说明（可选，最多 1200 字）</span><textarea name="note" maxlength="1200" rows="3"></textarea></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>提交试用反馈</button></form>${recent ? `<p class="page-sub">最近提交：</p><ul class="page-sub">${recent}</ul>` : ""}<button class="btn btn-line" data-action="trial-logout" ${state.busy ? "disabled" : ""}>退出此设备的试用会话</button></section>`;
+}
+
 function renderDataCenter() {
   const retention = state.rawInteractionRetentionDays;
   const retentionText = retention === 30 || retention === 90 ? `${retention} 天` : "未取得服务端设置";
-  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button><span class="dev-label">Data center</span></div><div class="eyebrow">Privacy & data controls</div><h1 id="app-title">数据中心</h1><p class="lead">导出、留存与删除都以 API 返回的状态为准；订阅状态不会限制这些数据权利。</p><div class="stack"><section class="card"><b>原始互动保留</b><p class="muted">当前服务端设置：${escapeHtml(retentionText)}。已确认的关系资产不会因缩短原始互动保留期被自动删除。</p><div class="button-row"><button class="btn ${retention === 30 ? "btn-primary" : "btn-line"}" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>保留 30 天</button><button class="btn ${retention === 90 ? "btn-primary" : "btn-line"}" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>保留 90 天</button></div></section><section class="card"><b>关系档案导出</b><p class="muted">仅导出当前账户可见的关系资料与文本记录；私有媒体对象地址不在导出中。</p><button class="btn btn-line" data-action="download-relationship-profile" ${state.busy ? "disabled" : ""}>下载关系档案 JSON</button></section>${deletionMarkup()}<section class="card"><b>账户注销</b><p class="muted">注销后互动与召回立即停止。仅当服务端返回删除任务时才会显示回执；开发环境不声称已完成生产数据、备份或供应商清理。</p><button class="btn btn-danger" data-action="delete-account" ${state.busy ? "disabled" : ""}>注销账户</button></section></div>`);
+  return `<section class="screen qiyu-prototype paper"><header class="app-header"><button class="icon-btn soft" data-action="back-chat" aria-label="返回对话">${prototypeIcon("x", 20)}</button><span class="step">数据中心</span><span class="header-spacer" aria-hidden="true"></span></header><div class="page-content"><div class="eyebrow">Privacy & data controls</div><h1 id="app-title" class="page-title">你的数据，<br>由你决定。</h1><p class="page-sub">导出、留存与删除都以 API 返回的状态为准；订阅状态不会限制这些数据权利。</p><section class="data-hero"><span class="lock">${prototypeIcon("lock", 28)}</span><h3>数据权利独立于关系</h3><p>聊天记录、候选记忆和确认的关系资产分层保存；删除后是否完成以服务端回执为准。</p></section><div class="section-title"><h3>聊天保留周期</h3><small>当前 ${escapeHtml(retentionText)}</small></div><div class="segment"><button class="${retention === 30 ? "on" : ""}" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>30 天</button><button class="${retention === 90 ? "on" : ""}" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>90 天</button></div><div class="section-title"><h3>关系资产</h3><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 16)}</span><span class="list-copy"><b>导出我的数据</b><small>关系档案、当前可见文本与确认记忆</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 16)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修订或删除确认内容</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div>${trialFeedbackMarkup()}${deletionMarkup()}<div class="section-title"><h3>删除与注销</h3><small>订阅不影响数据权利</small></div><div class="list"><button class="list-row" data-action="delete-account" ${state.busy ? "disabled" : ""}><span class="list-ico">${prototypeIcon("trash", 16)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div></div></section>`;
 }
 
 function renderSafety() {
@@ -1531,7 +1662,42 @@ function renderContinuousReminder() {
   return `<div class="reminder-overlay" role="alertdialog" aria-label="连续使用提醒"><section class="card reminder-card"><b>使用时长提醒</b><p>${escapeHtml(state.continuousReminder.text ?? "你已连续使用超过 2 小时，建议休息一下。")}</p><button class="btn btn-primary" data-action="dismiss-reminder">我知道了</button><p class="muted">该提醒由系统按时长规则触发，角色不能关闭或弱化它。</p></section></div>`;
 }
 
+const PROTOTYPE_ICON_PATHS = Object.freeze({
+  arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  shield: '<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/><path d="M9 12l2 2 4-4"/>',
+  spark: '<path d="M12 3l1.4 4.6L18 9l-4.6 1.4L12 15l-1.4-4.6L6 9l4.6-1.4L12 3z"/>',
+  archive: '<path d="M4 7h16v13H4zM3 3h18v4H3z"/><path d="M9 11h6"/>',
+  check: '<path d="M5 12l4 4L19 6"/>', moon: '<path d="M20 15.5A8.5 8.5 0 118.5 4 7 7 0 0020 15.5z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/>',
+  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3M9 21h6"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 15l-4-4L5 20"/>',
+  send: '<path d="M22 2L9 15M22 2l-7 20-6-7-7-3 20-10z"/>', chat: '<path d="M4 5h16v12H8l-4 4V5z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>', heart: '<path d="M20.8 5.8a5.5 5.5 0 00-7.8 0L12 6.8l-1-1a5.5 5.5 0 00-7.8 7.8L12 22l8.8-8.4a5.5 5.5 0 000-7.8z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/>', chev: '<path d="M9 18l6-6-6-6"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
+  lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>', download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>', trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/>'
+});
+
+function prototypeIcon(name, size = 20) {
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PROTOTYPE_ICON_PATHS[name] ?? ""}</svg>`;
+}
+
+function prototypeShell(content, step) {
+  return `<section class="screen qiyu-prototype paper"><header class="brandline"><span class="wordmark">栖语</span><span class="step">${escapeHtml(step)}</span></header><div class="orbit"></div>${content}</section>`;
+}
+
+function prototypeNav(active) {
+  const items = [
+    ["chat", "chat", "对话", "back-chat"], ["timeline", "clock", "时间线", "open-assets"],
+    ["relation", "heart", "关系", "open-character-profile"], ["profile", "user", "我的", "open-data"]
+  ];
+  return `<nav class="bottom-nav" aria-label="主导航">${items.map(([id, icon, label, action]) => `<button type="button" class="nav-item ${active === id ? "on" : ""}" data-action="${action}">${prototypeIcon(icon, 20)}<span>${label}</span></button>`).join("")}</nav>`;
+}
+
 function screen(content) { return `<section class="screen">${content}</section>`; }
+
+function renderTrialLogin() {
+  return prototypeShell(`<form id="trial-login-form"><div class="content"><div class="eyebrow">Invite-only trial</div><h1 id="app-title">凭邀请进入，<br>安心试用。</h1><p class="lead">这是仅限受邀成年用户的免费封闭试用：不提供支付、不公开注册，也不代表正式上线。</p><div class="fact-grid"><article class="fact"><span class="fact-icon">${prototypeIcon("spark")}</span><div><strong>你正在与 AI 互动</strong><small>角色回复由 AI 生成并保留明显标识。</small></div></article><article class="fact"><span class="fact-icon">${prototypeIcon("shield")}</span><div><strong>仅向受邀成年用户开放</strong><small>登录后仍需完成系统告知与年龄声明。</small></div></article></div><label class="field"><span>邀请码</span><input name="invite_code" autocomplete="off" autocapitalize="characters" required placeholder="例如 QYXXXX-XXXXXX-XXXXXX-XXXXXX"></label><label class="field"><span>初始口令</span><input name="initial_secret" type="password" autocomplete="off" required placeholder="由邀请方单独发送"></label><div class="rights">${prototypeIcon("lock", 17)}<span>登录凭据仅保留在本浏览器会话中。请勿输入他人的隐私、证件或支付信息。</span></div></div><div class="bottom-action"><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>进入封闭试用 ${prototypeIcon("arrow", 18)}</button><div class="note">如需退出，可在数据中心注销账户和发起数据删除。</div></div></form>`, "Closed beta");
+}
 
 function renderError() {
   return screen(`<div class="topline"><span class="wordmark">栖语</span><span class="dev-label">M1 local</span></div><div class="error-state"><h2 id="app-title">尚未取得服务端事实</h2><p>${escapeHtml(state.error)}</p><div class="flow-actions"><button class="btn btn-primary" data-action="retry-bootstrap">重试连接本地 API</button></div></div><p class="muted">未接入 API 时，本壳不会显示任何模拟年龄、记忆或删除成功状态。</p>`);
@@ -1541,7 +1707,8 @@ function render() {
   document.documentElement.dataset.qyTheme = state.theme;
   if (state.booting) { app.innerHTML = '<div class="boot-state"><span class="spinner" aria-hidden="true"></span><p>正在读取服务端状态…</p></div>'; return; }
   if (state.error) { app.innerHTML = renderError() + (state.toast ? `<div class="toast">${escapeHtml(state.toast)}</div>` : ""); return; }
-  const view = state.route === "notices" ? renderNotices()
+  const view = state.route === "trial-login" ? renderTrialLogin()
+    : state.route === "notices" ? renderNotices()
     : state.route === "age" ? renderAge()
     : state.route === "character" ? renderCharacter()
     : state.route === "oc-import" ? renderOcImport()
@@ -1586,6 +1753,7 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("submit", (event) => {
+  if (event.target.id === "trial-login-form") { event.preventDefault(); submitTrialLogin(event.target); }
   if (event.target.id === "age-form") { event.preventDefault(); submitAge(event.target); }
   if (event.target.id === "character-form") { event.preventDefault(); createCharacter(event.target); }
   if (event.target.id === "oc-import-form") { event.preventDefault(); submitOcImport(event.target); }
@@ -1598,6 +1766,7 @@ document.addEventListener("submit", (event) => {
   if (event.target.id === "complaint-form") { event.preventDefault(); submitComplaint(event.target); }
   if (event.target.id === "proactive-preferences-form") { event.preventDefault(); saveProactivePreferences(event.target); }
   if (event.target.id === "proactive-event-form") { event.preventDefault(); createProactiveEvent(event.target); }
+  if (event.target.id === "trial-feedback-form") { event.preventDefault(); submitTrialFeedback(event.target); }
 });
 
 document.addEventListener("click", (event) => {
@@ -1625,6 +1794,7 @@ document.addEventListener("click", (event) => {
   if (!button || state.busy) return;
   const action = button.dataset.action;
   if (action === "retry-bootstrap") bootstrap();
+  if (action === "trial-logout") logoutTrial();
   if (action === "submit-notices") submitNotices();
   if (action === "reload-age") refreshAge().then(() => render()).catch((error) => setToast(serverMessage(error)));
   if (action === "request-age-appeal") requestAgeAppeal();

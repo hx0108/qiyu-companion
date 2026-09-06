@@ -1,4 +1,4 @@
-# 栖语封测环境编排：API + 独立 Worker + PostgreSQL(pgvector) 三容器。
+# 栖语封测环境编排：API + 独立 Worker + PostgreSQL(pgvector) + 一次性迁移服务。
 # 用法见 deploy/README.md；环境变量放 deploy/.env（不入库）。
 name: qiyu
 
@@ -15,7 +15,7 @@ services:
       PGTZ: UTC
     volumes:
       - qiyu_postgres_data:/var/lib/postgresql/data
-      # 迁移随镜像/仓库挂载：首次初始化自动应用全部迁移（幂等，见 init 脚本）。
+      # 首次初始化自动应用全部迁移；后续版本由 migrate 服务补齐缺失迁移。
       - ../infra/postgres/init:/docker-entrypoint-initdb.d:ro
       - ../infra/postgres/migrations:/migrations:ro
     healthcheck:
@@ -31,6 +31,24 @@ services:
     # 2GiB 小机贴线部署：容器内存上限防 OOM 连坐（需配合宿主 swap，见 README）。
     mem_limit: 768m
 
+  migrate:
+    image: pgvector/pgvector:pg16
+    container_name: qiyu-beta-migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: ${POSTGRES_DB:-qiyu}
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - ../infra/postgres/migrations:/migrations:ro
+      - ../infra/postgres/scripts/run-migrations.sh:/run-migrations.sh:ro
+    entrypoint: ["/bin/sh", "/run-migrations.sh"]
+
   api:
     build:
       context: ..
@@ -38,28 +56,41 @@ services:
     container_name: qiyu-beta-api
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       QIYU_PERSISTENCE: postgres
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-qiyu}
       PORT: "3000"
+      HOST: "0.0.0.0"
       # 可选能力：留空即关闭。接入时在 deploy/.env 提供真实值。
       QIYU_LLM_PROVIDER: ${QIYU_LLM_PROVIDER:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
+      # 封闭试用登录由 API 进程执行；Worker 不参与认证。
+      QIYU_TRIAL_AUTH: ${QIYU_TRIAL_AUTH:-}
       QIYU_TEXT_MODERATION_PROVIDER: ${QIYU_TEXT_MODERATION_PROVIDER:-}
       TENCENT_SECRET_ID: ${TENCENT_SECRET_ID:-}
       TENCENT_SECRET_KEY: ${TENCENT_SECRET_KEY:-}
       TENCENT_REGION: ${TENCENT_REGION:-ap-guangzhou}
       TENCENT_TEXT_MODERATION_BIZ_TYPE: ${TENCENT_TEXT_MODERATION_BIZ_TYPE:-}
       QIYU_TTS_PROVIDER: ${QIYU_TTS_PROVIDER:-}
+      QIYU_PRIVATE_MEDIA_STORE: ${QIYU_PRIVATE_MEDIA_STORE:-}
+      TENCENT_TTS_VOICE_TYPE: ${TENCENT_TTS_VOICE_TYPE:-}
+      TENCENT_TTS_VOICE_VERSION: ${TENCENT_TTS_VOICE_VERSION:-}
+      TENCENT_TTS_AUTHORIZATION_RECORD_ID: ${TENCENT_TTS_AUTHORIZATION_RECORD_ID:-}
+      TENCENT_TTS_RIGHTS_REVIEW_ID: ${TENCENT_TTS_RIGHTS_REVIEW_ID:-}
+      TENCENT_TTS_MODEL_TYPE: ${TENCENT_TTS_MODEL_TYPE:-}
+      TENCENT_TTS_SAMPLE_RATE: ${TENCENT_TTS_SAMPLE_RATE:-}
       QIYU_ASR_PROVIDER: ${QIYU_ASR_PROVIDER:-}
+      TENCENT_ASR_ENGINE_MODEL_TYPE: ${TENCENT_ASR_ENGINE_MODEL_TYPE:-}
       QIYU_IMAGE_PROVIDER: ${QIYU_IMAGE_PROVIDER:-}
       QIYU_IMAGE_MODERATION_PROVIDER: ${QIYU_IMAGE_MODERATION_PROVIDER:-}
+      TENCENT_HUNYUAN_REGION: ${TENCENT_HUNYUAN_REGION:-ap-guangzhou}
       TENCENT_COS_BUCKET: ${TENCENT_COS_BUCKET:-}
       TENCENT_COS_REGION: ${TENCENT_COS_REGION:-ap-guangzhou}
       TENCENT_COS_ENDPOINT: ${TENCENT_COS_ENDPOINT:-}
       TENCENT_IMAGE_MODERATION_BIZ_TYPE: ${TENCENT_IMAGE_MODERATION_BIZ_TYPE:-}
+      TENCENT_IMAGE_MODERATION_URL_EXPIRES_SECONDS: ${TENCENT_IMAGE_MODERATION_URL_EXPIRES_SECONDS:-120}
       QIYU_REVIEWER_TOKENS: ${QIYU_REVIEWER_TOKENS:-}
     ports:
       # 与同机其他服务（如既有 AI 质检系统）错开端口：左侧宿主端口在 .env 可调。
@@ -79,8 +110,8 @@ services:
     container_name: qiyu-beta-worker
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: ["node", "scripts/run-workers.js", "--interval-ms=5000"]
     environment:
       QIYU_PERSISTENCE: postgres
@@ -89,6 +120,7 @@ services:
       QIYU_LLM_PROVIDER: ${QIYU_LLM_PROVIDER:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
     # Worker 不对外暴露任何端口。
+    mem_limit: 384m
 
 volumes:
   qiyu_postgres_data:

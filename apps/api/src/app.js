@@ -19,6 +19,7 @@ const personaRelease = require('./domain/persona-release-service');
 const { evaluateProactiveDispatch } = require('./domain/proactive-policy');
 const { PROACTIVE_TEMPLATES } = require('./domain/proactive-templates');
 const { AuthService } = require('./domain/auth-service');
+const { MemoryTrialInviteAuth, TrialAuthError } = require('./domain/trial-invite-auth');
 const { tagWithAigcMetadata } = require('./media/aigc-metadata');
 const { rankRelationshipAssets } = require('./domain/relationship-recall');
 const { invalidateSummaries, validSummary } = require('./domain/conversation-summary');
@@ -56,12 +57,15 @@ const STATIC_FILES = new Map([
   ['/favicon.svg', { file: path.resolve(__dirname, '../../web/favicon.svg'), type: 'image/svg+xml' }],
   ['/app.js', { file: path.resolve(__dirname, '../../web/app.js'), type: 'text/javascript; charset=utf-8' }],
   ['/styles.css', { file: path.resolve(__dirname, '../../web/styles.css'), type: 'text/css; charset=utf-8' }],
+  ['/prototype-restoration.css', { file: path.resolve(__dirname, '../../web/prototype-restoration.css'), type: 'text/css; charset=utf-8' }],
+  ['/assets/qiyu-character.png', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/prototype/imgs/qiyu-character.png'), type: 'image/png' }],
+  ['/assets/qiyu-night-scene.png', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/prototype/imgs/qiyu-night-scene.png'), type: 'image/png' }],
   ['/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }],
   // Compatibility with the existing relative @import in apps/web/styles.css.
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -69,7 +73,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -88,24 +92,30 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
 }
 
 async function routeWithPersistence(context) {
-  const { req, body, store, url } = context;
-  const accountId = accountIdForRequest(req, store) || verifiedDevelopmentCallbackAccountId(req, url, body, store);
+  const { req, body, store, url, trialAuth, trialAuthEnabled } = context;
+  // Postgres 模式的认证仓库由 store 延迟提供；登录、刷新和后续 Bearer
+  // 校验必须复用同一个仓库，不能只在创建会话的路由里临时解析。
+  const resolvedTrialAuth = trialAuth || (trialAuthEnabled ? trialAuthFor(store) : null);
+  // 邀请码封测不能回退到旧的开发 token 或开发支付回调；两种认证模型必须互斥。
+  const accountId = (await accountIdForRequest(req, store, resolvedTrialAuth, { allowDevelopmentTokens: !trialAuthEnabled }))
+    || (!trialAuthEnabled ? verifiedDevelopmentCallbackAccountId(req, url, body, store) : null);
   if (accountId && typeof store.withAccountTransaction === 'function') {
     const lockDailyUsage = req.method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(url.pathname);
-    return store.withAccountTransaction(accountId, (scopedStore) => route({ ...context, store: scopedStore }), { lockDailyUsage });
+    return store.withAccountTransaction(accountId, (scopedStore) => route({ ...context, store: scopedStore, trialAuth: resolvedTrialAuth, authenticatedAccountId: accountId }), { lockDailyUsage });
   }
-  return route(context);
+  return route({ ...context, trialAuth: resolvedTrialAuth, authenticatedAccountId: accountId });
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
   const path = url.pathname;
   if (method === 'GET' && path === '/health') return ok({ status: 'ok', mode: 'local-synthetic-development-only' });
+  if (method === 'GET' && path === '/api/v1/trial-access') return ok({ enabled: Boolean(trialAuthEnabled), authentication: trialAuthEnabled ? 'closed-trial-invite' : 'synthetic-development-token-only', payment: 'disabled', external_age_verification: 'disabled' });
   // 渠道回调不带用户 Token：只信 HMAC 验签，且仅开发模拟通道存在。
-  if (method === 'POST' && path === '/api/v1/callbacks/payments/development-simulated') return developmentPaymentCallback(store, req, body, requestId);
+  if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/callbacks/payments/development-simulated') return developmentPaymentCallback(store, req, body, requestId);
   // 运营内部接口（技术设计 8.10）：独立审核员身份，与用户 Bearer 体系完全分离；
   // 生产部署须独立域名 + MFA + RBAC（迁移 024 的 qiyu_reviewer 角色已对齐）。
   if (path.startsWith('/internal/')) {
@@ -131,11 +141,14 @@ async function route(context) {
     if (method === 'POST' && /^\/internal\/persona-versions\/[^/]+\/\d+\/rollback$/.test(path)) return idempotent(context, { account_id: `reviewer:${reviewer.reviewer_id}` }, () => rollbackPersonaVersion(store, reviewer, path, body));
     throw apiError(404, 'ROUTE_NOT_FOUND', '内部接口不存在');
   }
-  // 注册与刷新为公开端点（鉴权骨架，开发验证码 000000）。
-  if (method === 'POST' && path === '/api/v1/auth/sms-challenges') return idempotent(context, { account_id: 'public' }, () => createSmsChallenge(store, body));
-  if (method === 'POST' && path === '/api/v1/auth/register') return idempotent(context, { account_id: 'public' }, () => registerAccount(store, body));
-  if (method === 'POST' && path === '/api/v1/auth/refresh') return idempotent(context, { account_id: 'public' }, () => refreshTokens(store, body));
-  const account = requireAccount(req, store);
+  // 封闭试用：邀请码和一次性初始口令均由运营线下发放；服务端仅保存哈希。
+  if (trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/trial-sessions') return createTrialSession(trialAuthFor(store, trialAuth), body);
+  if (trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/trial-sessions/refresh') return refreshTrialSession(trialAuthFor(store, trialAuth), body);
+  // 旧短信骨架仅用于内存开发回归；封闭试用不暴露此注册路径。
+  if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/sms-challenges') return idempotent(context, { account_id: 'public' }, () => createSmsChallenge(store, body));
+  if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/register') return idempotent(context, { account_id: 'public' }, () => registerAccount(store, body));
+  if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/refresh') return idempotent(context, { account_id: 'public' }, () => refreshTokens(store, body));
+  const account = requireAccount(req, store, authenticatedAccountId);
   applyRawInteractionRetention(store, account);
   expireTrials(store, account);
 
@@ -148,6 +161,8 @@ async function route(context) {
   if (method === 'GET' && path === '/api/v1/entitlements') return entitlementsView(store, account, imageEntitlementService);
   if (method === 'GET' && path === '/api/v1/usage/daily') return ok({ usage: currentDailyChatUsage(store, account.account_id) });
   if (method === 'GET' && path === '/api/v1/development/operation-metrics') return ok({ metrics: ownOperationMetrics(store, account.account_id) });
+  if (method === 'GET' && path === '/api/v1/trial-feedback') return ok({ feedback: ownTrialFeedback(store, account.account_id) });
+  if (method === 'POST' && path === '/api/v1/trial-feedback') return idempotent(context, account, () => createTrialFeedback(store, account, body));
   if (method === 'GET' && path === '/api/v1/required-notices') return ok({ notices: [publicNotice(store.noticeFor(account.account_id))] });
   if (method === 'POST' && /^\/api\/v1\/required-notices\/[^/]+\/displayed$/.test(path)) {
     return idempotent(context, account, () => displayNotice(store, account, path, body));
@@ -177,7 +192,7 @@ async function route(context) {
   if (method === 'GET' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) return listMessages(store, account, path, url);
   if (method === 'GET' && /^\/api\/v1\/messages\/[^/]+$/.test(path)) return getMessage(store, account, path);
   if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/feedback$/.test(path)) return idempotent(context, account, () => createMessageFeedback(store, account, path, body));
-  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, textModerator);
+  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator);
   if (method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(path)) return idempotent(context, account, () => deleteConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/resume$/.test(path)) return idempotent(context, account, () => resumeConversation(store, account, path));
@@ -978,7 +993,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     throw dailyUsageApiError(error);
   }
   try {
-    const contextPack = buildContextPack(store, account, conversation, text);
+    const contextPack = await buildContextPack(store, account, conversation, text);
     const modelReply = await replyGenerator(text, contextPack);
     recordOperationMetric(store, { accountId: account.account_id, provider: modelReply.provider, modelVersion: modelReply.model_version, inputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens), outputTokens: Number(modelReply.usage?.output_tokens ?? modelReply.usage?.completion_tokens ?? 0), latencyMs: Date.now() - modelStartedAt, outcome: modelReply.ai_generated === false ? 'FALLBACK' : 'COMPLETED' });
     const authorityClaim = assessModelOutputAuthority(modelReply.reply_text);
@@ -1032,7 +1047,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
 const RECENT_CONTEXT_LIMIT = 20;
 const CONFIRMED_ASSET_TOP_K = 20;
 
-function buildContextPack(store, account, conversation, text) {
+async function buildContextPack(store, account, conversation, text) {
   const character = store.characters.get(conversation.character_id);
   const messages = conversationMessages(store, conversation.conversation_id);
   const summary = validSummary([...store.conversationSummaries.values()], messages, conversation.conversation_id, account.revocation_epoch);
@@ -1047,7 +1062,7 @@ function buildContextPack(store, account, conversation, text) {
     user_message: text,
     recent_context: recentContext,
     conversation_summary: summary ? { summary_id: summary.summary_id, source_to_id: summary.source_to_id, version: 1, text: summary.text } : null,
-    confirmed_assets: rankAssetsForContext(store, account.account_id, conversation.character_id, text)
+    confirmed_assets: (await rankAssetsForContext(store, account.account_id, conversation.character_id, text))
       .map(({ type, display_text, version }) => ({ type, display_text, version })),
     world_state: publicWorldState(currentWorldState(store, account, character))
   };
@@ -1056,12 +1071,23 @@ function buildContextPack(store, account, conversation, text) {
 // 混合召回（技术设计 7.7 开发子集）：index_state=READY 且向量可用的资产按
 // 向量余弦相似度排序；未就绪（PENDING）或向量缺失的资产保留词法召回排序，
 // 保证索引未建好期间不丢失召回。向量来源是确定性开发嵌入，非供应商语义向量。
-function rankAssetsForContext(store, accountId, characterId, query) {
-  const assets = rankRelationshipAssets(activeAssets(store, accountId), { accountId, characterId, query, limit: CONFIRMED_ASSET_TOP_K });
+async function rankAssetsForContext(store, accountId, characterId, query) {
+  const lexicalAssets = rankRelationshipAssets(activeAssets(store, accountId), { accountId, characterId, query, limit: CONFIRMED_ASSET_TOP_K });
   const queryVector = deterministicEmbedding(query);
-  return assets
+  let vectorAssetIds = [];
+  if (typeof store.rankActiveAssetsByVector === 'function') {
+    vectorAssetIds = await store.rankActiveAssetsByVector({ accountId, characterId, queryVector, limit: CONFIRMED_ASSET_TOP_K });
+  }
+  const vectorsById = new Map(vectorAssetIds.map((item) => [item.asset_id, item.score]));
+  const vectorAssets = vectorAssetIds
+    .map((item) => store.assets.get(item.asset_id))
+    .filter((asset) => asset?.account_id === accountId && asset.character_id === characterId && asset.state === 'ACTIVE' && asset.index_state === 'READY' && !asset.deleted_at);
+  const remainingLexical = lexicalAssets.filter((asset) => !vectorsById.has(asset.asset_id));
+  const candidates = vectorAssetIds.length > 0 ? [...vectorAssets, ...remainingLexical] : lexicalAssets;
+  return candidates
     .map((asset) => {
       const embedding = store.assetEmbeddings.get(asset.asset_id);
+      if (vectorsById.has(asset.asset_id)) return { asset, score: vectorsById.get(asset.asset_id) };
       if (asset.index_state === 'READY' && embedding && embedding.version === asset.version) {
         return { asset, score: cosineSimilarity(embedding.embedding, queryVector) };
       }
@@ -1074,7 +1100,9 @@ function rankAssetsForContext(store, accountId, characterId, query) {
       if (left.score === null && right.score !== null) return 1;
       return 0;
     })
-    .map(({ asset }) => asset);
+    .map(({ asset }) => asset)
+    .filter((asset, index, items) => items.findIndex((item) => item.asset_id === asset.asset_id) === index)
+    .slice(0, CONFIRMED_ASSET_TOP_K);
 }
 
 function conversationMessages(store, conversationId) {
@@ -1156,14 +1184,14 @@ function acceptStreamingMessage(store, account, conversation, text) {
   });
 }
 
-function getConversationStream(store, account, path, requestId, streamingReplyGenerator, textModerator) {
+function getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator) {
   const token = path.split('/')[4];
   const entry = streamTokens.get(token);
   if (!entry || entry.accountId !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '流式回放不存在');
   if (entry.used) throw apiError(409, 'STATE_TRANSITION_INVALID', '流式令牌已使用，请用消息接口读取终态');
   if (entry.expiresAt < Date.now()) { streamTokens.delete(token); throw apiError(410, 'CONTENT_REVOKED', '流式令牌已过期'); }
   entry.used = true;
-  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, textModerator);
+  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator);
   const assistantMessage = store.messages.get(entry.assistantMessageId);
   const finalText = assistantMessage ? assistantMessage.text : entry.text;
   return {
@@ -1182,7 +1210,7 @@ function getConversationStream(store, account, path, requestId, streamingReplyGe
 // 真流式执行体（技术设计 7.5）：额度预留→Qwen 流式→按句片段过本地权限门禁
 // 与 OUTPUT 审核→通过才下发 chunk；拦截/失败走 replaced/failed 终态并释放额度。
 // SSE 请求与 POST 同处账户事务模型：流式期间同账户其他请求按公平使用语义排队。
-function liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, textModerator) {
+function liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator) {
   return {
     status: 200,
     sseLive: {
@@ -1211,8 +1239,11 @@ function liveConversationStream(store, account, entry, requestId, streamingReply
         let settled = false;
         const release = () => { if (!settled) { settled = true; try { releaseDailyChatUsage(store, reservation); } catch { /* 事务已回滚则忽略 */ } } };
         const commitUsage = (modelReply) => { if (!settled) { settled = true; return commitDailyChatUsage(store, reservation, { billedInputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens) }); } return null; };
+        let contextPack;
         try {
-          const contextPack = buildContextPack(store, account, conversation, entry.text);
+          // buildContextPack 包含异步的 pgvector 召回。必须先等待完成，
+          // 否则 Qwen 只会收到 Promise，角色姓名、人格与记忆都会丢失。
+          contextPack = await buildContextPack(store, account, conversation, entry.text);
           const onFragment = async (fragment) => {
             // 本地确定性门禁（7.5 本地规则，零成本）先于供应商审核。
             if (assessModelOutputAuthority(fragment)) return false;
@@ -1231,13 +1262,32 @@ function liveConversationStream(store, account, entry, requestId, streamingReply
           persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true });
         } catch (error) {
           const intercepted = error?.code === 'QWEN_STREAM_INTERCEPTED' || error?.code === 'MODEL_CLAIMED_AUTHORITY';
-          release();
           if (intercepted) {
+            release();
             emit('message.replaced', { request_id: requestId, reason: 'OUTPUT_MODERATION' });
             persistStreamingFinal(store, account, conversation, { reply_text: '这条回复的部分内容未通过安全审核，已停止生成。你可以换一个话题继续。', provider: 'model-output-guard', model_version: 'stream-gate-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
             return;
           }
-          if (signal?.aborted) { emit('message.cancelled', { request_id: requestId, reason: 'CLIENT_DISCONNECTED' }); return; }
+          if (signal?.aborted) { release(); emit('message.cancelled', { request_id: requestId, reason: 'CLIENT_DISCONNECTED' }); return; }
+          // 真流式在网络、SSE 或上游协议层失败时，同一轮自动降级为
+          // 非流式 Qwen 请求。不重复写入用户消息，也不把临时占位当成 AI 回复。
+          if (typeof replyGenerator === 'function') {
+            try {
+              const fallbackReply = await replyGenerator(entry.text, contextPack || await buildContextPack(store, account, conversation, entry.text));
+              if (assessModelOutputAuthority(fallbackReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '降级终稿未通过输出门禁');
+              if (typeof textModerator === 'function') {
+                const moderation = await moderateTextWithMetric(store, account, textModerator, { text: fallbackReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
+                if (!moderation || moderation.decision !== 'PASS') throw apiError(200, 'OUTPUT_MODERATION_REJECTED', '降级终稿未通过输出审核');
+              }
+              emit('message.replaced', { request_id: requestId, reason: 'STREAM_PROVIDER_FALLBACK' });
+              const usage = commitUsage(fallbackReply);
+              persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true });
+              return;
+            } catch {
+              // 降级也失败时由下方统一释放额度并返回可重试终态。
+            }
+          }
+          release();
           emit('message.failed', { request_id: requestId, code: error?.code || 'MODEL_UNAVAILABLE', retryable: Boolean(error?.retryable ?? true) });
         }
       }
@@ -1355,6 +1405,19 @@ function createMessageFeedback(store, account, path, body) {
   };
   store.messageFeedback.set(feedback.feedback_id, feedback);
   return created({ feedback });
+}
+const TRIAL_FEEDBACK_CATEGORIES = new Set(['ONBOARDING', 'PERSONA', 'MEMORY', 'SAFETY', 'USABILITY', 'OTHER']);
+function createTrialFeedback(store, account, body) {
+  authorize(account, 'DATA_RIGHTS', store);
+  const category = body?.category;
+  const rating = Number(body?.rating);
+  if (!TRIAL_FEEDBACK_CATEGORIES.has(category) || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    throw apiError(400, 'VALIDATION_ERROR', '反馈分类或评分无效');
+  }
+  const note = body?.note === undefined || body.note === null || body.note === '' ? '' : optionalShortText(body.note, 'note', 1200);
+  const feedback = { feedback_id: store.next('tfb'), account_id: account.account_id, category, rating, note, created_at: new Date().toISOString() };
+  store.trialFeedback.set(feedback.feedback_id, feedback);
+  return created({ feedback: publicTrialFeedback(feedback) });
 }
 function optionalShortText(value, label, maxLength) {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > maxLength) throw apiError(400, 'VALIDATION_ERROR', `${label} 必须为 1-${maxLength} 个字符`);
@@ -1888,7 +1951,8 @@ function deleteAsset(store, account, path) {
   account.revocation_epoch += 1;
   // 向量是派生数据：删除即刻下线并取消未完成索引任务（技术设计 8.9 VECTOR_INDEX 目标）。
   const embeddingCleanup = invalidateAssetEmbedding(store, asset.asset_id, 'asset deleted by user');
-  const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: asset.asset_id, scope: 'RELATIONSHIP_ASSET', state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'NOT_IMPLEMENTED_LOCAL', created_at: asset.deleted_at, note: '仅开发内存存储已在线撤销；未执行生产物理清理。', targets: [ { type: 'RELATIONSHIP_ASSET', state: 'ONLINE_DISABLED' }, { type: 'VECTOR_INDEX', state: embeddingCleanup.vector_removed ? 'INVALIDATED' : 'NOT_INDEXED', cancelled_jobs: embeddingCleanup.jobs_cancelled } ] };
+  const vectorState = embeddingCleanup.deferred_to_worker ? 'PENDING_WORKER_CLEANUP' : (embeddingCleanup.vector_removed ? 'INVALIDATED' : 'NOT_INDEXED');
+  const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: asset.asset_id, scope: 'RELATIONSHIP_ASSET', state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'NOT_IMPLEMENTED_LOCAL', created_at: asset.deleted_at, note: '仅开发内存存储已在线撤销；未执行生产物理清理。', targets: [ { type: 'RELATIONSHIP_ASSET', state: 'ONLINE_DISABLED' }, { type: 'VECTOR_INDEX', state: vectorState, cancelled_jobs: embeddingCleanup.jobs_cancelled } ] };
   store.deletionJobs.set(deletionJob.deletion_job_id, deletionJob);
   return ok({ asset, deletion_job: deletionJob, revocation_epoch: account.revocation_epoch });
 }
@@ -2431,13 +2495,32 @@ function ownCandidate(store, accountId, id) { const item = store.candidates.get(
 function ownAsset(store, accountId, id) { const item = store.assets.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '关系资产不存在'); return item; }
 function ownCandidates(store, accountId) { return [...store.candidates.values()].filter((item) => item.account_id === accountId && item.state === 'CANDIDATE' && new Date(item.expires_at).getTime() > Date.now()); }
 function activeAssets(store, accountId) { return [...store.assets.values()].filter((item) => item.account_id === accountId && item.state === 'ACTIVE'); }
-function accountIdForRequest(req, store) {
+async function accountIdForRequest(req, store, trialAuth = null, { allowDevelopmentTokens = true } = {}) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const developmentId = TOKENS.get(token);
-  if (developmentId) return typeof store.resolveAccountId === 'function' ? store.resolveAccountId(developmentId) : developmentId;
+  if (allowDevelopmentTokens && developmentId) return typeof store.resolveAccountId === 'function' ? store.resolveAccountId(developmentId) : developmentId;
+  if (trialAuth && typeof trialAuth.resolveAccessToken === 'function') {
+    const trialAccountId = await trialAuth.resolveAccessToken(token);
+    if (trialAccountId) return trialAccountId;
+  }
   // 注册鉴权骨架签发的动态 Access Token（仅内存 store 支持）。
   if (authServiceFor(store)) return authServiceFor(store).resolveAccessToken(token);
   return null;
+}
+
+function trialAuthFor(store, injectedTrialAuth = null) {
+  if (injectedTrialAuth) return injectedTrialAuth;
+  if (store.__trialInviteAuth) return store.__trialInviteAuth;
+  if (typeof store.createTrialSession === 'function' && typeof store.resolveTrialAccessToken === 'function') {
+    store.__trialInviteAuth = {
+      createSession: (input) => store.createTrialSession(input),
+      resolveAccessToken: (token) => store.resolveTrialAccessToken(token),
+      refreshSession: (input) => store.refreshTrialSession(input)
+    };
+    return store.__trialInviteAuth;
+  }
+  store.__trialInviteAuth = new MemoryTrialInviteAuth({ store });
+  return store.__trialInviteAuth;
 }
 
 function authServiceFor(store) {
@@ -2474,6 +2557,26 @@ function refreshTokens(store, body) {
   } catch (error) { throw authApiError(error); }
 }
 
+async function createTrialSession(trialAuth, body) {
+  try {
+    const result = await trialAuth.createSession({ inviteCode: body?.invite_code, initialSecret: body?.initial_secret });
+    return created({ account: { account_id: result.account_id, age_status: 'AGE_UNVERIFIED' }, tokens: result.tokens,
+      authentication: 'closed-trial-invite', note: '封闭试用账户已建立。完成 AI 告知和年龄声明后才能进入互动。' });
+  } catch (error) { throw trialAuthApiError(error); }
+}
+
+async function refreshTrialSession(trialAuth, body) {
+  try {
+    const result = await trialAuth.refreshSession({ refreshToken: body?.refresh_token });
+    return ok({ account: { account_id: result.account_id }, tokens: result.tokens, authentication: 'closed-trial-invite' });
+  } catch (error) { throw trialAuthApiError(error); }
+}
+
+function trialAuthApiError(error) {
+  if (error instanceof TrialAuthError) return apiError(error.code === 'TRIAL_SESSION_INVALID' ? 401 : 401, error.code, error.message);
+  return apiError(503, 'TRIAL_AUTH_UNAVAILABLE', '试用登录暂不可用，请稍后重试');
+}
+
 function authApiError(error) {
   const status = error.code === 'VALIDATION_ERROR' || error.code === 'SMS_CODE_INVALID' || error.code === 'SMS_CHALLENGE_NOT_FOUND' ? 400
     : error.code === 'PHONE_ALREADY_REGISTERED' ? 409
@@ -2482,7 +2585,7 @@ function authApiError(error) {
     : 502;
   return apiError(status, error.code || 'AUTH_ERROR', error.message);
 }
-function requireAccount(req, store) { const id = accountIdForRequest(req, store); const account = id && store.account(id); if (!account) throw apiError(401, 'AUTH_REQUIRED', '需要有效的合成开发 Bearer token'); return account; }
+function requireAccount(req, store, authenticatedAccountId = null) { const account = authenticatedAccountId && store.account(authenticatedAccountId); if (!account) throw apiError(401, 'AUTH_REQUIRED', '需要有效的试用会话或开发 Bearer token'); return account; }
 function ageStatus(account) { return { status: account.age_status, reason_codes: account.age_reason_codes || [], allowed_actions: account.age_status === 'AGE_PASS' ? ['COMPANION_INTERACTION', 'DATA_RIGHTS'] : ['VIEW_NOTICE', 'DECLARE_AGE', 'APPEAL_AGE', 'DATA_RIGHTS'], policy: 'deterministic-development-only', enhanced_verification: account.age_status === 'AGE_REVIEW' ? { state: 'REQUIRED', provider: null, assertion: null } : { state: 'NOT_REQUIRED' } }; }
 function publicAccount(account) { return { account_id: account.account_id, account_status: account.account_status, age_status: account.age_status, revocation_epoch: account.revocation_epoch, authentication: 'synthetic-development-token-only' }; }
 function recordOperationMetric(store, { accountId, capability = 'CHAT_GENERATION', provider, modelVersion, inputTokens, outputTokens, latencyMs, outcome }) {
@@ -2519,6 +2622,8 @@ async function moderateImageWithMetric(store, account, imageModerator, { fileUrl
   }
 }
 function ownOperationMetrics(store, accountId) { return [...(store.operationMetrics?.values() || [])].filter((item) => item.account_id === accountId).map(({ metric_id, capability, provider, model_version, input_tokens, output_tokens, latency_ms, outcome, created_at }) => ({ metric_id, capability, provider, model_version, input_tokens, output_tokens, latency_ms, outcome, created_at })); }
+function ownTrialFeedback(store, accountId) { return [...(store.trialFeedback?.values() || [])].filter((item) => item.account_id === accountId).map(publicTrialFeedback); }
+function publicTrialFeedback(feedback) { return { feedback_id: feedback.feedback_id, category: feedback.category, rating: feedback.rating, note: feedback.note, created_at: feedback.created_at }; }
 function publicNotice(notice) { return { ...notice }; }
 function publicTtsJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, source_message_id: job.source_message_id, voice: { voice_id: job.voice_id || null, voice_version: job.voice_version || null, authorization_record_id: job.authorization_record_id || null, rights_review_id: job.rights_review_id || null, rights_review_state: job.rights_review_state || null }, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
 function publicAsrJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, input_asset_id: job.input_asset_id, transcript: job.transcript_text ? { text: job.transcript_text, state: job.transcript_state, version: 1 } : null, failure_code: job.failure_code, created_at: job.created_at }; }

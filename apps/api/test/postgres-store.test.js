@@ -9,7 +9,7 @@ const { DEVELOPMENT_DATABASE_ACCOUNT_IDS, PostgresStore } = require('../src/pers
 const { createPersistenceFromEnvironment } = require('../src/persistence/composition');
 const { createApp } = require('../src/app');
 
-function fakePool({ rejectConcurrentQueries = false } = {}) {
+function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, loadTtsJob = false } = {}) {
   const calls = [];
   let queryActive = false;
   const client = {
@@ -30,6 +30,35 @@ function fakePool({ rejectConcurrentQueries = false } = {}) {
         }
         if (String(sql).includes('FROM daily_chat_usage')) {
           return { rows: [{ account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice, usage_date: new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()), chat_rounds: 2, billed_input_tokens: 6400, reserved_input_tokens: 0, updated_at: '2026-09-04T00:00:00.000Z' }] };
+        }
+        if (loadActiveTrial && String(sql).includes('FROM entitlement_ledgers')) {
+          return { rows: [{
+            entitlement_ledger_id: '00000000-0000-7000-8000-0000000000e1', account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice,
+            entitlement_id: '00000000-0000-7000-8000-0000000000e2:2099-09-14T00:00:00.000Z', capability: 'SYNTHESIZE_TTS',
+            action: 'GRANT', job_id: null, quantity: 300, reserved_quantity: null, idempotency_key: 'trial:GRANT:SYNTHESIZE_TTS',
+            source: 'TRIAL_GRANTED', source_event_id: 'trial-test', created_at: new Date('2026-09-07T00:00:00.000Z')
+          }] };
+        }
+        if (loadActiveTrial && String(sql).includes('FROM subscriptions WHERE')) {
+          return { rows: [{
+            subscription_id: '00000000-0000-7000-8000-0000000000e2', account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice,
+            sku: 'qiyu_full_experience_trial_7d_v1', channel: 'DEVELOPMENT_TRIAL', state: 'TRIAL', auto_renew: false,
+            disclosure_version: 'trial_full_experience_7d_v1', period_start: new Date('2099-09-07T00:00:00.000Z'),
+            period_end: new Date('2099-09-14T00:00:00.000Z'), grace_period_end: null, refund_status: 'NONE',
+            transaction_ref_hash: null, created_at: new Date('2099-09-07T00:00:00.000Z'), updated_at: new Date('2099-09-07T00:00:00.000Z')
+          }] };
+        }
+        if (loadTtsJob && String(sql).includes('FROM media_jobs WHERE')) {
+          return { rows: [{
+            job_id: '00000000-0000-7000-8000-0000000000f1', account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice,
+            character_id: '00000000-0000-7000-8000-0000000000f2', conversation_id: '00000000-0000-7000-8000-0000000000f3',
+            source_message_id: '00000000-0000-7000-8000-0000000000f4', input_asset_id: null, reference_asset_id: null,
+            entitlement_id: null, type: 'TTS', state: 'PENDING', attempts: 0, provider: 'tencent-tts', provider_request_id: null,
+            provider_job_id: null, moderation_policy_version: null, result_asset_id: null, transcript_text: null, transcript_state: null,
+            failure_code: null, provider_error_code: null, world_state_id: null, world_state_version: null, scene_contract: null,
+            voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', authorization_record_id: 'tts-auth',
+            rights_review_id: 'tts-rights', rights_review_state: 'APPROVED', created_at: new Date('2026-09-07T00:00:00.000Z')
+          }] };
         }
         return { rows: [] };
       } finally {
@@ -80,6 +109,37 @@ test('PostgresStore loads one RLS-scoped pg Client sequentially', async () => {
   const store = new PostgresStore({ pool });
   await store.withAccountTransaction(store.resolveAccountId('acct_dev_alice'), async (scoped) => scoped.account(store.resolveAccountId('acct_dev_alice')));
   assert.equal(pool.calls.at(-2).sql, 'COMMIT');
+});
+
+test('PostgresStore normalizes subscription timestamps so persisted trial TTS quota remains active', async () => {
+  const pool = fakePool({ loadActiveTrial: true });
+  const store = new PostgresStore({ pool });
+  const accountId = store.resolveAccountId('acct_dev_alice');
+  await store.withAccountTransaction(accountId, async (scoped) => {
+    const subscription = [...scoped.subscriptions.values()][0];
+    assert.equal(subscription.period_end, '2099-09-14T00:00:00.000Z');
+    assert.equal(subscription.created_at, '2099-09-07T00:00:00.000Z');
+    const tts = scoped.mediaEntitlementService.entitlementBalances(accountId).find((item) => item.capability === 'SYNTHESIZE_TTS');
+    assert.equal(tts.available_quantity, 300);
+  });
+});
+
+test('PostgresStore vector recall stays inside the authenticated account, character, active state, and indexed version', async () => {
+  const pool = fakePool();
+  const store = new PostgresStore({ pool });
+  const accountId = store.resolveAccountId('acct_dev_alice');
+  await store.withAccountTransaction(accountId, async (scoped) => {
+    await scoped.rankActiveAssetsByVector({ accountId, characterId: 'character-1', queryVector: new Array(256).fill(0), limit: 3 });
+  });
+  const ranking = pool.calls.find((call) => call.sql.includes('FROM relationship_asset_embeddings AS embedding') && call.sql.includes('<=>'));
+  assert.ok(ranking);
+  assert.match(ranking.sql, /embedding\.account_id = \$1/);
+  assert.match(ranking.sql, /embedding\.character_id = \$2/);
+  assert.match(ranking.sql, /asset\.state = 'ACTIVE'/);
+  assert.match(ranking.sql, /asset\.index_state = 'READY'/);
+  assert.match(ranking.sql, /asset\.version = embedding\.version/);
+  assert.deepEqual(ranking.values.slice(0, 2), [accountId, 'character-1']);
+  assert.equal(ranking.values.at(-1), 3);
 });
 
 test('PostgresStore locks and persists only the current account daily chat usage during message mutation', async () => {
@@ -239,8 +299,29 @@ test('PostgresStore persists scoped TTS job and private-media metadata without e
   assert.ok(jobInsert);
   assert.ok(assetInsert);
   assert.deepEqual(jobInsert.values.slice(23, 28), ['tencent-standard-101001', 'provider-catalog-2026-09', 'tencent-service-entitlement-2026', 'rights-review-voice-001', 'APPROVED']);
+  const assetParameters = [...new Set([...assetInsert.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
+  assert.deepEqual(assetParameters, Array.from({ length: 20 }, (_, index) => index + 1));
+  assert.equal(assetInsert.values.length, 20);
   assert.equal(assetInsert.values.includes('https://'), false);
   assert.equal(assetInsert.values.includes('tts/00000000-0000-7000-8000-0000000000f5.mp3'), true);
+});
+
+test('PostgresStore updates an existing TTS job with contiguous PostgreSQL parameters', async () => {
+  const pool = fakePool({ loadTtsJob: true });
+  const store = new PostgresStore({ pool });
+  const accountId = store.resolveAccountId('acct_dev_alice');
+  await store.withAccountTransaction(accountId, async (scoped) => {
+    const job = scoped.mediaJobs.get('00000000-0000-7000-8000-0000000000f1');
+    job.state = 'RUNNING';
+    job.attempts = 1;
+    job.entitlement_id = 'trial-entitlement';
+  });
+  const update = pool.calls.find((call) => call.sql.startsWith('UPDATE media_jobs SET'));
+  assert.ok(update);
+  const parameters = [...new Set([...update.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
+  assert.deepEqual(parameters, Array.from({ length: 26 }, (_, index) => index + 1));
+  assert.equal(update.values.length, 26);
+  assert.equal(update.values[6], 'trial-entitlement');
 });
 
 test('PostgresStore persists image-job continuation state and confirmed private reference metadata', async () => {
@@ -282,7 +363,7 @@ test('PostgresStore persists image-job continuation state and confirmed private 
   assert.equal(jobInsert.values[22], JSON.stringify({ version: 'qiyu-image-scene-v1', location: '窗边' }));
   assert.equal(referenceInsert.values[3], null);
   assert.equal(referenceInsert.values[15], 'USER_CONFIRMED');
-  assert.equal(referenceInsert.values[20], '00000000-0000-7000-8000-0000000000f0');
+  assert.equal(referenceInsert.values[19], '00000000-0000-7000-8000-0000000000f0');
   assert.ok(pool.calls.indexOf(rightsReviewInsert) < pool.calls.indexOf(referenceInsert));
   assert.equal(referenceInsert.values.includes('https://'), false);
 });
@@ -534,6 +615,18 @@ test('trial ledger migration permits only the named trial source while retaining
   assert.match(migration, /PAYMENT_VERIFIED/);
   assert.match(migration, /action = 'RESERVE'/);
   assert.doesNotMatch(migration, /callback_body|payment_payload|checkout_url/i);
+});
+
+test('closed trial migration stores only credential hashes and scopes trial feedback to the authenticated account', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/045_closed_trial_invites_feedback.sql'), 'utf8');
+  assert.match(migration, /CREATE TABLE trial_invites/);
+  assert.match(migration, /invite_code_hash bytea NOT NULL UNIQUE/);
+  assert.match(migration, /initial_secret_hash text NOT NULL/);
+  assert.match(migration, /CREATE TABLE trial_sessions/);
+  assert.match(migration, /access_token_hash bytea NOT NULL UNIQUE/);
+  assert.match(migration, /ALTER TABLE trial_feedback FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /WITH CHECK \(account_id = app\.current_account_id\(\)\)/);
+  assert.match(migration, /REVOKE ALL ON trial_invites, trial_sessions FROM qiyu_app/);
 });
 
 test('conversation summary migration is account-scoped and stores a revocable derived payload', () => {

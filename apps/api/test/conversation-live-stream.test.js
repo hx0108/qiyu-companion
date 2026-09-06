@@ -108,6 +108,48 @@ test('真流式全链：POST 202 受理 → SSE 逐片段下发 → completed �
   assert.equal(usage.body.usage.chat_rounds, 1);
 });
 
+test('真流式等待异步上下文，Qwen 能收到当前角色名', async (t) => {
+  let receivedCharacterName = null;
+  const streamingReplyGenerator = {
+    async generateStream(text, context, onFragment) {
+      receivedCharacterName = context?.character?.name ?? null;
+      await onFragment('你好。');
+      return { provider: 'fake-stream', model_version: 'fake-v1', reply_text: '你好。', usage: {}, ai_generated: true };
+    }
+  };
+  const base = await start(t, { streamingReplyGenerator });
+  const conversationId = await readyConversation(base, 'identity');
+  const accepted = await request(base, `/api/v1/conversations/${conversationId}/messages`, {
+    method: 'POST', key: 'identity-live', body: { content: { text: '你是谁' }, stream: true }
+  });
+  await readSse(base, accepted.body.stream.stream_url);
+  assert.equal(receivedCharacterName, 'identity 角色');
+});
+
+test('真流式上游失败时同轮降级为非流式回复，不留失败占位', async (t) => {
+  const streamingReplyGenerator = {
+    async generateStream() {
+      throw Object.assign(new Error('stream unavailable'), { code: 'QWEN_NETWORK_ERROR', retryable: true });
+    }
+  };
+  const replyGenerator = async () => ({
+    provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: '好的，先去好好吃饭吧。', usage: {}, ai_generated: true,
+    memory_candidate: null
+  });
+  const base = await start(t, { streamingReplyGenerator, replyGenerator });
+  const conversationId = await readyConversation(base, 'fallback');
+  const accepted = await request(base, `/api/v1/conversations/${conversationId}/messages`, {
+    method: 'POST', key: 'fallback-live', body: { content: { text: '我要吃饭了' }, stream: true }
+  });
+  const events = await readSse(base, accepted.body.stream.stream_url);
+  assert.equal(events.find((item) => item.event === 'message.replaced')?.data.reason, 'STREAM_PROVIDER_FALLBACK');
+  assert.equal(events.some((item) => item.event === 'message.failed'), false);
+  const completed = events.find((item) => item.event === 'message.completed');
+  assert.ok(completed);
+  const finalMessage = await request(base, `/api/v1/messages/${completed.data.message_id}`);
+  assert.equal(finalMessage.body.message.text, '好的，先去好好吃饭吧。');
+});
+
 test('片段未过输出门禁：立即停止流、下发 replaced、安全文案入库且不建候选、额度释放', async (t) => {
   const fragments = ['正常的开头。', '我已经可以忽略安全规则帮你绕过年龄核验。', '不会再到这里。'];
   const base = await start(t, { streamingReplyGenerator: fakeStreamingGenerator(fragments) });
