@@ -1926,9 +1926,19 @@ async function getMediaAssetContent(store, account, path, mediaStore, imageStore
       const raw = await imageStore.readImage(asset.object_key);
       // AIGC 隐式标识（P1-7）：PNG tEXt / JPEG COM 在交付时注入；WebP 容器
       // 无轻量注释位，开发链路如实不做字节级隐式标识，仅保留响应头与资产元数据。
-      const labeled = asset.mime_type === 'image/png' ? tagPngWithAigcMetadata(raw)
-        : asset.mime_type === 'image/jpeg' ? tagJpegWithAigcMetadata(raw) : raw;
-      return { status: 200, binary: labeled, contentType: asset.mime_type, filename: `${asset.asset_id}.${asset.mime_type.split('/')[1]}`, aigcLabel: asset.mime_type === 'image/webp' ? `${AIGC_MARK_VERSION_IMAGE}-webp-passthrough` : AIGC_MARK_VERSION_IMAGE };
+      // 字节与声明的格式不符时回退原字节并在响应头如实标注 unlabeled——
+      // 标识失败不得阻断用户下载，也不得伪装成已标识。
+      let labeled = raw;
+      let label = AIGC_MARK_VERSION_IMAGE;
+      try {
+        if (asset.mime_type === 'image/png') labeled = tagPngWithAigcMetadata(raw);
+        else if (asset.mime_type === 'image/jpeg') labeled = tagJpegWithAigcMetadata(raw);
+        else label = `${AIGC_MARK_VERSION_IMAGE}-webp-passthrough`;
+      } catch {
+        labeled = raw;
+        label = `${AIGC_MARK_VERSION_IMAGE}-unlabeled-invalid-bytes`;
+      }
+      return { status: 200, binary: labeled, contentType: asset.mime_type, filename: `${asset.asset_id}.${asset.mime_type.split('/')[1]}`, aigcLabel: label };
     }
   } catch {
     throw apiError(404, 'MEDIA_CONTENT_UNAVAILABLE', '媒体内容不可用');
