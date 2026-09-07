@@ -131,7 +131,10 @@ test('账户注销需二次确认，注销后立即停止互动并关闭会话',
   assert.equal(confirmed.status, 202);
   assert.equal(confirmed.body.account.account_status, 'CLOSING');
   assert.equal(confirmed.body.deletion_job.scope, 'ACCOUNT');
-  assert.match(confirmed.body.deletion_job.note, /24 小时内清理/);
+  // 注销即登记删除账本（P0 删除编排）：清理承诺与逐目标回执对用户可见。
+  assert.match(confirmed.body.deletion_job.note, /24 小时内完成/);
+  assert.equal(confirmed.body.deletion_job.physical_cleanup_state, 'PENDING_CLEANUP_WORKER');
+  assert.ok(confirmed.body.deletion_receipt.targets.length >= 6, '账户级账本至少覆盖全部数据域目标');
 
   const blocked = await request(base, `/api/v1/conversations/${conversation.body.conversation.conversation_id}/messages`, { method: 'POST', key: 'dl-3', body: { content: { text: '注销后不应可发' } } });
   assert.equal(blocked.status, 403);

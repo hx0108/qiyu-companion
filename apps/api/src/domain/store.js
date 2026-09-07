@@ -26,6 +26,7 @@ class DevelopmentStore {
     this.dailyChatUsage = new Map();
     this.operationMetrics = new Map();
     this.deletionJobs = new Map();
+    this.deletionTargets = new Map();
     this.complaints = new Map();
     this.proactiveEvents = new Map();
     this.proactiveMessages = new Map();

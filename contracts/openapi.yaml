@@ -1017,7 +1017,8 @@ paths:
         '200': { $ref: '#/components/responses/JsonResponse' }
   /api/v1/deletion-jobs/{deletionJobId}:
     get:
-      summary: 查询开发删除任务状态
+      summary: 查询开发删除任务状态与删除回执
+      description: 响应含 deletion_receipt（receipt_version、逐目标 targets[].state/provider_receipt、completed/failed 计数、backup_deadline）。FAILED 目标如实展示；除非全部目标 COMPLETED，不称删除完成（AC-15）。
       parameters: [ { $ref: '#/components/parameters/DeletionJobId' } ]
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }

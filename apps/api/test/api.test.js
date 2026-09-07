@@ -250,12 +250,15 @@ test('账户隔离、资产删除和撤销纪元均由服务端事实驱动', as
   assert.equal(bobDelete.status, 404);
   const removed = await request(base, `/api/v1/relationship-assets/${assetId}`, { method: 'DELETE', key: 'alice-delete' });
   assert.equal(removed.status, 200);
-  assert.equal(removed.body.deletion_job.state, 'ONLINE_DISABLED');
-  assert.equal(removed.body.deletion_job.physical_cleanup_state, 'NOT_IMPLEMENTED_LOCAL');
+  // P0 删除编排：行级清理在请求内完成即如实报 COMPLETED，回执逐目标可见。
+  assert.equal(removed.body.deletion_job.state, 'COMPLETED');
+  assert.equal(removed.body.deletion_job.physical_cleanup_state, 'ROWS_CLEANED_INLINE');
+  assert.equal(removed.body.deletion_receipt.completed_targets, 2);
   assert.equal(removed.body.revocation_epoch, 1);
   assert.deepEqual((await request(base, '/api/v1/memory-recall')).body.assets, []);
   const job = await request(base, `/api/v1/deletion-jobs/${removed.body.deletion_job.deletion_job_id}`);
-  assert.equal(job.body.deletion_job.state, 'ONLINE_DISABLED');
+  assert.equal(job.body.deletion_job.state, 'COMPLETED');
+  assert.equal(job.body.deletion_receipt.targets.length, 2);
 });
 
 test('同一幂等键重放相同结果，载荷变化返回冲突', async (t) => {
