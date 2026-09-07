@@ -140,6 +140,21 @@ docker compose exec api npm run verify:closed-trial-qwen
 只有该命令返回 `{"acceptance":"passed","provider":"qwen",...}`，才能把“真实 Qwen
 调用已验证”写入试用记录；失败时先保留封闭试用关闭状态并排查供应商配置或审核链路。
 
+## 三点五、监控与语义向量（P1-6/P1-4 新增）
+
+- 指标：`GET /internal/metrics`（Prometheus 文本；审核员 Bearer 同其它 `/internal/*`）。
+  抓取与告警规则见 `deploy/monitoring/prometheus-rules.yml` 与 `development/OPERATIONS_RUNBOOK.md`。
+  注意：PG 模式下该端点是请求作用域样本，生产全实例口径需按 runbook 的说明接独立导出。
+- 语义记忆向量：配置 `QIYU_LLM_PROVIDER=qwen + QWEN_API_KEY` 后资产索引与召回
+  查询自动切换到 Qwen embedding（默认 `text-embedding-v4` 1024 维；
+  `QWEN_EMBEDDING_MODEL`/`QWEN_EMBEDDING_DIMENSIONS` 可覆盖），未配置则回退确定性开发嵌入。
+- 切换 embedding 模型版本后必须全量重建索引：
+
+```bash
+docker compose exec worker node scripts/rebuild-asset-embedding-index.js --dry-run  # 先看待重建数量
+docker compose exec worker node scripts/rebuild-asset-embedding-index.js           # 入队后由向量队列完成
+```
+
 ## 四、非 Docker 备选（systemd 直跑）
 
 适合与既有服务合用一台机器、不想再装容器的情况：
