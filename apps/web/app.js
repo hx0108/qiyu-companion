@@ -713,6 +713,25 @@ async function synthesizeMessageAudio(message) {
   if (!id) return;
   setBusy(true);
   try {
+    // 语音额度是服务端事实。先读取再创建任务，避免用户在未领取试用时
+    // 反复得到一个必然失败的 TTS 作业。
+    const [current, entitlements] = await Promise.all([
+      api("/subscriptions/current"),
+      api("/entitlements"),
+    ]);
+    state.currentSubscription = current?.subscription ?? null;
+    state.trial = current?.trial ?? null;
+    state.entitlements = entitlements?.entitlements ?? [];
+    const ttsEntitlement = state.entitlements.find((item) => item?.capability === "SYNTHESIZE_TTS");
+    if (!ttsEntitlement || Number(ttsEntitlement.available_quantity) <= 0) {
+      state.lastTtsJob = null;
+      state.route = "subscription";
+      setToast(state.trial?.state === "NOT_STARTED"
+        ? "请先领取 7 天完整体验，其中包含角色语音额度。"
+        : "当前角色语音额度已用完；可在权益页查看状态。"
+      );
+      return;
+    }
     const payload = await api(`/messages/${encodeURIComponent(id)}/tts-jobs`, { method: "POST", idempotent: uuid(), body: {} });
     const job = payload?.tts_job ?? payload;
     if (job?.state !== "COMPLETED" || !job.result_asset_id) {
@@ -822,9 +841,17 @@ async function refreshReferenceRightsReview() {
   try {
     const payload = await api(`/content-rights-reviews/${encodeURIComponent(reviewId)}`);
     state.referenceRightsReview = payload?.content_rights_review ?? null;
-    setToast(state.referenceRightsReview?.state === "APPROVED"
-      ? "权利审核已显示为通过；仍需由审核服务激活参考资产后才能生图。"
-      : `当前权利审核状态：${state.referenceRightsReview?.state ?? "未返回"}。`);
+    if (state.referenceRightsReview?.state === "APPROVED") {
+      await restoreReferenceImage();
+      if (referenceImageUsable()) {
+        state.route = "image-scene";
+        setToast("参考立绘已通过独立权利审核，可创建受控情境图。");
+      } else {
+        setToast("权利审核已通过，正在等待服务端激活参考资产。");
+      }
+    } else {
+      setToast(`当前权利审核状态：${state.referenceRightsReview?.state ?? "未返回"}。`);
+    }
   } catch (error) { setToast(serverMessage(error)); }
   finally { setBusy(false); }
 }
@@ -861,7 +888,7 @@ async function submitImageScene(form) {
       },
     });
     state.imageJob = payload?.image_job ?? null;
-    if (state.imageJob?.state === "PENDING") setToast("图片任务已提交。请手动刷新任务状态；生成期间不会展示供应商临时链接。");
+    if (state.imageJob?.state === "PENDING") setToast("图片任务已提交，后台会自动完成审核与入库；可点“刷新状态”提前查看进度。");
     else setToast(`图片任务未进入队列：${state.imageJob?.failure_code ?? "服务端未确认"}。`);
   } catch (error) { setToast(serverMessage(error)); }
   finally { setBusy(false); }

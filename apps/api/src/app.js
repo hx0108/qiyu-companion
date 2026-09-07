@@ -22,6 +22,9 @@ const { AuthService } = require('./domain/auth-service');
 const { MemoryTrialInviteAuth, TrialAuthError } = require('./domain/trial-invite-auth');
 const { tagWithAigcMetadata } = require('./media/aigc-metadata');
 const { rankRelationshipAssets } = require('./domain/relationship-recall');
+const { registerAccountDeletionTargets, registerConversationDeletionTargets, registerDeletionTargets, completeDeletionTarget, failDeletionTarget, runAccountDeletionCleanup, deletionReceipt } = require('./domain/deletion-orchestration');
+const { advanceImageJob, releaseImageEntitlement } = require('./domain/image-job-advance');
+const { recordOperationMetric, providerName, providerModelVersion, moderateTextWithMetric, moderateImageWithMetric } = require('./domain/operation-metrics');
 const { invalidateSummaries, validSummary } = require('./domain/conversation-summary');
 const { cancelConversationSummaryJobs, enqueueConversationSummary, replayConversationSummaryDeadLetter } = require('./domain/conversation-summary-worker');
 const { DEVELOPMENT_EMBEDDING_MODEL_VERSION, cosineSimilarity, deterministicEmbedding, enqueueAssetEmbedding, invalidateAssetEmbedding, replayAssetEmbeddingDeadLetter, startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
@@ -953,9 +956,10 @@ function deleteConversation(store, account, path) {
   for (const asset of store.assets.values()) if (candidateIds.has(asset.source_candidate_id) && asset.state !== 'DELETED') { asset.state = 'DELETED'; asset.deleted_at = deletedAt; invalidateAssetEmbedding(store, asset.asset_id, 'conversation deleted'); }
   conversation.status = 'DELETED'; conversation.deleted_at = deletedAt;
   account.revocation_epoch += 1;
-  const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: null, scope: 'CONVERSATION', state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'NOT_IMPLEMENTED_LOCAL', created_at: deletedAt, note: '开发内存中的会话、候选与派生关系资产已撤销；生产媒体、备份和供应商删除未在本地实现。' };
+  const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: null, scope: 'CONVERSATION', state: 'COMPLETED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'ROWS_CLEANED_INLINE', created_at: deletedAt, note: '会话消息、候选与派生关系资产已在本请求内清理；向量随资产下线（PG 模式转交 Embedding Worker）。媒体对象不隶属会话删除范围。' };
   store.deletionJobs.set(deletionJob.deletion_job_id, deletionJob);
-  return ok({ conversation: { conversation_id: conversation.conversation_id, status: conversation.status, deleted_at: deletedAt }, deletion_job: deletionJob });
+  registerConversationDeletionTargets(store, account, deletionJob, conversation.conversation_id, deletedAt);
+  return ok({ conversation: { conversation_id: conversation.conversation_id, status: conversation.status, deleted_at: deletedAt }, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob) });
 }
 
 async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null) {
@@ -994,7 +998,11 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
   }
   try {
     const contextPack = await buildContextPack(store, account, conversation, text);
-    const modelReply = await replyGenerator(text, contextPack);
+    const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
+      await replyGenerator(text, contextPack),
+      text,
+      contextPack.character?.name
+    );
     recordOperationMetric(store, { accountId: account.account_id, provider: modelReply.provider, modelVersion: modelReply.model_version, inputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens), outputTokens: Number(modelReply.usage?.output_tokens ?? modelReply.usage?.completion_tokens ?? 0), latencyMs: Date.now() - modelStartedAt, outcome: modelReply.ai_generated === false ? 'FALLBACK' : 'COMPLETED' });
     const authorityClaim = assessModelOutputAuthority(modelReply.reply_text);
     if (authorityClaim) {
@@ -1103,6 +1111,24 @@ async function rankAssetsForContext(store, accountId, characterId, query) {
     .map(({ asset }) => asset)
     .filter((asset, index, items) => items.findIndex((item) => item.asset_id === asset.asset_id) === index)
     .slice(0, CONFIRMED_ASSET_TOP_K);
+}
+
+// 角色名只在用户明确询问身份时才需要出现。该门禁补充提示词约束：
+// 它只移除回复开头的机械自报姓名，不改写正文、不创造新的角色内容。
+function normalizeUnpromptedCharacterSelfIntroduction(modelReply, userText, characterName, allowEmpty = false) {
+  if (!modelReply || typeof modelReply.reply_text !== 'string' || typeof characterName !== 'string' || !characterName.trim() || asksCharacterIdentity(userText)) return modelReply;
+  const replyText = modelReply.reply_text.trimStart();
+  const prefixes = [`我是${characterName.trim()}`, `我叫${characterName.trim()}`];
+  const prefix = prefixes.find((item) => replyText.startsWith(item));
+  if (!prefix) return modelReply;
+  const stripped = replyText.slice(prefix.length).replace(/^[\s，,。！!：:、-]+/, '');
+  return stripped || allowEmpty ? { ...modelReply, reply_text: stripped } : modelReply;
+}
+
+function asksCharacterIdentity(value) {
+  if (typeof value !== 'string') return false;
+  const text = value.replace(/\s+/g, '');
+  return /(?:你|您)(?:是谁|叫什么(?:名字)?|叫啥|的?名字(?:是什么|是啥)|怎么称呼|是什么身份)|(?:介绍一下你自己|自我介绍|你的身份)/.test(text);
 }
 
 function conversationMessages(store, conversationId) {
@@ -1245,17 +1271,29 @@ function liveConversationStream(store, account, entry, requestId, streamingReply
           // 否则 Qwen 只会收到 Promise，角色姓名、人格与记忆都会丢失。
           contextPack = await buildContextPack(store, account, conversation, entry.text);
           const onFragment = async (fragment) => {
+            const visibleFragment = normalizeUnpromptedCharacterSelfIntroduction(
+              { reply_text: fragment },
+              entry.text,
+              contextPack.character?.name,
+              true
+            ).reply_text;
+            // 模型偶发地把“我是角色名”单独作为首句时，去除后不应产生一个空 SSE 气泡。
+            if (!visibleFragment) return true;
             // 本地确定性门禁（7.5 本地规则，零成本）先于供应商审核。
-            if (assessModelOutputAuthority(fragment)) return false;
+            if (assessModelOutputAuthority(visibleFragment)) return false;
             if (typeof textModerator === 'function') {
-              const moderation = await textModerator({ text: fragment, accountId: account.account_id, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
+              const moderation = await textModerator({ text: visibleFragment, accountId: account.account_id, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
               if (!moderation || moderation.decision !== 'PASS') return false;
             }
             sequence += 1;
-            emit('message.chunk', { sequence, text: fragment });
+            emit('message.chunk', { sequence, text: visibleFragment });
             return true;
           };
-          const modelReply = await streamingReplyGenerator.generateStream(entry.text, contextPack, onFragment, signal);
+          const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
+            await streamingReplyGenerator.generateStream(entry.text, contextPack, onFragment, signal),
+            entry.text,
+            contextPack.character?.name
+          );
           // 终稿复核：片段全过不代表拼接终稿安全（跨片段可能拼出新表述）。
           if (assessModelOutputAuthority(modelReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '终稿未通过输出门禁');
           const usage = commitUsage(modelReply);
@@ -1273,7 +1311,12 @@ function liveConversationStream(store, account, entry, requestId, streamingReply
           // 非流式 Qwen 请求。不重复写入用户消息，也不把临时占位当成 AI 回复。
           if (typeof replyGenerator === 'function') {
             try {
-              const fallbackReply = await replyGenerator(entry.text, contextPack || await buildContextPack(store, account, conversation, entry.text));
+              const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text);
+              const fallbackReply = normalizeUnpromptedCharacterSelfIntroduction(
+                await replyGenerator(entry.text, fallbackContext),
+                entry.text,
+                fallbackContext.character?.name
+              );
               if (assessModelOutputAuthority(fallbackReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '降级终稿未通过输出门禁');
               if (typeof textModerator === 'function') {
                 const moderation = await moderateTextWithMetric(store, account, textModerator, { text: fallbackReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
@@ -1796,74 +1839,10 @@ async function refreshImageJob(store, account, path, imageGenerator, imageModera
   requireImagePipeline(imageModerator, imageStore);
   if (!imageGenerator || typeof imageGenerator.query !== 'function' || typeof imageResultFetcher !== 'function') throw apiError(503, 'IMAGE_GENERATION_NOT_ENABLED', '本地开发未显式启用图片链路');
   const job = ownImageJob(store, account.account_id, path.split('/')[4]);
-  if (!['PENDING', 'RUNNING'].includes(job.state)) return ok({ image_job: publicImageJob(job) });
-  try {
-    const providerStartedAt = Date.now();
-    let status;
-    try {
-      status = await imageGenerator.query({ providerJobId: job.provider_job_id });
-      recordOperationMetric(store, { accountId: account.account_id, capability: 'IMAGE_GENERATION', provider: providerName(imageGenerator, job.provider), modelVersion: providerModelVersion(imageGenerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: status.state === 'FAILED' ? 'FAILED' : 'COMPLETED' });
-    } catch (error) {
-      recordOperationMetric(store, { accountId: account.account_id, capability: 'IMAGE_GENERATION', provider: providerName(imageGenerator, job.provider), modelVersion: providerModelVersion(imageGenerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: 'FAILED' });
-      throw error;
-    }
-    job.provider_request_id = status.providerRequestId;
-    job.state = status.state;
-    if (status.state === 'FAILED') {
-      job.failure_code = status.failureCode || 'TENCENT_HUNYUAN_JOB_FAILED';
-      releaseImageEntitlement(job, account, imageEntitlementService);
-    }
-    if (status.state === 'COMPLETED') {
-      await persistGeneratedImage(store, account, job, status, imageModerator, imageStore, imageResultFetcher, imageEntitlementService);
-      if (job.state === 'BLOCKED') releaseImageEntitlement(job, account, imageEntitlementService);
-    }
-  } catch (error) {
-    job.state = 'FAILED';
-    job.failure_code = error.code || 'IMAGE_GENERATION_REFRESH_FAILED';
-    job.provider_error_code = safeProviderErrorCode(error);
-    releaseImageEntitlement(job, account, imageEntitlementService);
-  }
+  // 状态推进与后台 Worker 共用同一状态机（./domain/image-job-advance.js）；
+  // 本路由保留为用户手动刷新的兜底入口。
+  await advanceImageJob(store, account, job, { imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService });
   return accepted({ image_job: publicImageJob(job) });
-}
-
-async function persistGeneratedImage(store, account, job, status, imageModerator, imageStore, imageResultFetcher, imageEntitlementService) {
-  const downloaded = await imageResultFetcher(status.resultImageUrl);
-  const asset = {
-    asset_id: store.next('med'), account_id: account.account_id, character_id: job.character_id, job_id: job.job_id,
-    type: 'SCENE_IMAGE', state: 'PENDING_MODERATION', confirmation_state: 'NOT_REQUIRED', media_type: 'IMAGE', mime_type: downloaded.mimeType,
-    byte_length: null, checksum: null, object_key: null, provider: 'tencent-hunyuan', provider_request_id: status.providerRequestId,
-    ai_generated: true, aigc_mark_version: 'tencent-hunyuan-logoadd-v1', created_at: new Date().toISOString(), deleted_at: null
-  };
-  store.mediaAssets.set(asset.asset_id, asset);
-  try {
-    const persisted = await imageStore.putImage({ assetId: asset.asset_id, bytes: downloaded.bytes, mimeType: downloaded.mimeType });
-    Object.assign(asset, { object_key: persisted.objectKey, checksum: persisted.checksum, byte_length: persisted.byteLength });
-    const moderation = await moderateImageWithMetric(store, account, imageModerator, { fileUrl: await imageStore.createModerationUrl(asset.object_key), dataId: `generated-${asset.asset_id}` });
-    asset.provider_request_id = moderation.providerRequestId;
-    asset.moderation_policy_version = moderation.policyVersion;
-    if (moderation.decision !== 'PASS') {
-      asset.state = moderation.decision === 'BLOCK' ? 'BLOCKED' : 'REVIEW_REQUIRED';
-      await imageStore.deleteAsset(asset.object_key);
-      job.state = 'BLOCKED';
-      job.failure_code = moderation.decision === 'BLOCK' ? 'IMAGE_OUTPUT_BLOCKED' : 'IMAGE_OUTPUT_REVIEW_REQUIRED';
-      return;
-    }
-    if (imageEntitlementService) imageEntitlementService.commitImage({ accountId: account.account_id, jobId: job.job_id });
-    asset.state = 'AVAILABLE';
-    job.result_asset_id = asset.asset_id;
-    job.state = 'COMPLETED';
-  } catch (error) {
-    asset.state = 'FAILED';
-    asset.failure_code = error.code || 'IMAGE_RESULT_PROCESSING_FAILED';
-    if (asset.object_key) await safeDeleteImage(imageStore, asset.object_key);
-    throw error;
-  }
-}
-
-function releaseImageEntitlement(job, account, imageEntitlementService) {
-  if (!imageEntitlementService || !job.entitlement_id) return;
-  try { imageEntitlementService.releaseImage({ accountId: account.account_id, jobId: job.job_id }); }
-  catch { job.failure_code = 'ENTITLEMENT_RELEASE_FAILED'; }
 }
 
 function getImageJob(store, account, path) { return ok({ image_job: publicImageJob(ownImageJob(store, account.account_id, path.split('/')[4])) }); }
@@ -1903,16 +1882,21 @@ async function deleteMediaAsset(store, account, path, mediaStore, imageStore) {
   const objectLocation = isCosPrivateStore ? 'COS 私有媒体对象' : '本地私有媒体对象';
   const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: asset.asset_id, scope: 'MEDIA', state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'PENDING_DEVELOPMENT', created_at: asset.deleted_at, note: `${objectLocation}待删除。` };
   store.deletionJobs.set(deletionJob.deletion_job_id, deletionJob);
+  // 对象级删除账本：无论成败逐目标留痕，供删除回执与恢复演练重放使用。
+  registerDeletionTargets(store, deletionJob, [{ target_type: 'MEDIA_OBJECT', target_ref: asset.asset_id }], asset.deleted_at);
   try {
     if (!privateStore || typeof privateStore.deleteAsset !== 'function') throw new Error('Private media store is unavailable');
     await privateStore.deleteAsset(asset.object_key);
+    deletionJob.state = 'COMPLETED';
     deletionJob.physical_cleanup_state = isCosPrivateStore ? 'COS_PRIVATE_OBJECT_DELETED' : 'LOCAL_PRIVATE_OBJECT_DELETED';
     deletionJob.note = `${objectLocation}已删除；不构成生产存储、备份或供应商删除证明。`;
+    completeDeletionTarget(store, deletionJob, 'MEDIA_OBJECT', asset.asset_id, { object_key: asset.object_key, deleted_at: new Date().toISOString() });
   } catch (error) {
     deletionJob.physical_cleanup_state = 'DELETE_FAILED_DEVELOPMENT';
     deletionJob.note = '本地私有媒体对象删除失败，需重试；未声称物理删除完成。';
+    failDeletionTarget(store, deletionJob, 'MEDIA_OBJECT', asset.asset_id, error.message);
   }
-  return ok({ media_asset: publicMediaAsset(asset), deletion_job: deletionJob, revocation_epoch: account.revocation_epoch });
+  return ok({ media_asset: publicMediaAsset(asset), deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob), revocation_epoch: account.revocation_epoch });
 }
 
 function resolveCandidate(store, account, path, body) {
@@ -1952,9 +1936,15 @@ function deleteAsset(store, account, path) {
   // 向量是派生数据：删除即刻下线并取消未完成索引任务（技术设计 8.9 VECTOR_INDEX 目标）。
   const embeddingCleanup = invalidateAssetEmbedding(store, asset.asset_id, 'asset deleted by user');
   const vectorState = embeddingCleanup.deferred_to_worker ? 'PENDING_WORKER_CLEANUP' : (embeddingCleanup.vector_removed ? 'INVALIDATED' : 'NOT_INDEXED');
-  const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: asset.asset_id, scope: 'RELATIONSHIP_ASSET', state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'NOT_IMPLEMENTED_LOCAL', created_at: asset.deleted_at, note: '仅开发内存存储已在线撤销；未执行生产物理清理。', targets: [ { type: 'RELATIONSHIP_ASSET', state: 'ONLINE_DISABLED' }, { type: 'VECTOR_INDEX', state: vectorState, cancelled_jobs: embeddingCleanup.jobs_cancelled } ] };
+  const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: asset.asset_id, scope: 'RELATIONSHIP_ASSET', state: 'COMPLETED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'ROWS_CLEANED_INLINE', created_at: asset.deleted_at, note: '关系资产已撤销；向量随资产下线（PG 模式转交 Embedding Worker）。', targets: [ { type: 'RELATIONSHIP_ASSET', state: 'COMPLETED' }, { type: 'VECTOR_INDEX', state: vectorState, cancelled_jobs: embeddingCleanup.jobs_cancelled } ] };
   store.deletionJobs.set(deletionJob.deletion_job_id, deletionJob);
-  return ok({ asset, deletion_job: deletionJob, revocation_epoch: account.revocation_epoch });
+  registerDeletionTargets(store, deletionJob, [
+    { target_type: 'RELATIONSHIP_ASSET', target_ref: asset.asset_id },
+    { target_type: 'RELATIONSHIP_ASSET_EMBEDDINGS', target_ref: asset.asset_id }
+  ], asset.deleted_at);
+  completeDeletionTarget(store, deletionJob, 'RELATIONSHIP_ASSET', asset.asset_id, { cleaned_inline: true, completed_at: asset.deleted_at }, asset.deleted_at);
+  completeDeletionTarget(store, deletionJob, 'RELATIONSHIP_ASSET_EMBEDDINGS', asset.asset_id, { vector_state: vectorState, completed_at: asset.deleted_at }, asset.deleted_at);
+  return ok({ asset, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob), revocation_epoch: account.revocation_epoch });
 }
 
 // AC-06/PATCH 修订：旧资产转 SUPERSEDED，新版本以新资产 ID 生效并保留来源链；
@@ -2057,7 +2047,8 @@ function setRawInteractionRetention(store, account, body) {
 function getDeletionJob(store, account, path) {
   const job = store.deletionJobs.get(path.split('/')[4]);
   if (!job || job.account_id !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '删除任务不存在');
-  return ok({ deletion_job: job });
+  // 删除回执（PRD 7.0/AC-15）：用户可见的逐目标清理状态；FAILED 目标如实展示。
+  return ok({ deletion_job: job, deletion_receipt: deletionReceipt(store, job) });
 }
 
 // ---- 紧急联系人（AC-19）：最小字段 + 独立用途告知；仅用于法规与生命/重大财产安全响应。----
@@ -2470,12 +2461,14 @@ function requestAccountDeletion(store, account, body) {
   }
   const deletionJob = {
     deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: null, scope: 'ACCOUNT',
-    state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'NOT_IMPLEMENTED_LOCAL',
+    state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'PENDING_CLEANUP_WORKER',
     created_at: new Date().toISOString(),
-    note: '注销已确认：互动与召回立即停止。生产数据 24 小时内清理、备份最长 30 天；法定留存进入隔离库。当前为开发内存实现。'
+    note: '注销已确认：互动与召回立即停止。删除账本已登记，生产清理由后台 Worker 在 24 小时内完成、备份最长 30 天；法定留存进入隔离库。'
   };
   store.deletionJobs.set(deletionJob.deletion_job_id, deletionJob);
-  return accepted({ account: { account_id: account.account_id, account_status: account.account_status }, deletion_job: deletionJob });
+  // P0 删除编排：登记逐数据域删除账本；回执经 GET /deletion-jobs/:id 可见。
+  registerAccountDeletionTargets(store, account, deletionJob, deletionJob.created_at);
+  return accepted({ account: { account_id: account.account_id, account_status: account.account_status }, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob) });
 }
 
 function authorize(account, action, store) {
@@ -2588,39 +2581,8 @@ function authApiError(error) {
 function requireAccount(req, store, authenticatedAccountId = null) { const account = authenticatedAccountId && store.account(authenticatedAccountId); if (!account) throw apiError(401, 'AUTH_REQUIRED', '需要有效的试用会话或开发 Bearer token'); return account; }
 function ageStatus(account) { return { status: account.age_status, reason_codes: account.age_reason_codes || [], allowed_actions: account.age_status === 'AGE_PASS' ? ['COMPANION_INTERACTION', 'DATA_RIGHTS'] : ['VIEW_NOTICE', 'DECLARE_AGE', 'APPEAL_AGE', 'DATA_RIGHTS'], policy: 'deterministic-development-only', enhanced_verification: account.age_status === 'AGE_REVIEW' ? { state: 'REQUIRED', provider: null, assertion: null } : { state: 'NOT_REQUIRED' } }; }
 function publicAccount(account) { return { account_id: account.account_id, account_status: account.account_status, age_status: account.age_status, revocation_epoch: account.revocation_epoch, authentication: 'synthetic-development-token-only' }; }
-function recordOperationMetric(store, { accountId, capability = 'CHAT_GENERATION', provider, modelVersion, inputTokens, outputTokens, latencyMs, outcome }) {
-  if (!store.operationMetrics) return;
-  const metric = { metric_id: store.next('met'), account_id: accountId, capability, provider: provider || 'unknown', model_version: modelVersion || null, input_tokens: Math.max(0, Number(inputTokens) || 0), output_tokens: Math.max(0, Number(outputTokens) || 0), latency_ms: Math.max(0, Number(latencyMs) || 0), outcome, created_at: new Date().toISOString() };
-  store.operationMetrics.set(metric.metric_id, metric);
-}
-function providerName(provider, fallback) { return typeof provider?.provider === 'string' ? provider.provider : fallback || 'development-synthetic'; }
-function providerModelVersion(provider, fallback = 'development-synthetic-v1') { return typeof provider?.modelVersion === 'string' ? provider.modelVersion : fallback; }
-async function moderateTextWithMetric(store, account, textModerator, { text, conversationId, direction }) {
-  const startedAt = Date.now();
-  try {
-    const moderation = await textModerator({ text, accountId: account.account_id, conversationId, direction });
-    const outcome = moderation && moderation.decision === 'PASS' ? 'COMPLETED'
-      : moderation && ['REVIEW', 'BLOCK'].includes(moderation.decision) ? 'BLOCKED' : 'FAILED';
-    recordOperationMetric(store, { accountId: account.account_id, capability: 'TEXT_MODERATION', provider: providerName(textModerator, 'content-moderation'), modelVersion: moderation?.policyVersion || providerModelVersion(textModerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome });
-    return moderation;
-  } catch (error) {
-    recordOperationMetric(store, { accountId: account.account_id, capability: 'TEXT_MODERATION', provider: providerName(textModerator, 'content-moderation'), modelVersion: providerModelVersion(textModerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'FAILED' });
-    throw error;
-  }
-}
-async function moderateImageWithMetric(store, account, imageModerator, { fileUrl, dataId }) {
-  const startedAt = Date.now();
-  try {
-    const moderation = await imageModerator({ fileUrl, dataId });
-    const outcome = moderation && moderation.decision === 'PASS' ? 'COMPLETED'
-      : moderation && ['REVIEW', 'BLOCK'].includes(moderation.decision) ? 'BLOCKED' : 'FAILED';
-    recordOperationMetric(store, { accountId: account.account_id, capability: 'IMAGE_MODERATION', provider: providerName(imageModerator, 'image-moderation'), modelVersion: moderation?.policyVersion || providerModelVersion(imageModerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome });
-    return moderation;
-  } catch (error) {
-    recordOperationMetric(store, { accountId: account.account_id, capability: 'IMAGE_MODERATION', provider: providerName(imageModerator, 'image-moderation'), modelVersion: providerModelVersion(imageModerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'FAILED' });
-    throw error;
-  }
-}
+// 供应商调用埋点与图片任务状态机已抽至领域模块，与独立 Worker 进程共用：
+// ./domain/operation-metrics.js、./domain/image-job-advance.js。
 function ownOperationMetrics(store, accountId) { return [...(store.operationMetrics?.values() || [])].filter((item) => item.account_id === accountId).map(({ metric_id, capability, provider, model_version, input_tokens, output_tokens, latency_ms, outcome, created_at }) => ({ metric_id, capability, provider, model_version, input_tokens, output_tokens, latency_ms, outcome, created_at })); }
 function ownTrialFeedback(store, accountId) { return [...(store.trialFeedback?.values() || [])].filter((item) => item.account_id === accountId).map(publicTrialFeedback); }
 function publicTrialFeedback(feedback) { return { feedback_id: feedback.feedback_id, category: feedback.category, rating: feedback.rating, note: feedback.note, created_at: feedback.created_at }; }

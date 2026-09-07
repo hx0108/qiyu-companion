@@ -16,6 +16,7 @@ const { MediaEntitlementService } = require('./domain/media-entitlement-service'
 const { startRetentionWorker } = require('./domain/retention-worker');
 const { startConversationSummaryWorker } = require('./domain/conversation-summary-worker');
 const { startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
+const { startAccountDeletionCleanupWorker } = require('./domain/deletion-orchestration');
 
 const port = Number(process.env.PORT || 3000);
 // Keep direct development launches local-only, while container deployments
@@ -51,3 +52,5 @@ if (process.env.QIYU_PERSISTENCE !== 'postgres') startConversationSummaryWorker(
 // 资产向量 Worker：仅进程内内存存储可运行；Postgres 模式须独立 Worker 部署。
 // 开发嵌入为确定性字符 n-gram（可复现、无外呼）；生产须替换为供应商 embedding。
 if (process.env.QIYU_PERSISTENCE !== 'postgres') startAssetEmbeddingWorker(store);
+// 账户注销生产清理（P0 删除编排）：内存模式进程内执行；PG 模式由独立 Worker 部署。
+if (process.env.QIYU_PERSISTENCE !== 'postgres') startAccountDeletionCleanupWorker(store, { mediaStore, imageStore });

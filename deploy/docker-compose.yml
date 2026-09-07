@@ -95,6 +95,11 @@ services:
     ports:
       # 与同机其他服务（如既有 AI 质检系统）错开端口：左侧宿主端口在 .env 可调。
       - "${API_PORT:-3000}:3000"
+    # Docker Desktop 的嵌入式 DNS 上游偶发不可用时，外部模型与媒体供应商
+    # 会全部表现为网络失败；显式使用国内公共 DNS，容器内部服务发现仍由 Docker 处理。
+    dns:
+      - 119.29.29.29
+      - 223.5.5.5
     mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
@@ -119,6 +124,25 @@ services:
       # Worker 的摘要任务需要模型；未配置时仅消费 Embedding 队列（确定性，无外呼）。
       QIYU_LLM_PROVIDER: ${QIYU_LLM_PROVIDER:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
+      # 图片任务后台推进（P0 后台任务化）：与 API 同一批供应商变量，
+      # 未配置时跳过图片队列，前端手动刷新仍是兜底。
+      QIYU_IMAGE_PROVIDER: ${QIYU_IMAGE_PROVIDER:-}
+      QIYU_IMAGE_MODERATION_PROVIDER: ${QIYU_IMAGE_MODERATION_PROVIDER:-}
+      TENCENT_SECRET_ID: ${TENCENT_SECRET_ID:-}
+      TENCENT_SECRET_KEY: ${TENCENT_SECRET_KEY:-}
+      TENCENT_REGION: ${TENCENT_REGION:-ap-guangzhou}
+      TENCENT_HUNYUAN_REGION: ${TENCENT_HUNYUAN_REGION:-ap-guangzhou}
+      TENCENT_COS_BUCKET: ${TENCENT_COS_BUCKET:-}
+      TENCENT_COS_REGION: ${TENCENT_COS_REGION:-ap-guangzhou}
+      TENCENT_COS_ENDPOINT: ${TENCENT_COS_ENDPOINT:-}
+      TENCENT_IMAGE_MODERATION_BIZ_TYPE: ${TENCENT_IMAGE_MODERATION_BIZ_TYPE:-}
+      TENCENT_IMAGE_MODERATION_URL_EXPIRES_SECONDS: ${TENCENT_IMAGE_MODERATION_URL_EXPIRES_SECONDS:-120}
+      # 可选：内容权利清理专用角色连接串（NOLOGIN 角色须由 DBA 先建登录），
+      # 留空则该队列继续由人工按 CONTENT_RIGHTS_REVIEWER_DEPLOYMENT.md 执行。
+      QIYU_CONTENT_RIGHTS_CLEANUP_DATABASE_URL: ${QIYU_CONTENT_RIGHTS_CLEANUP_DATABASE_URL:-}
+    dns:
+      - 119.29.29.29
+      - 223.5.5.5
     # Worker 不对外暴露任何端口。
     mem_limit: 384m
 
