@@ -1,0 +1,40 @@
+groups:
+  - name: qiyu-core
+    interval: 30s
+    rules:
+      # 供应商调用失败率：5 分钟窗口内失败（FAILED/BLOCKED 之外的异常结果）
+      # 占比 > 10% 且样本 ≥ 20 时告警。
+      - alert: QiyuProviderFailureRateHigh
+        expr: |
+          sum by (capability, provider) (rate(qiyu_provider_calls_total{outcome="FAILED"}[5m]))
+            / clamp_min(sum by (capability, provider) (rate(qiyu_provider_calls_total[5m])), 0.000001) > 0.1
+          and sum by (capability, provider) (rate(qiyu_provider_calls_total[5m])) * 300 >= 20
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "供应商 {{ $labels.provider }} 的 {{ $labels.capability }} 失败率超过 10%"
+          runbook: "development/OPERATIONS_RUNBOOK.md#供应商失败率告警"
+      # 死信队列：任何队列出现未解决死信即告警（人工重放一次的流程见 runbook）。
+      - alert: QiyuDeadLettersOpen
+        expr: qiyu_dead_letters_open > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.queue }} 队列存在 {{ $value }} 条未解决死信"
+          runbook: "development/OPERATIONS_RUNBOOK.md#死信处理"
+      # 账户注销清理积压：P0 删除编排要求 24 小时内完成。
+      - alert: QiyuDeletionBacklog
+        expr: qiyu_deletion_jobs_pending > 0
+        for: 1h
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value }} 个账户注销清理未完成（承诺 24h 内完成）"
+          runbook: "development/DELETION_RECOVERY_DRILL_RUNBOOK.md"
+      # 图片任务滞留：常驻 Worker 推进下 PENDING/RUNNING 持续过高。
+      - alert: QiyuImageJobsStuck
+        expr: qiyu_image_jobs_inflight > 10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "图片任务滞留 {{ $value }} 个（检查 run-workers 图片推进队列）"
+          runbook: "development/OPERATIONS_RUNBOOK.md#图片任务滞留"

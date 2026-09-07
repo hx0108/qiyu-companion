@@ -68,7 +68,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -76,11 +76,11 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
-      send(res, result.status, result.body, requestId);
+      send(res, result.status, result.body, requestId, result.contentType);
     } catch (error) {
       const status = error.status || 500;
       send(res, status, { error: {
@@ -110,7 +110,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -127,7 +127,8 @@ async function route(context) {
     if (method === 'POST' && /^\/internal\/content-rights-reviews\/[^/]+\/decisions$/.test(path)) return idempotent(context, { account_id: `reviewer:${reviewer.reviewer_id}` }, () => decideInternalContentRightsReview(store, reviewer, path, body));
     if (method === 'GET' && path === '/internal/deletion-jobs') return listInternalDeletionJobs(store, url);
     if (method === 'GET' && path === '/internal/provider-health') return internalProviderHealth(store);
-    if (method === 'GET' && path === '/internal/feature-flags') return internalFeatureFlags();
+    if (method === 'GET' && path === '/internal/feature-flags') return internalFeatureFlags(featureFlags);
+    if (method === 'GET' && path === '/internal/metrics') return internalMetricsText(store);
     if (method === 'GET' && path === '/internal/conversation-summary-dead-letters') return listInternalConversationSummaryDeadLetters(store);
     if (method === 'POST' && /^\/internal\/conversation-summary-dead-letters\/[^/]+\/replay$/.test(path)) return idempotent(context, { account_id: 'reviewer:' + reviewer.reviewer_id }, () => replayInternalConversationSummaryDeadLetter(store, reviewer, path, body));
     if (method === 'GET' && path === '/internal/asset-embedding-dead-letters') return listInternalAssetEmbeddingDeadLetters(store);
@@ -543,9 +544,61 @@ function internalProviderHealth(store) {
   return ok({ providers, note: '本地开发只记录文字成功路径的调用指标，不含消息正文；无生产熔断与告警。' });
 }
 
-function internalFeatureFlags() {
-  return ok({ feature_flags: { LLM_CHAT: false, CONVERSATION_SUMMARY_WRITE: false, ENHANCED_AGE_VERIFICATION: false, PAYMENTS: false, ASR: false, TTS: false, IMAGE_GENERATION: false, TEXT_MODERATION: false, IMAGE_MODERATION: false }, note: '本地合成运行时全部关闭；生产由 QIYU_PROVIDER_CONFIG_JSON 门禁开启。' });
+function internalFeatureFlags(featureFlags) {
+  // P1-6 真实化：优先报告进程实际生效的运行时 flags（server.js 注入
+  // assertRuntimeConfiguration 的结果）；未注入的测试/裸 createApp 场景退回
+  // 本地合成默认值（全关），不再把“硬编码 false”伪装成运行时状态。
+  if (featureFlags && typeof featureFlags === 'object') {
+    return ok({ feature_flags: featureFlags, source: 'runtime', note: '进程实际生效的运行时 feature flags（生产由 QIYU_PROVIDER_CONFIG_JSON 门禁解析）。' });
+  }
+  return ok({ feature_flags: { LLM_CHAT: false, CONVERSATION_SUMMARY_WRITE: false, ENHANCED_AGE_VERIFICATION: false, PAYMENTS: false, ASR: false, TTS: false, IMAGE_GENERATION: false, TEXT_MODERATION: false, IMAGE_MODERATION: false }, source: 'local-synthetic-default', note: '本地合成运行时全部关闭；生产由 QIYU_PROVIDER_CONFIG_JSON 门禁开启。' });
 }
+
+// Prometheus 文本导出（P1-6 可观测性）：供应商调用量/结果/时延、队列深度
+// （摘要与向量 DLQ、未完成注销清理、滞留图片任务）。口径与边界：
+//   - 内存 Store 全量可见；Postgres 请求作用域 store 只装载单账户数据，
+//     该模式下本端点是“最近账户作用域样本”，全实例口径须由独立 Worker/汇总表导出；
+//   - 指标不含任何消息正文或个人数据，label 只含能力/供应商/结果枚举。
+function internalMetricsText(store) {
+  const lines = [];
+  const calls = new Map();
+  for (const metric of store.operationMetrics?.values() ?? []) {
+    const key = `${metric.capability}|${metric.provider}|${metric.outcome}`;
+    const entry = calls.get(key) || { count: 0, latencySum: 0 };
+    entry.count += 1;
+    entry.latencySum += metric.latency_ms || 0;
+    calls.set(key, entry);
+  }
+  lines.push('# HELP qiyu_provider_calls_total 供应商调用总数（按能力/供应商/结果）');
+  lines.push('# TYPE qiyu_provider_calls_total counter');
+  for (const [key, entry] of calls) {
+    const [capability, provider, outcome] = key.split('|');
+    lines.push(`qiyu_provider_calls_total{capability="${escapeLabel(capability)}",provider="${escapeLabel(provider)}",outcome="${escapeLabel(outcome)}"} ${entry.count}`);
+  }
+  lines.push('# HELP qiyu_provider_latency_ms_sum 供应商调用时延总和（毫秒）');
+  lines.push('# TYPE qiyu_provider_latency_ms_sum counter');
+  for (const [key, entry] of calls) {
+    const [capability, provider] = key.split('|');
+    lines.push(`qiyu_provider_latency_ms_sum{capability="${escapeLabel(capability)}",provider="${escapeLabel(provider)}"} ${entry.latencySum}`);
+  }
+  const summaryDlq = [...store.conversationSummaryDeadLetters?.values() ?? []].filter((item) => item.state === 'OPEN').length;
+  const embeddingDlq = [...store.assetEmbeddingDeadLetters?.values() ?? []].filter((item) => item.state === 'OPEN').length;
+  const pendingDeletions = [...store.deletionJobs?.values() ?? []].filter((job) => job.scope === 'ACCOUNT' && !['COMPLETED', 'CANCELLED'].includes(job.state)).length;
+  const stuckImageJobs = [...store.mediaJobs?.values() ?? []].filter((job) => job.type === 'IMAGE_GENERATION' && ['PENDING', 'RUNNING'].includes(job.state)).length;
+  lines.push('# HELP qiyu_dead_letters_open 未解决死信数（队列健康告警口径）');
+  lines.push('# TYPE qiyu_dead_letters_open gauge');
+  lines.push(`qiyu_dead_letters_open{queue="conversation_summary"} ${summaryDlq}`);
+  lines.push(`qiyu_dead_letters_open{queue="asset_embedding"} ${embeddingDlq}`);
+  lines.push('# HELP qiyu_deletion_jobs_pending 未完成的账户注销清理数（超 24h 告警口径）');
+  lines.push('# TYPE qiyu_deletion_jobs_pending gauge');
+  lines.push(`qiyu_deletion_jobs_pending ${pendingDeletions}`);
+  lines.push('# HELP qiyu_image_jobs_inflight 处于 PENDING/RUNNING 的图片任务数（滞留告警口径）');
+  lines.push('# TYPE qiyu_image_jobs_inflight gauge');
+  lines.push(`qiyu_image_jobs_inflight ${stuckImageJobs}`);
+  return { status: 200, body: `${lines.join('\n')}\n`, contentType: 'text/plain; version=0.0.4; charset=utf-8' };
+}
+
+function escapeLabel(value) { return String(value ?? '').replace(/[\\"]/g, (character) => `\\${character}`); }
 
 // ---- 年龄人工复核（FB 级：第三方断言接入前的运营复核，PRD 3.9/AC-13）----
 // 队列只暴露复核所需最小字段：状态、原因码、申诉时间与历史复核结论；
@@ -2682,7 +2735,7 @@ async function idempotent(context, account, operation) {
 function stableHash(value) { return createHash('sha256').update(JSON.stringify(sortValue(value))).digest('hex'); }
 function sortValue(value) { if (Array.isArray(value)) return value.map(sortValue); if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortValue(value[key])])); return value; }
 function readJson(req) { return new Promise((resolve, reject) => { if (['GET', 'DELETE'].includes(req.method)) return resolve({}); let data = ''; req.setEncoding('utf8'); req.on('data', (chunk) => { data += chunk; if (data.length > 3 * 1024 * 1024) reject(apiError(413, 'PAYLOAD_TOO_LARGE', '开发 API 请求过大')); }); req.on('end', () => { if (!data) return resolve({}); try { resolve(JSON.parse(data)); } catch { reject(apiError(400, 'INVALID_JSON', '请求体必须是 JSON')); } }); req.on('error', reject); }); }
-function send(res, status, body, requestId) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'x-request-id': requestId, 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); }
+function send(res, status, body, requestId, contentType) { res.writeHead(status, { 'content-type': contentType || 'application/json; charset=utf-8', 'x-request-id': requestId, 'cache-control': 'no-store' }); res.end(contentType ? String(body) : JSON.stringify(body)); }
 function sendBinary(res, result, requestId) {
   res.writeHead(result.status, {
     'content-type': result.contentType,

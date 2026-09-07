@@ -190,4 +190,37 @@ test('内部只读接口：删除队列、供应商健康与功能开关', async
 
   const flags = await fetch(`${base}/internal/feature-flags`, { headers: REVIEWER }).then((response) => response.json());
   assert.equal(flags.feature_flags.LLM_CHAT, false);
+  assert.equal(flags.source, 'local-synthetic-default');
+});
+
+test('内部指标端点：Prometheus 文本导出调用量与队列深度；注入的运行时 flags 如实上报', async (t) => {
+  const base = await start(t, {
+    featureFlags: Object.freeze({ LLM_CHAT: true, CONVERSATION_SUMMARY_WRITE: true, ENHANCED_AGE_VERIFICATION: false, PAYMENTS: false, ASR: false, TTS: false, IMAGE_GENERATION: false, TEXT_MODERATION: false, IMAGE_MODERATION: false }),
+    replyGenerator: async (text) => ({
+      provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: `回复：${text}`, usage: {}, ai_generated: true, disclaimer: 'AI 生成。',
+      memory_candidate: { type: 'development_note', normalized_value: { text }, display_text: `你提到：“${text}”` }
+    })
+  });
+  await passAge(base, 'ir-metrics');
+  const character = await request(base, '/api/v1/characters', { method: 'POST', key: 'ir-metrics-c', body: { name: '指标角色' } });
+  const conversation = await request(base, '/api/v1/conversations', { method: 'POST', key: 'ir-metrics-v', body: { character_id: character.body.character.character_id } });
+  await request(base, `/api/v1/conversations/${conversation.body.conversation.conversation_id}/messages`, { method: 'POST', key: 'ir-metrics-m', body: { content: { text: '记录一次调用' } } });
+
+  const metricsResponse = await fetch(`${base}/internal/metrics`, { headers: REVIEWER });
+  assert.equal(metricsResponse.status, 200);
+  assert.match(metricsResponse.headers.get('content-type') || '', /text\/plain/);
+  const metrics = await metricsResponse.text();
+  assert.match(metrics, /# TYPE qiyu_provider_calls_total counter/);
+  assert.match(metrics, /qiyu_provider_calls_total\{capability="CHAT_GENERATION",provider="qwen",outcome="COMPLETED"\} 1/);
+  assert.match(metrics, /qiyu_dead_letters_open\{queue="conversation_summary"\} 0/);
+  assert.match(metrics, /qiyu_deletion_jobs_pending 0/);
+  assert.ok(!metrics.includes('记录一次调用'), '指标不得包含消息正文');
+
+  // 未带审核员身份的访问必须被拒（指标端点与其它 /internal 同一边界）。
+  const anonymous = await fetch(`${base}/internal/metrics`);
+  assert.equal(anonymous.status, 401);
+
+  const flags = await fetch(`${base}/internal/feature-flags`, { headers: REVIEWER }).then((response) => response.json());
+  assert.equal(flags.source, 'runtime');
+  assert.equal(flags.feature_flags.LLM_CHAT, true);
 });
