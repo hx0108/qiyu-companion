@@ -81,6 +81,60 @@ test('TTS 音频交付携带不可移除的 ID3 AIGC 标识', async () => {
   assert.equal(tagged.length - raw.length, 10 + size);
 });
 
+test('图片交付隐式 AIGC 标识：PNG tEXt 与 JPEG COM 注入且幂等，非图片字节拒绝', () => {
+  const { crc32 } = require('node:zlib');
+  const { tagPngWithAigcMetadata, tagJpegWithAigcMetadata } = require('../src/media/aigc-metadata');
+  // 构造最小 PNG：签名 + IHDR + IEND。
+  const ihdrData = Buffer.concat([Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0])]);
+  const ihdr = pngChunkForTest('IHDR', ihdrData, crc32);
+  const iend = pngChunkForTest('IEND', Buffer.alloc(0), crc32);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ihdr, iend]);
+  const taggedPng = tagPngWithAigcMetadata(png);
+  assert.ok(taggedPng.includes(Buffer.from('qiyu_aigc')), 'PNG 应含 qiyu_aigc tEXt');
+  assert.equal(tagPngWithAigcMetadata(taggedPng), taggedPng, '重复打标幂等');
+  assert.ok(taggedPng.length > png.length, 'tEXt 块被插入');
+  assert.ok(taggedPng.subarray(taggedPng.length - iend.length).equals(iend), 'IEND 仍收尾（结构合法）');
+  // 标识块必须出现在 IHDR 之后（合法位置）。
+  assert.ok(taggedPng.subarray(33, 58).includes(Buffer.from('tEXt')), 'tEXt 应紧跟 IHDR');
+
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]), Buffer.alloc(60, 0xab), Buffer.from([0xff, 0xd9])]);
+  const taggedJpeg = tagJpegWithAigcMetadata(jpeg);
+  assert.equal(taggedJpeg[2], 0xff, 'COM 段紧跟 SOI');
+  assert.equal(taggedJpeg[3], 0xfe, 'COM 标记');
+  assert.ok(taggedJpeg.includes(Buffer.from('qiyu_aigc')), 'JPEG 应含 qiyu_aigc 注释');
+  assert.equal(tagJpegWithAigcMetadata(taggedJpeg), taggedJpeg, '重复打标幂等');
+  // 非对应格式拒绝（不得悄悄产出坏文件）。
+  assert.throws(() => tagPngWithAigcMetadata(jpeg), /not a PNG/);
+  assert.throws(() => tagJpegWithAigcMetadata(png), /not a JPEG/);
+});
+
+function pngChunkForTest(type, data, crc32Fn) {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  const typeAndData = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32Fn(typeAndData) >>> 0, 0);
+  return Buffer.concat([length, typeAndData, crc]);
+}
+
+test('关系档案导出携带顶层 AIGC 声明与逐消息 ai_generated 标记', async (t) => {
+  const { DevelopmentStore } = require('../src/domain/store');
+  const store = new DevelopmentStore();
+  const base = await start(t, { store });
+  const notices = await request(base, '/api/v1/required-notices');
+  await request(base, `/api/v1/required-notices/${notices.body.notices[0].notice_id}/displayed`, { method: 'POST', key: 'aigc-export-n', body: { notice_version: notices.body.notices[0].notice_version } });
+  await request(base, '/api/v1/age/declarations', { method: 'POST', key: 'aigc-export-a', body: { date_of_birth: '1990-01-01', confirmed_18_plus: true } });
+  const character = await request(base, '/api/v1/characters', { method: 'POST', key: 'aigc-export-c', body: { name: '声明角色' } });
+  const conversation = await request(base, '/api/v1/conversations', { method: 'POST', key: 'aigc-export-v', body: { character_id: character.body.character.character_id } });
+  await request(base, `/api/v1/conversations/${conversation.body.conversation.conversation_id}/messages`, { method: 'POST', key: 'aigc-export-m', body: { content: { text: '记录一条' } } });
+  const exported = await request(base, '/api/v1/data-exports/relationship-profile');
+  assert.equal(exported.body.export.aigc_disclosure.audio_implicit_label, 'qiyu-aigc-id3v2.3-v1');
+  assert.equal(exported.body.export.aigc_disclosure.image_implicit_label, 'qiyu-aigc-image-metadata-v1');
+  const assistant = exported.body.export.messages.find((message) => message.actor === 'ASSISTANT');
+  assert.equal(assistant.ai_generated, true);
+  assert.ok(assistant.provider, '逐消息保留 provider 供溯源');
+});
+
 test('保留期 Worker：过期原始消息清理与 24 小时 ASR 原始音频下线', () => {
   const store = new DevelopmentStore();
   const account = store.account('acct_dev_alice');

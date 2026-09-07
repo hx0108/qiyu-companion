@@ -20,7 +20,7 @@ const { evaluateProactiveDispatch } = require('./domain/proactive-policy');
 const { PROACTIVE_TEMPLATES } = require('./domain/proactive-templates');
 const { AuthService } = require('./domain/auth-service');
 const { MemoryTrialInviteAuth, TrialAuthError } = require('./domain/trial-invite-auth');
-const { tagWithAigcMetadata } = require('./media/aigc-metadata');
+const { tagWithAigcMetadata, tagPngWithAigcMetadata, tagJpegWithAigcMetadata, AIGC_MARK_VERSION_AUDIO, AIGC_MARK_VERSION_IMAGE } = require('./media/aigc-metadata');
 const { rankRelationshipAssets } = require('./domain/relationship-recall');
 const { registerAccountDeletionTargets, registerConversationDeletionTargets, registerDeletionTargets, completeDeletionTarget, failDeletionTarget, runAccountDeletionCleanup, deletionReceipt } = require('./domain/deletion-orchestration');
 const { advanceImageJob, releaseImageEntitlement } = require('./domain/image-job-advance');
@@ -1758,7 +1758,7 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
     const asset = {
       asset_id: assetId, account_id: account.account_id, character_id: conversation.character_id, job_id: job.job_id, type: 'TTS_AUDIO', state: 'AVAILABLE',
       media_type: 'AUDIO', mime_type: persisted.mimeType, byte_length: persisted.byteLength, checksum: persisted.checksum, object_key: persisted.objectKey,
-      provider: 'tencent-tts', provider_request_id: result.providerRequestId, ai_generated: true, aigc_mark_version: 'not-implemented-development', created_at: new Date().toISOString(), deleted_at: null
+      provider: 'tencent-tts', provider_request_id: result.providerRequestId, ai_generated: true, aigc_mark_version: AIGC_MARK_VERSION_AUDIO, created_at: new Date().toISOString(), deleted_at: null
     };
     store.mediaAssets.set(asset.asset_id, asset);
     job.state = 'COMPLETED'; job.provider_request_id = result.providerRequestId; job.result_asset_id = asset.asset_id;
@@ -1920,10 +1920,15 @@ async function getMediaAssetContent(store, account, path, mediaStore, imageStore
   try {
     if (asset.type === 'TTS_AUDIO' && asset.mime_type === 'audio/mpeg') {
       const raw = await mediaStore.readTtsAudio(asset.object_key);
-      return { status: 200, binary: tagWithAigcMetadata(raw), contentType: 'audio/mpeg', filename: `${asset.asset_id}.mp3` };
+      return { status: 200, binary: tagWithAigcMetadata(raw), contentType: 'audio/mpeg', filename: `${asset.asset_id}.mp3`, aigcLabel: AIGC_MARK_VERSION_AUDIO };
     }
     if (asset.type === 'SCENE_IMAGE' && ['image/jpeg', 'image/png', 'image/webp'].includes(asset.mime_type) && imageStore && typeof imageStore.readImage === 'function') {
-      return { status: 200, binary: await imageStore.readImage(asset.object_key), contentType: asset.mime_type, filename: `${asset.asset_id}.${asset.mime_type.split('/')[1]}` };
+      const raw = await imageStore.readImage(asset.object_key);
+      // AIGC 隐式标识（P1-7）：PNG tEXt / JPEG COM 在交付时注入；WebP 容器
+      // 无轻量注释位，开发链路如实不做字节级隐式标识，仅保留响应头与资产元数据。
+      const labeled = asset.mime_type === 'image/png' ? tagPngWithAigcMetadata(raw)
+        : asset.mime_type === 'image/jpeg' ? tagJpegWithAigcMetadata(raw) : raw;
+      return { status: 200, binary: labeled, contentType: asset.mime_type, filename: `${asset.asset_id}.${asset.mime_type.split('/')[1]}`, aigcLabel: asset.mime_type === 'image/webp' ? `${AIGC_MARK_VERSION_IMAGE}-webp-passthrough` : AIGC_MARK_VERSION_IMAGE };
     }
   } catch {
     throw apiError(404, 'MEDIA_CONTENT_UNAVAILABLE', '媒体内容不可用');
@@ -2090,6 +2095,9 @@ function relationshipProfileExport(store, account) {
   const conversationIds = new Set(conversations.map((item) => item.conversation_id));
   return {
     format: 'qiyu-relationship-profile-json-v1', generated_at: new Date().toISOString(), account_id: account.account_id,
+    // AIGC 声明（P1-7）：actor=ASSISTANT 的 messages 由 AI 生成；逐条消息仍带
+    // ai_generated/provider/model_version，下载的音频/图片文件内嵌隐式标识。
+    aigc_disclosure: { notice: '本档案中 actor=ASSISTANT 的消息与关联媒体由人工智能生成', ai_message_marker: 'ai_generated', audio_implicit_label: AIGC_MARK_VERSION_AUDIO, image_implicit_label: AIGC_MARK_VERSION_IMAGE },
     characters: [...store.characters.values()].filter((item) => item.account_id === account.account_id).map(({ character_id, name, status, version }) => ({ character_id, name, status, version })),
     relationship_assets: activeAssets(store, account.account_id).map(({ asset_id, character_id, type, value, display_text, version, created_at }) => ({ asset_id, character_id, type, value, display_text, version, created_at })),
     conversations: conversations.map(({ conversation_id, character_id, created_at }) => ({ conversation_id, character_id, created_at })),
@@ -2743,7 +2751,8 @@ function sendBinary(res, result, requestId) {
     'content-disposition': `inline; filename="${result.filename}"`,
     'x-content-type-options': 'nosniff',
     'x-request-id': requestId,
-    'cache-control': 'private, no-store'
+    'cache-control': 'private, no-store',
+    ...(result.aigcLabel ? { 'x-qiyu-aigc-label': result.aigcLabel } : {})
   });
   res.end(result.binary);
 }
