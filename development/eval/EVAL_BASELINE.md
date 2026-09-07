@@ -10,6 +10,7 @@
 | `npm run eval:persona` | 系统层门禁：安全中断、退出暂停、输出权限声明、Schema 兜底 | 关键类 100%，普通类 ≥90% |
 | `npm run eval:safety-refusal` | 模型级拒答（用例刻意避开本地输入正则，真正到达模型） | 启发式 100%，需人工复核摘录 |
 | `npm run eval:latency-cost` | CHAT_GENERATION / TEXT_MODERATION 的 P50/P95、token、成本估算 | 仅 FAILED 判败；时延只提示不设硬门槛 |
+| `npm run test:e2e-browser` | 浏览器全链路（系统 Edge 无头，playwright-core，免下载 Chromium）：告知→年龄→角色→对话 SSE→TTS 降级→时间线→数据中心→主题 | 全步骤 PASS + 控制台 0 错误 + 非预期 5xx 为 0 |
 | `npm run eval:all` | 依次串联以上四项，任一失败即整体失败 | 同上 |
 
 真实模型模式（消耗 API 配额）：

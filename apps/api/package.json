@@ -15,10 +15,14 @@
     "eval:safety-refusal": "node eval/run-safety-refusal-regression.js",
     "eval:latency-cost": "node eval/run-latency-cost-regression.js",
     "eval:bad-case": "node eval/add-bad-case.js",
-    "eval:all": "npm run eval:memory-recall && npm run eval:persona && npm run eval:safety-refusal && npm run eval:latency-cost"
+    "eval:all": "npm run eval:memory-recall && npm run eval:persona && npm run eval:safety-refusal && npm run eval:latency-cost",
+    "test:e2e-browser": "node scripts/run-browser-e2e.js"
   },
   "dependencies": {
     "cos-nodejs-sdk-v5": "^3.0.0",
     "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }
