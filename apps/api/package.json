@@ -10,7 +10,12 @@
     "start": "node src/server.js",
     "test": "node --test test/*.test.js",
     "eval:memory-recall": "node eval/run-memory-recall-regression.js",
-    "verify:closed-trial-qwen": "node scripts/verify-closed-trial-qwen.js"
+    "verify:closed-trial-qwen": "node scripts/verify-closed-trial-qwen.js",
+    "eval:persona": "node eval/run-persona-regression.js",
+    "eval:safety-refusal": "node eval/run-safety-refusal-regression.js",
+    "eval:latency-cost": "node eval/run-latency-cost-regression.js",
+    "eval:bad-case": "node eval/add-bad-case.js",
+    "eval:all": "npm run eval:memory-recall && npm run eval:persona && npm run eval:safety-refusal && npm run eval:latency-cost"
   },
   "dependencies": {
     "cos-nodejs-sdk-v5": "^3.0.0",
