@@ -29,7 +29,10 @@ test('腾讯云非成功状态与网络失败都不暴露上游正文', async ()
   const rejected = new TencentTc3Client({ secretId: 'id', secretKey: 'key', fetchImpl: async () => ({ ok: false, status: 429 }) });
   await assert.rejects(() => rejected.request({ service: 'tms', action: 'TextModeration', version: '2020-12-29', body: {} }), (error) => error.code === 'TENCENT_UPSTREAM_REJECTED' && error.retryable === true && error.details.upstream_status === 429);
   const network = new TencentTc3Client({ secretId: 'id', secretKey: 'key', fetchImpl: async () => { throw new Error('contains upstream response body'); } });
-  await assert.rejects(() => network.request({ service: 'tms', action: 'TextModeration', version: '2020-12-29', body: {} }), (error) => error.code === 'TENCENT_NETWORK_ERROR' && !error.message.includes('upstream response body'));
+  await assert.rejects(
+    () => network.request({ service: 'tms', action: 'TextModeration', version: '2020-12-29', body: {} }),
+    (error) => error.code === 'TENCENT_NETWORK_ERROR' && error.message === '腾讯云服务网络请求失败，请稍后重试' && !error.message.includes('upstream response body')
+  );
 });
 
 test('腾讯云 API 错误仅保留安全格式的错误码，不保留上游正文', async () => {

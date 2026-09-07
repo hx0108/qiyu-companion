@@ -453,6 +453,13 @@ test('reference-media rights link migration keeps the review decision outside th
   assert.doesNotMatch(migration, /GRANT .*UPDATE ON content_rights_reviews TO qiyu_app/);
 });
 
+test('image media migration expands the persisted media type constraint without excluding audio assets', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/046_development_image_media_type_constraint.sql'), 'utf8');
+  assert.match(migration, /DROP CONSTRAINT IF EXISTS media_assets_media_type_check/);
+  assert.match(migration, /media_type IN \('AUDIO', 'IMAGE'\)/);
+  assert.match(migration, /046_development_image_media_type_constraint\.sql/);
+});
+
 test('TTS voice provenance migration requires a complete approved record for new TTS rows without inventing legacy approval', () => {
   const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/023_development_tts_voice_provenance.sql'), 'utf8');
   assert.match(migration, /voice_id text/);
@@ -473,6 +480,12 @@ test('content-rights reviewer migration excludes the application role and emits 
   assert.match(migration, /pg_has_role\(session_user, 'qiyu_reviewer', 'member'\)/);
   assert.match(migration, /content_rights\.review_changed\.v1/);
   assert.match(migration, /REVOKE ALL ON FUNCTION app\.decide_content_rights_review\(uuid, text, text\) FROM PUBLIC, qiyu_app/);
+});
+
+test('rights-service reviewer decision has only the reference-media read columns required by its guarded update', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/047_development_rights_service_reference_asset_read.sql'), 'utf8');
+  assert.match(migration, /GRANT SELECT \(asset_id, account_id, type\) ON media_assets TO qiyu_rights_service/);
+  assert.doesNotMatch(migration, /TO qiyu_app/);
 });
 
 test('content-rights revocation migration disables reference media online before physical cleanup', () => {

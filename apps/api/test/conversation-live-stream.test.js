@@ -126,6 +126,30 @@ test('真流式等待异步上下文，Qwen 能收到当前角色名', async (t)
   assert.equal(receivedCharacterName, 'identity 角色');
 });
 
+test('非身份问题会在流式下发与终态持久化前去除重复的角色自报姓名', async (t) => {
+  let contextCharacterName = null;
+  const streamingReplyGenerator = {
+    async generateStream(text, context, onFragment) {
+      contextCharacterName = context?.character?.name ?? null;
+      await onFragment(`我是${contextCharacterName}。`);
+      await onFragment('你先去吃饭吧。');
+      return { provider: 'fake-stream', model_version: 'fake-v1', reply_text: `我是${contextCharacterName}。你先去吃饭吧。`, usage: {}, ai_generated: true };
+    }
+  };
+  const base = await start(t, { streamingReplyGenerator });
+  const conversationId = await readyConversation(base, 'intro');
+  const accepted = await request(base, `/api/v1/conversations/${conversationId}/messages`, {
+    method: 'POST', key: 'intro-live', body: { content: { text: '你饿不饿？' }, stream: true }
+  });
+  const events = await readSse(base, accepted.body.stream.stream_url);
+  assert.equal(contextCharacterName, 'intro 角色');
+  const chunks = events.filter((item) => item.event === 'message.chunk');
+  assert.deepEqual(chunks.map((item) => item.data.text), ['你先去吃饭吧。']);
+  const completed = events.find((item) => item.event === 'message.completed');
+  const finalMessage = await request(base, `/api/v1/messages/${completed.data.message_id}`);
+  assert.equal(finalMessage.body.message.text, '你先去吃饭吧。');
+});
+
 test('真流式上游失败时同轮降级为非流式回复，不留失败占位', async (t) => {
   const streamingReplyGenerator = {
     async generateStream() {

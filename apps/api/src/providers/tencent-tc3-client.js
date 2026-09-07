@@ -57,12 +57,12 @@ class TencentTc3Client {
         signal: controller.signal
       });
       if (!response.ok) {
-        throw new TencentProviderError('TENCENT_UPSTREAM_REJECTED', '腾讯云内容审核暂时不可用', 502, { upstream_status: response.status }, response.status === 429 || response.status >= 500);
+        throw new TencentProviderError('TENCENT_UPSTREAM_REJECTED', '腾讯云服务暂时不可用', 502, { upstream_status: response.status }, response.status === 429 || response.status >= 500);
       }
       let payloadResponse;
-      try { payloadResponse = await response.json(); } catch { throw new TencentProviderError('TENCENT_RESPONSE_INVALID', '腾讯云内容审核返回格式无效'); }
+      try { payloadResponse = await response.json(); } catch { throw new TencentProviderError('TENCENT_RESPONSE_INVALID', '腾讯云服务返回格式无效'); }
       const result = payloadResponse && payloadResponse.Response;
-      if (!result || typeof result !== 'object') throw new TencentProviderError('TENCENT_RESPONSE_INVALID', '腾讯云内容审核未返回可用结果');
+      if (!result || typeof result !== 'object') throw new TencentProviderError('TENCENT_RESPONSE_INVALID', '腾讯云服务未返回可用结果');
       if (result.Error) {
         throw new TencentProviderError('TENCENT_UPSTREAM_REJECTED', '腾讯云服务暂时不可用', 502, {
           upstream_error_code: safeUpstreamErrorCode(result.Error.Code)
@@ -71,8 +71,8 @@ class TencentTc3Client {
       return result;
     } catch (error) {
       if (error instanceof TencentProviderError) throw error;
-      if (error && error.name === 'AbortError') throw new TencentProviderError('TENCENT_TIMEOUT', '腾讯云内容审核响应超时', 502, {}, true);
-      throw new TencentProviderError('TENCENT_NETWORK_ERROR', '腾讯云内容审核网络请求失败', 502, {}, true);
+      if (error && error.name === 'AbortError') throw new TencentProviderError('TENCENT_TIMEOUT', '腾讯云服务响应超时', 502, {}, true);
+      throw new TencentProviderError('TENCENT_NETWORK_ERROR', '腾讯云服务网络请求失败，请稍后重试', 502, {}, true);
     } finally {
       clearTimeout(timeout);
     }
