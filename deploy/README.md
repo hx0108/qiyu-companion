@@ -155,6 +155,22 @@ docker compose exec worker node scripts/rebuild-asset-embedding-index.js --dry-r
 docker compose exec worker node scripts/rebuild-asset-embedding-index.js           # 入队后由向量队列完成
 ```
 
+## 三点六、真实短信登录（P2-10 新增）
+
+默认未配置时验证码走开发固定码（响应如实标注 `dev_code`）。配置以下环境变量后切换真实通道（随机 6 位码、响应不回显）：
+
+```
+QIYU_SMS_PROVIDER=tencent
+QIYU_SMS_SDK_APP_ID / QIYU_SMS_SIGN_NAME / QIYU_SMS_TEMPLATE_ID   # 已审核的正文模板，占位 {1}=验证码
+TENCENT_SECRET_ID / TENCENT_SECRET_KEY / TENCENT_REGION
+```
+
+反滥用随实现内置：每手机号 1 分钟 5 条 / 24 小时 10 条挑战，每条挑战错码 5 次作废。真实验收（发给你自己的手机）：
+
+```bash
+QIYU_SMS_VERIFY_PHONE=138... node scripts/verify-tencent-sms-provider.js   # 输出 acceptance=passed 才可记录“已验证”
+```
+
 ## 四、非 Docker 备选（systemd 直跑）
 
 适合与既有服务合用一台机器、不想再装容器的情况：

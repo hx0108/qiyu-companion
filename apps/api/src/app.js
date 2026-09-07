@@ -68,7 +68,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -76,7 +76,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -110,7 +110,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -149,7 +149,7 @@ async function route(context) {
   if (trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/trial-sessions') return createTrialSession(trialAuthFor(store, trialAuth), body);
   if (trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/trial-sessions/refresh') return refreshTrialSession(trialAuthFor(store, trialAuth), body);
   // 旧短信骨架仅用于内存开发回归；封闭试用不暴露此注册路径。
-  if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/sms-challenges') return idempotent(context, { account_id: 'public' }, () => createSmsChallenge(store, body));
+  if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/sms-challenges') return idempotent(context, { account_id: 'public' }, () => createSmsChallenge(store, body, smsSender));
   if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/register') return idempotent(context, { account_id: 'public' }, () => registerAccount(store, body));
   if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/auth/refresh') return idempotent(context, { account_id: 'public' }, () => refreshTokens(store, body));
   const account = requireAccount(req, store, authenticatedAccountId);
@@ -240,6 +240,8 @@ async function route(context) {
     return idempotent(context, account, () => reviseAsset(store, account, path, body));
   }
   if (method === 'GET' && path === '/api/v1/memory-recall') return ok({ assets: activeAssets(store, account.account_id), source: store.recallSource || 'local-structured-development-store' });
+  if (method === 'GET' && path === '/api/v1/notifications') return listNotifications(store, account);
+  if (method === 'POST' && path.startsWith('/api/v1/notifications/') && path.endsWith('/read')) return idempotent(context, account, () => readNotification(store, account, path));
   if (method === 'GET' && path === '/api/v1/data-exports/relationship-profile') return ok({ export: relationshipProfileExport(store, account) });
   if (method === 'GET' && path === '/api/v1/privacy/raw-interaction-retention') return ok({ raw_interaction_retention_days: account.raw_interaction_retention_days || 90 });
   if (method === 'POST' && path === '/api/v1/privacy/raw-interaction-retention') return idempotent(context, account, () => setRawInteractionRetention(store, account, body));
@@ -676,6 +678,11 @@ function manualGrantSubscription(store, reviewer, body) {
   store.subscriptionOrders.set(order.order_id, order);
   const mediaService = new MediaEntitlementService({ store });
   const grant = mediaService.grantSubscriptionCycle({ subscription, product: plan, sourceEventId: `manual-${subscription.subscription_id}` });
+  recordNotification(store, accountId, {
+    type: 'SUBSCRIPTION_MANUAL_GRANT',
+    title: '订阅已由运营人工开通',
+    body: `订阅（${plan.sku}）已按线下收款人工开通并按完整周期入账；本通知为账户级知情记录，不自动续费。`
+  });
   return created({ subscription, order, entitlement_id: grant.entitlement_id, note: '线下收款人工发放：按完整订阅周期入账，撤销走 /internal/subscriptions/{id}/revoke。' });
 }
 
@@ -2523,6 +2530,32 @@ function optionalHour(value) {
   return value;
 }
 
+// ---- 站内通知（P2-10）：账户级知情通知。当前写点：注销已启动、线下订阅人工授予。----
+function recordNotification(store, accountId, { type, title, body }) {
+  if (!store.notifications) store.notifications = new Map();
+  const notification = {
+    notification_id: store.next('ntf'), account_id: accountId,
+    type, title, body, read: false, created_at: new Date().toISOString()
+  };
+  store.notifications.set(notification.notification_id, notification);
+  return notification;
+}
+
+function listNotifications(store, account) {
+  const items = [...store.notifications?.values() ?? []]
+    .filter((item) => item.account_id === account.account_id)
+    .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))
+    .slice(0, 50);
+  return ok({ notifications: items, unread_count: items.filter((item) => !item.read).length });
+}
+
+function readNotification(store, account, path) {
+  const notification = [...store.notifications?.values() ?? []].find((item) => item.account_id === account.account_id && item.notification_id === path.split('/')[4]);
+  if (!notification) throw apiError(404, 'RESOURCE_NOT_FOUND', '通知不存在');
+  notification.read = true;
+  return ok({ notification });
+}
+
 // ---- 账户注销：二次确认后立即停止互动与召回；生产清理按删除任务编排。----
 function requestAccountDeletion(store, account, body) {
   if (body?.confirm_text !== '注销') throw apiError(400, 'VALIDATION_ERROR', '请输入“注销”以二次确认');
@@ -2541,12 +2574,17 @@ function requestAccountDeletion(store, account, body) {
   const deletionJob = {
     deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: null, scope: 'ACCOUNT',
     state: 'ONLINE_DISABLED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'PENDING_CLEANUP_WORKER',
-    created_at: new Date().toISOString(),
+    created_at: deletedAt,
     note: '注销已确认：互动与召回立即停止。删除账本已登记，生产清理由后台 Worker 在 24 小时内完成、备份最长 30 天；法定留存进入隔离库。'
   };
   store.deletionJobs.set(deletionJob.deletion_job_id, deletionJob);
   // P0 删除编排：登记逐数据域删除账本；回执经 GET /deletion-jobs/:id 可见。
   registerAccountDeletionTargets(store, account, deletionJob, deletionJob.created_at);
+  recordNotification(store, account.account_id, {
+    type: 'ACCOUNT_DELETION_STARTED',
+    title: '账户注销已启动',
+    body: '互动与召回已立即停止。数据清理将在 24 小时内由后台完成，备份最长保留 30 天；删除回执可在数据中心查看。'
+  });
   return accepted({ account: { account_id: account.account_id, account_status: account.account_status }, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob) });
 }
 
@@ -2595,18 +2633,18 @@ function trialAuthFor(store, injectedTrialAuth = null) {
   return store.__trialInviteAuth;
 }
 
-function authServiceFor(store) {
+function authServiceFor(store, smsSender = null) {
   if (store.__authService) return store.__authService;
   if (typeof store.resolveAccountId === 'function') return null; // Postgres 请求作用域 store 不支持进程内 Token。
-  store.__authService = new AuthService({ store });
+  store.__authService = new AuthService({ store, smsSender });
   return store.__authService;
 }
 
-function createSmsChallenge(store, body) {
-  const service = authServiceFor(store);
+async function createSmsChallenge(store, body, smsSender = null) {
+  const service = authServiceFor(store, smsSender);
   if (!service) throw apiError(503, 'AUTH_NOT_AVAILABLE', '该运行时未启用注册鉴权');
   try {
-    return ok(service.createSmsChallenge({ phone: body?.phone }));
+    return ok(await service.createSmsChallenge({ phone: body?.phone }));
   } catch (error) { throw authApiError(error); }
 }
 

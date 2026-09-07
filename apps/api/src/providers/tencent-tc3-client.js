@@ -9,7 +9,8 @@ const SERVICES = Object.freeze({
   tts: 'tts.tencentcloudapi.com',
   hunyuan: 'hunyuan.tencentcloudapi.com',
   // 混元生图 3.0（产品 1668）：旧 hunyuan:SubmitHunyuanImageJob 已于 2026-06-22 下线。
-  aiart: 'aiart.tencentcloudapi.com'
+  aiart: 'aiart.tencentcloudapi.com',
+  sms: 'sms.tencentcloudapi.com'
 });
 
 class TencentProviderError extends Error {

@@ -1,50 +1,73 @@
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { randomUUID, randomInt } = require('node:crypto');
 
-// 鉴权骨架（技术设计 8.1/8.2 的开发实现）：短信挑战使用固定开发验证码，
-// Token 为进程内随机串（Access 1 小时 / Refresh 30 天，可撤销）。这不是生产
-// 短信通道或持久会话；生产需要短信供应商、持久 Token 存储与设备证明。
+// 鉴权骨架（技术设计 8.1/8.2 的开发实现）：未配置短信供应商时使用固定开发
+// 验证码；配置 smsSender（腾讯云 SMS 适配器）后生成随机 6 位码真实发送，
+// 响应不回显验证码。Token 为进程内随机串（Access 1 小时 / Refresh 30 天，
+// 可撤销）。反滥用：每手机号 1 分钟 5 条 / 24 小时 10 条挑战，每条挑战验证
+// 失败 5 次即作废（防爆破）。持久 Token 存储与设备证明仍属生产化范围。
 const DEVELOPMENT_SMS_CODE = '000000';
 const CHALLENGE_TTL_MS = 10 * 60 * 1000;
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CHALLENGE_RATE_LIMIT = 5;
+const CHALLENGE_DAILY_LIMIT = 10;
+const CHALLENGE_MAX_ATTEMPTS = 5;
 
 class AuthServiceError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
 
 class AuthService {
-  constructor({ store, now = () => new Date() } = {}) {
+  constructor({ store, now = () => new Date(), smsSender = null } = {}) {
     if (!store || typeof store.next !== 'function') throw new TypeError('AuthService requires a compatible store');
     this.store = store;
     this.now = now;
+    this.smsSender = smsSender && typeof smsSender.send === 'function' ? smsSender : null;
   }
 
-  createSmsChallenge({ phone }) {
+  async createSmsChallenge({ phone }) {
     const normalized = normalizePhone(phone);
-    const recent = [...(this.store.smsChallenges?.values() ?? [])].filter(
-      (item) => item.phone === normalized && this.now().getTime() - item.created_at.getTime() < 60_000
-    );
-    if (recent.length >= CHALLENGE_RATE_LIMIT) throw new AuthServiceError('REGISTRATION_RATE_LIMITED', '验证码请求过于频繁');
+    const challenges = [...(this.store.smsChallenges?.values() ?? [])].filter((item) => item.phone === normalized);
+    const nowMs = this.now().getTime();
+    if (challenges.filter((item) => nowMs - item.created_at.getTime() < 60_000).length >= CHALLENGE_RATE_LIMIT) {
+      throw new AuthServiceError('REGISTRATION_RATE_LIMITED', '验证码请求过于频繁');
+    }
+    if (challenges.filter((item) => nowMs - item.created_at.getTime() < 24 * 60 * 60 * 1000).length >= CHALLENGE_DAILY_LIMIT) {
+      throw new AuthServiceError('REGISTRATION_DAILY_LIMITED', '该手机号今日验证码请求次数已达上限');
+    }
+    const useRealSms = Boolean(this.smsSender);
+    const code = useRealSms ? String(randomInt(0, 1_000_000)).padStart(6, '0') : DEVELOPMENT_SMS_CODE;
     const challenge = {
       challenge_id: this.store.next('cha'), phone: normalized,
-      code: DEVELOPMENT_SMS_CODE, consumed: false,
+      code, consumed: false, attempt_count: 0,
       created_at: this.now(), expires_at: new Date(this.now().getTime() + CHALLENGE_TTL_MS)
     };
+    // 真实短信发送失败：不落挑战（用户收不到码就不能占用其频控量程）。
+    if (useRealSms) await this.smsSender.send({ phone: normalized, code });
     if (!this.store.smsChallenges) this.store.smsChallenges = new Map();
     this.store.smsChallenges.set(challenge.challenge_id, challenge);
+    if (useRealSms) {
+      return { challenge_id: challenge.challenge_id, expires_at: challenge.expires_at.toISOString(), channel: this.smsSender.provider || 'sms', note: '验证码已通过短信发送。' };
+    }
     return { challenge_id: challenge.challenge_id, expires_at: challenge.expires_at.toISOString(), dev_code: DEVELOPMENT_SMS_CODE, note: '开发固定验证码；生产短信通道未接入。' };
   }
 
   register({ phone, code, dateOfBirth, confirmed18Plus }) {
     const normalized = normalizePhone(phone);
-    if (typeof code !== 'string' || code !== DEVELOPMENT_SMS_CODE) throw new AuthServiceError('SMS_CODE_INVALID', '验证码不正确');
     const challenge = [...(this.store.smsChallenges?.values() ?? [])].find(
       (item) => item.phone === normalized && !item.consumed && this.now() < item.expires_at
     );
     if (!challenge) throw new AuthServiceError('SMS_CHALLENGE_NOT_FOUND', '验证码不存在或已过期');
+    if (typeof code !== 'string' || code !== challenge.code) {
+      challenge.attempt_count += 1;
+      if (challenge.attempt_count >= CHALLENGE_MAX_ATTEMPTS) {
+        challenge.consumed = true; // 防爆破：连续失败即作废，须重新获取验证码
+        throw new AuthServiceError('SMS_CHALLENGE_LOCKED', '验证码错误次数过多，请重新获取');
+      }
+      throw new AuthServiceError('SMS_CODE_INVALID', '验证码不正确');
+    }
     challenge.consumed = true;
     if (this.phoneOwner(normalized)) throw new AuthServiceError('PHONE_ALREADY_REGISTERED', '该手机号已注册');
     const account = createAccountIn(this.store, `acct_reg_${randomUUID().slice(0, 8)}`);
