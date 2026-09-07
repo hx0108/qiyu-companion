@@ -322,4 +322,59 @@ function positiveTimeout(value) {
   return Number.isFinite(parsed) && parsed >= 1000 && parsed <= 60000 ? parsed : 20000;
 }
 
-module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenReplyGenerator, createQwenStreamingReplyGenerator, fallbackCompanionReply, parseCompanionReply, summaryPrompt };
+// 语义 Embedding 工厂（P1-4 记忆检索质量）：资产索引侧与召回查询侧共用同一
+// provider，保证向量同源同版本（不同 model_version 的向量不得混算余弦）。
+// 兼容 DashScope OpenAI-compatible 的 /embeddings 端点；dimensions 参数仅
+// v4 及以上模型支持（v3 固定 1024 维，不接受该参数）。
+// 环境变量：QWEN_EMBEDDING_MODEL（默认 text-embedding-v4）、
+// QWEN_EMBEDDING_DIMENSIONS（默认 1024，限 64..2048）。
+function createQwenEmbeddingProvider(environment = process.env, dependencies = {}) {
+  if (environment.QIYU_LLM_PROVIDER !== 'qwen') return null;
+  const apiKey = environment.QWEN_API_KEY || environment.DASHSCOPE_API_KEY;
+  if (typeof apiKey !== 'string' || !apiKey.trim()) return null;
+  const baseUrl = normalizedBaseUrl(environment.QWEN_BASE_URL || environment.DASHSCOPE_BASE_URL || DEFAULT_BASE_URL);
+  const model = environment.QWEN_EMBEDDING_MODEL || 'text-embedding-v4';
+  const dimensions = Number(environment.QWEN_EMBEDDING_DIMENSIONS) || 1024;
+  if (!Number.isInteger(dimensions) || dimensions < 64 || dimensions > 2048) {
+    throw new QwenProviderError('QWEN_EMBEDDING_DIMENSIONS_INVALID', 'QWEN_EMBEDDING_DIMENSIONS 必须是 64..2048 的整数', 500);
+  }
+  const fetchImpl = dependencies.fetchImpl || globalThis.fetch;
+  const timeoutMs = positiveTimeout(environment.QWEN_TIMEOUT_MS);
+  const sendDimensions = /-v([4-9]\d*)$/.test(model);
+  const provider = {
+    provider: 'qwen',
+    modelVersion: model,
+    dimensions,
+    async embed(text) {
+      if (typeof text !== 'string' || !text.trim()) throw new QwenProviderError('QWEN_EMBEDDING_INPUT_INVALID', 'Qwen embedding input must be non-empty', 400);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const body = { model, input: [text.trim()] };
+        if (sendDimensions) body.dimensions = dimensions;
+        const response = await fetchImpl(`${baseUrl}/embeddings`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal
+        });
+        if (!response.ok) throw new QwenProviderError('QWEN_UPSTREAM_REJECTED', 'Qwen Embedding 服务暂时不可用，请稍后重试', 502, { upstream_status: response.status }, response.status === 429 || response.status >= 500);
+        const payload = await response.json();
+        const vector = payload?.data?.[0]?.embedding;
+        if (!Array.isArray(vector) || vector.length !== dimensions || vector.some((item) => !Number.isFinite(item))) {
+          throw new QwenProviderError('QWEN_EMBEDDING_RESPONSE_INVALID', 'Qwen Embedding 未返回可用向量', 502, { expected_dimensions: dimensions, actual_dimensions: Array.isArray(vector) ? vector.length : 0 });
+        }
+        return vector;
+      } catch (error) {
+        if (error instanceof QwenProviderError) throw error;
+        if (error && error.name === 'AbortError') throw new QwenProviderError('QWEN_TIMEOUT', 'Qwen Embedding 响应超时，请稍后重试', 502, {}, true);
+        throw new QwenProviderError('QWEN_NETWORK_ERROR', 'Qwen Embedding 网络请求失败，请稍后重试', 502, {}, true);
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+  };
+  return provider;
+}
+
+module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenReplyGenerator, createQwenStreamingReplyGenerator, fallbackCompanionReply, parseCompanionReply, summaryPrompt };

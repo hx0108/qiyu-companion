@@ -178,3 +178,27 @@ test('确定性嵌入：非空归一化、相同文本同向量、不同文本�
   assert.ok(Math.abs(norm - 1) < 1e-9, 'L2 归一化');
   assert.ok(left.every((value) => Number.isFinite(value)));
 });
+
+test('语义向量接入：Worker 按 provider 声明维度与 model_version 入库，跨版本查询向量不参与余弦', async (t) => {
+  const store = new DevelopmentStore();
+  const base = await start(t, { store });
+  await readyConversation(base, 'sem1');
+  const asset = await confirmAsset(base, store, 'sem1');
+  // 模拟 Qwen 语义 provider：声明 1024 维与独立 model_version。
+  const semanticProvider = { modelVersion: 'text-embedding-v4', dimensions: 1024, embed: async () => new Array(1024).fill(0.01) };
+  const result = await runNextAssetEmbeddingJob({ store, embeddingProvider: semanticProvider.embed, modelVersion: semanticProvider.modelVersion, expectedDimensions: 1024, now: new Date() });
+  assert.equal(result.state, 'COMPLETED');
+  assert.equal(result.model_version, 'text-embedding-v4');
+  const embedding = store.assetEmbeddings.get(asset.asset_id);
+  assert.equal(embedding.embedding.length, 1024);
+  assert.equal(embedding.embedding_model_version, 'text-embedding-v4');
+  assert.equal(store.assets.get(asset.asset_id).index_state, 'READY');
+  // 维度与 provider 声明不符：任务判败进入重试，不得带病置 READY。
+  const store2 = new DevelopmentStore();
+  const base2 = await start(t, { store: store2 });
+  await readyConversation(base2, 'sem2');
+  const asset2 = await confirmAsset(base2, store2, 'sem2');
+  const badDimension = await runNextAssetEmbeddingJob({ store: store2, embeddingProvider: async () => new Array(768).fill(0.01), modelVersion: 'text-embedding-v4', expectedDimensions: 1024, now: new Date() });
+  assert.equal(badDimension.state, 'RETRY_SCHEDULED');
+  assert.notEqual(store2.assets.get(asset2.asset_id).index_state, 'READY');
+});

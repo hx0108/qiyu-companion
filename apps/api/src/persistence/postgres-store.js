@@ -258,12 +258,16 @@ class PostgresRequestStore extends DevelopmentStore {
 
   next() { return randomUUID(); }
 
-  async rankActiveAssetsByVector({ accountId, characterId, queryVector, limit = 20 } = {}) {
-    if (accountId !== this.accountId || !characterId || !Array.isArray(queryVector) || queryVector.length !== 256) return [];
+  // 语义向量召回（P1-4）：向量维度随 provider 声明（开发 256 / Qwen 1024 等），
+  // 但查询向量与存储向量必须同 embedding_model_version——不同版本的向量空间
+  // 不可比，版本不一致的资产由 WHERE 直接排除（回退词法召回由上层负责）。
+  async rankActiveAssetsByVector({ accountId, characterId, queryVector, embeddingModelVersion, limit = 20 } = {}) {
+    if (accountId !== this.accountId || !characterId || !Array.isArray(queryVector) || queryVector.length === 0 || queryVector.length > 2048 || queryVector.some((value) => !Number.isFinite(value))) return [];
+    if (typeof embeddingModelVersion !== 'string' || !embeddingModelVersion.trim()) return [];
     const safeLimit = Number.isInteger(limit) && limit > 0 && limit <= 50 ? limit : 20;
     const literal = '[' + queryVector.join(',') + ']';
     const result = await this.client.query(`SELECT embedding.asset_id,
-      (embedding.embedding::vector(256) <=> $3::vector(256))::double precision AS distance
+      (embedding.embedding::vector <=> $3::vector)::double precision AS distance
       FROM relationship_asset_embeddings AS embedding
       JOIN relationship_assets AS asset
         ON asset.asset_id = embedding.asset_id
@@ -272,14 +276,15 @@ class PostgresRequestStore extends DevelopmentStore {
       WHERE embedding.account_id = $1
         AND embedding.character_id = $2
         AND embedding.deleted_at IS NULL
+        AND embedding.embedding_model_version = $4
         AND asset.account_id = $1
         AND asset.character_id = $2
         AND asset.state = 'ACTIVE'
         AND asset.deleted_at IS NULL
         AND asset.index_state = 'READY'
         AND asset.version = embedding.version
-      ORDER BY embedding.embedding::vector(256) <=> $3::vector(256), embedding.asset_id
-      LIMIT $4`, [this.accountId, characterId, literal, safeLimit]);
+      ORDER BY embedding.embedding::vector <=> $3::vector, embedding.asset_id
+      LIMIT $5`, [this.accountId, characterId, literal, embeddingModelVersion, safeLimit]);
     return result.rows
       .map((row) => ({ asset_id: row.asset_id, score: 1 - Number(row.distance) }))
       .filter((row) => row.asset_id && Number.isFinite(row.score));

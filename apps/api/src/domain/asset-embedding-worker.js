@@ -56,7 +56,7 @@ function enqueueAssetEmbedding({ store, asset, now = new Date() } = {}) {
   return job;
 }
 
-async function runNextAssetEmbeddingJob({ store, embeddingProvider = deterministicEmbedding, modelVersion = DEVELOPMENT_EMBEDDING_MODEL_VERSION, now = new Date() } = {}) {
+async function runNextAssetEmbeddingJob({ store, embeddingProvider = deterministicEmbedding, modelVersion = DEVELOPMENT_EMBEDDING_MODEL_VERSION, expectedDimensions = EMBEDDING_DIMENSIONS, now = new Date() } = {}) {
   if (typeof embeddingProvider !== 'function') return { state: 'DISABLED' };
   const job = [...store.assetEmbeddingJobs.values()]
     .filter((item) => item.state === 'PENDING' && !item.exhausted_at && item.next_attempt_at <= now.toISOString())
@@ -72,7 +72,7 @@ async function runNextAssetEmbeddingJob({ store, embeddingProvider = determinist
       return { state: 'CANCELLED', job_id: job.job_id };
     }
     const vector = await embeddingProvider(asset.display_text);
-    if (!Array.isArray(vector) || vector.length !== EMBEDDING_DIMENSIONS || vector.some((value) => !Number.isFinite(value))) {
+    if (!Array.isArray(vector) || vector.length !== expectedDimensions || vector.some((value) => !Number.isFinite(value))) {
       throw new TypeError('embedding provider returned an invalid vector');
     }
     const updatedAt = now.toISOString();
@@ -156,9 +156,9 @@ function invalidateAssetEmbedding(store, assetId, reason, now = new Date().toISO
   return { vector_removed: removed, jobs_cancelled: cancelled };
 }
 
-function startAssetEmbeddingWorker(store, embeddingProvider, { intervalMs = 5_000, clock = () => new Date() } = {}) {
+function startAssetEmbeddingWorker(store, embeddingProvider, { intervalMs = 5_000, clock = () => new Date(), modelVersion = DEVELOPMENT_EMBEDDING_MODEL_VERSION, expectedDimensions = EMBEDDING_DIMENSIONS } = {}) {
   if (typeof embeddingProvider !== 'function') return { stop() {} };
-  const run = () => runNextAssetEmbeddingJob({ store, embeddingProvider, now: clock() }).catch(() => {});
+  const run = () => runNextAssetEmbeddingJob({ store, embeddingProvider, modelVersion, expectedDimensions, now: clock() }).catch(() => {});
   const timer = setInterval(run, intervalMs);
   timer.unref();
   return { stop: () => clearInterval(timer), runOnce: run };

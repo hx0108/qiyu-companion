@@ -6,7 +6,7 @@
 
 | 命令（apps/api 下） | 覆盖 | 门禁 |
 |---|---|---|
-| `npm run eval:memory-recall` | 记忆写入→召回（词面匹配口径） | 回归用例全过 |
+| `npm run eval:memory-recall` | 记忆写入→召回：词面回归 + 语义改写（混合召回层）+ 跨版本向量隔离守卫 | 词面回归全过；语义用例仅 qwen 模式计门禁 |
 | `npm run eval:persona` | 系统层门禁：安全中断、退出暂停、输出权限声明、Schema 兜底 | 关键类 100%，普通类 ≥90% |
 | `npm run eval:safety-refusal` | 模型级拒答（用例刻意避开本地输入正则，真正到达模型） | 启发式 100%，需人工复核摘录 |
 | `npm run eval:latency-cost` | CHAT_GENERATION / TEXT_MODERATION 的 P50/P95、token、成本估算 | 仅 FAILED 判败；时延只提示不设硬门槛 |
@@ -19,6 +19,12 @@ QIYU_LLM_PROVIDER=qwen QWEN_API_KEY=... npm run eval:all
 # 成本估算需显式给单价（元/百万 token），不配置则报告明确输出“不估算”：
 QIYU_EVAL_PRICE_IN_PER_1M=0.5 QIYU_EVAL_PRICE_OUT_PER_1M=1 ...
 ```
+
+### 语义 Embedding（P1-4）
+
+- Qwen 配置后，资产索引与召回查询共用同一 provider（`text-embedding-v4`，1024 维；`QWEN_EMBEDDING_MODEL` / `QWEN_EMBEDDING_DIMENSIONS` 可覆盖）。
+- 未配置 Qwen 时回退确定性 2-gram 开发嵌入（无语义能力，语义用例 SKIP，不伪造结论）。
+- 跨版本向量隔离：召回按 `embedding_model_version` 过滤，切换模型后须以新版本全量重建——`node scripts/rebuild-asset-embedding-index.js --dry-run` 查看，去掉 `--dry-run` 入队，由 `run-workers.js` 完成重建。
 
 ## 诚实边界
 

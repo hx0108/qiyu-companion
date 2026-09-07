@@ -68,7 +68,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -76,7 +76,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -110,7 +110,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -195,12 +195,12 @@ async function route(context) {
   if (method === 'GET' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) return listMessages(store, account, path, url);
   if (method === 'GET' && /^\/api\/v1\/messages\/[^/]+$/.test(path)) return getMessage(store, account, path);
   if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/feedback$/.test(path)) return idempotent(context, account, () => createMessageFeedback(store, account, path, body));
-  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator);
+  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider);
   if (method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(path)) return idempotent(context, account, () => deleteConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/resume$/.test(path)) return idempotent(context, account, () => resumeConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) {
-    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator));
+    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator, embeddingProvider));
   }
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/asr-jobs$/.test(path)) {
     return idempotent(context, account, () => createAsrJob(store, account, path, body, asrTranscriber, mediaStore, imageEntitlementService));
@@ -962,7 +962,7 @@ function deleteConversation(store, account, path) {
   return ok({ conversation: { conversation_id: conversation.conversation_id, status: conversation.status, deleted_at: deletedAt }, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob) });
 }
 
-async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null) {
+async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null, embeddingProvider = null) {
   const conversationId = path.split('/')[4];
   const text = requiredText(body?.content?.text, 'content.text');
   // 注销/封禁是硬阻断，优先于资源解析与固定安全响应（与 access-policy 的 ACCOUNT_NOT_OPEN 同源）。
@@ -997,7 +997,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     throw dailyUsageApiError(error);
   }
   try {
-    const contextPack = await buildContextPack(store, account, conversation, text);
+    const contextPack = await buildContextPack(store, account, conversation, text, embeddingProvider);
     const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
       await replyGenerator(text, contextPack),
       text,
@@ -1055,7 +1055,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
 const RECENT_CONTEXT_LIMIT = 20;
 const CONFIRMED_ASSET_TOP_K = 20;
 
-async function buildContextPack(store, account, conversation, text) {
+async function buildContextPack(store, account, conversation, text, embeddingProvider = null) {
   const character = store.characters.get(conversation.character_id);
   const messages = conversationMessages(store, conversation.conversation_id);
   const summary = validSummary([...store.conversationSummaries.values()], messages, conversation.conversation_id, account.revocation_epoch);
@@ -1070,21 +1070,29 @@ async function buildContextPack(store, account, conversation, text) {
     user_message: text,
     recent_context: recentContext,
     conversation_summary: summary ? { summary_id: summary.summary_id, source_to_id: summary.source_to_id, version: 1, text: summary.text } : null,
-    confirmed_assets: (await rankAssetsForContext(store, account.account_id, conversation.character_id, text))
+    confirmed_assets: (await rankAssetsForContext(store, account.account_id, conversation.character_id, text, embeddingProvider))
       .map(({ type, display_text, version }) => ({ type, display_text, version })),
     world_state: publicWorldState(currentWorldState(store, account, character))
   };
 }
 
-// 混合召回（技术设计 7.7 开发子集）：index_state=READY 且向量可用的资产按
-// 向量余弦相似度排序；未就绪（PENDING）或向量缺失的资产保留词法召回排序，
-// 保证索引未建好期间不丢失召回。向量来源是确定性开发嵌入，非供应商语义向量。
-async function rankAssetsForContext(store, accountId, characterId, query) {
+// 混合召回（技术设计 7.7）：index_state=READY 且向量可用的资产按向量余弦相似度
+// 排序；未就绪（PENDING）、向量缺失或 embedding_model_version 与查询侧不一致的
+// 资产保留词法召回排序，保证索引未建好/重建期间不丢失召回。
+// embeddingProvider（Qwen 语义向量）配置时查询与索引同源同版本；未配置时
+// 用确定性开发嵌入。查询向量获取失败时本轮回退词法，不混用不同版本向量。
+async function rankAssetsForContext(store, accountId, characterId, query, embeddingProvider = null) {
   const lexicalAssets = rankRelationshipAssets(activeAssets(store, accountId), { accountId, characterId, query, limit: CONFIRMED_ASSET_TOP_K });
-  const queryVector = deterministicEmbedding(query);
+  const queryModelVersion = embeddingProvider?.modelVersion || DEVELOPMENT_EMBEDDING_MODEL_VERSION;
+  let queryVector = null;
+  try {
+    queryVector = embeddingProvider && typeof embeddingProvider.embed === 'function' ? await embeddingProvider.embed(query) : deterministicEmbedding(query);
+  } catch {
+    queryVector = null; // 供应商查询向量失败：本轮回退词法，不阻塞对话主链路。
+  }
   let vectorAssetIds = [];
-  if (typeof store.rankActiveAssetsByVector === 'function') {
-    vectorAssetIds = await store.rankActiveAssetsByVector({ accountId, characterId, queryVector, limit: CONFIRMED_ASSET_TOP_K });
+  if (queryVector && typeof store.rankActiveAssetsByVector === 'function') {
+    vectorAssetIds = await store.rankActiveAssetsByVector({ accountId, characterId, queryVector, embeddingModelVersion: queryModelVersion, limit: CONFIRMED_ASSET_TOP_K });
   }
   const vectorsById = new Map(vectorAssetIds.map((item) => [item.asset_id, item.score]));
   const vectorAssets = vectorAssetIds
@@ -1096,7 +1104,7 @@ async function rankAssetsForContext(store, accountId, characterId, query) {
     .map((asset) => {
       const embedding = store.assetEmbeddings.get(asset.asset_id);
       if (vectorsById.has(asset.asset_id)) return { asset, score: vectorsById.get(asset.asset_id) };
-      if (asset.index_state === 'READY' && embedding && embedding.version === asset.version) {
+      if (queryVector && asset.index_state === 'READY' && embedding && embedding.version === asset.version && embedding.embedding_model_version === queryModelVersion) {
         return { asset, score: cosineSimilarity(embedding.embedding, queryVector) };
       }
       return { asset, score: null };
@@ -1210,14 +1218,14 @@ function acceptStreamingMessage(store, account, conversation, text) {
   });
 }
 
-function getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator) {
+function getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null) {
   const token = path.split('/')[4];
   const entry = streamTokens.get(token);
   if (!entry || entry.accountId !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '流式回放不存在');
   if (entry.used) throw apiError(409, 'STATE_TRANSITION_INVALID', '流式令牌已使用，请用消息接口读取终态');
   if (entry.expiresAt < Date.now()) { streamTokens.delete(token); throw apiError(410, 'CONTENT_REVOKED', '流式令牌已过期'); }
   entry.used = true;
-  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator);
+  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider);
   const assistantMessage = store.messages.get(entry.assistantMessageId);
   const finalText = assistantMessage ? assistantMessage.text : entry.text;
   return {
@@ -1236,7 +1244,7 @@ function getConversationStream(store, account, path, requestId, streamingReplyGe
 // 真流式执行体（技术设计 7.5）：额度预留→Qwen 流式→按句片段过本地权限门禁
 // 与 OUTPUT 审核→通过才下发 chunk；拦截/失败走 replaced/failed 终态并释放额度。
 // SSE 请求与 POST 同处账户事务模型：流式期间同账户其他请求按公平使用语义排队。
-function liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator) {
+function liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null) {
   return {
     status: 200,
     sseLive: {
@@ -1269,7 +1277,7 @@ function liveConversationStream(store, account, entry, requestId, streamingReply
         try {
           // buildContextPack 包含异步的 pgvector 召回。必须先等待完成，
           // 否则 Qwen 只会收到 Promise，角色姓名、人格与记忆都会丢失。
-          contextPack = await buildContextPack(store, account, conversation, entry.text);
+          contextPack = await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
           const onFragment = async (fragment) => {
             const visibleFragment = normalizeUnpromptedCharacterSelfIntroduction(
               { reply_text: fragment },
@@ -1311,7 +1319,7 @@ function liveConversationStream(store, account, entry, requestId, streamingReply
           // 非流式 Qwen 请求。不重复写入用户消息，也不把临时占位当成 AI 回复。
           if (typeof replyGenerator === 'function') {
             try {
-              const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text);
+              const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
               const fallbackReply = normalizeUnpromptedCharacterSelfIntroduction(
                 await replyGenerator(entry.text, fallbackContext),
                 entry.text,
@@ -2705,4 +2713,4 @@ async function sendStatic(res, staticFile, requestId) {
   }
 }
 
-module.exports = { createApp, TOKENS };
+module.exports = { createApp, TOKENS, rankAssetsForContext };

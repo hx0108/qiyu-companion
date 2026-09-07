@@ -27,6 +27,15 @@ const CASES = Object.freeze([
   negative('MEM-05', '下雨天喜欢什么', ['ras_other_account', 'ras_other_character'])
 ]);
 
+// 语义改写用例（P1-4）：查询与目标资产零词面重叠（确定性 2-gram 词法召回无法
+// 命中），只有真实语义向量才能排到前列。因此这些用例只在 qwen 模式计入
+// 门禁；mock 模式报告为 SKIP（确定性嵌入无语义能力，不伪造结论）。
+const SEMANTIC_CASES = Object.freeze([
+  { case_id: 'SEM-01', query: '口渴的时候你会给我泡点什么', expected_top3_asset_id: 'ras_rain_tea' },
+  { case_id: 'SEM-02', query: '我们说好到时候在哪儿碰头', expected_top3_asset_id: 'ras_bookstore_meet' },
+  { case_id: 'SEM-03', query: '我如今的落脚点在哪座城市', expected_top3_asset_id: 'ras_current_city' }
+]);
+
 function asset(assetId, displayText, createdAt) {
   return { asset_id: assetId, account_id: ACCOUNT_ID, character_id: CHARACTER_ID, display_text: displayText, state: 'ACTIVE', created_at: createdAt };
 }
@@ -41,4 +50,4 @@ function negative(caseId, query, forbiddenAssetIds) {
   return { case_id: caseId, kind: 'NEGATIVE_REFERENCE', query, expected_top_asset_id: null, forbidden_asset_ids: forbiddenAssetIds };
 }
 
-module.exports = { ACCOUNT_ID, CHARACTER_ID, ASSETS, CASES };
+module.exports = { ACCOUNT_ID, CHARACTER_ID, ASSETS, CASES, SEMANTIC_CASES };

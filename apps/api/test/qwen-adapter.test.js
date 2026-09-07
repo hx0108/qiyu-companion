@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenReplyGenerator } = require('../src/providers/qwen-adapter');
+const { QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenReplyGenerator } = require('../src/providers/qwen-adapter');
 const { PROMPT_INJECTION_ATTACK_SET_V1 } = require('../src/production/prompt-injection-attack-set');
 
 test('QwenAdapter uses the compatible chat-completions contract without returning reasoning content', async () => {
@@ -46,6 +46,48 @@ test('QwenAdapter exposes safe upstream failures and the factory keeps Qwen opt-
 test('Qwen adapter never accepts a latest or arbitrary model route as the stable route', () => {
   assert.equal(new QwenAdapter({ apiKey: 'test-key', model: 'latest' }).model, 'qwen3.8-flash');
   assert.equal(new QwenAdapter({ apiKey: 'test-key', model: 'qwen-experimental' }).model, 'qwen3.8-flash');
+});
+
+test('Qwen embedding provider sends the compatible embeddings contract and validates vector shape', async () => {
+  let captured;
+  const provider = createQwenEmbeddingProvider(
+    { QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' },
+    { fetchImpl: async (url, options) => { captured = { url, options }; return { ok: true, json: async () => ({ data: [{ embedding: new Array(1024).fill(0.1) }] }) }; } }
+  );
+  assert.equal(provider.modelVersion, 'text-embedding-v4');
+  assert.equal(provider.dimensions, 1024);
+  const vector = await provider.embed('我养了一只叫团子的橘猫');
+  assert.equal(captured.url, 'https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings');
+  const requestBody = JSON.parse(captured.options.body);
+  assert.deepEqual(requestBody, { model: 'text-embedding-v4', input: ['我养了一只叫团子的橘猫'], dimensions: 1024 });
+  assert.equal(vector.length, 1024);
+});
+
+test('Qwen embedding provider omits the dimensions parameter for v3-family models and exposes safe failures', async () => {
+  let captured;
+  const provider = createQwenEmbeddingProvider(
+    { QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key', QWEN_EMBEDDING_MODEL: 'text-embedding-v3' },
+    { fetchImpl: async (url, options) => { captured = { options }; return { ok: true, json: async () => ({ data: [{ embedding: new Array(1024).fill(0.1) }] }) }; } }
+  );
+  await provider.embed('查询');
+  assert.equal(JSON.parse(captured.options.body).dimensions, undefined);
+  // 维度与声明不符：必须判为响应无效（不可重试），不得带病入库。
+  const mismatched = createQwenEmbeddingProvider(
+    { QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' },
+    { fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ embedding: new Array(768).fill(0.1) }] }) }) }
+  );
+  await assert.rejects(() => mismatched.embed('查询'), (error) => error instanceof QwenProviderError && error.code === 'QWEN_EMBEDDING_RESPONSE_INVALID' && error.retryable === false);
+  // 上游限流：可重试，交给既有任务重试/DLQ 机制。
+  const throttled = createQwenEmbeddingProvider(
+    { QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' },
+    { fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }) }
+  );
+  await assert.rejects(() => throttled.embed('查询'), (error) => error.code === 'QWEN_UPSTREAM_REJECTED' && error.retryable === true);
+  // 未启用 Qwen 或缺密钥：工厂返回 null（调用方回退确定性嵌入）。
+  assert.equal(createQwenEmbeddingProvider({}), null);
+  assert.equal(createQwenEmbeddingProvider({ QIYU_LLM_PROVIDER: 'qwen' }), null);
+  // 非法维度声明：启动即失败，不允许静默猜维度。
+  assert.throws(() => createQwenEmbeddingProvider({ QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'k', QWEN_EMBEDDING_DIMENSIONS: '7' }), (error) => error.code === 'QWEN_EMBEDDING_DIMENSIONS_INVALID');
 });
 
 test('Qwen structured reply retries one invalid response, then falls back without a memory candidate', async () => {

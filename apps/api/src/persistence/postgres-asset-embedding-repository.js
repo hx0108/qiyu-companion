@@ -11,7 +11,7 @@ class PostgresAssetEmbeddingRepository {
     this.leaseSeconds = Number.isInteger(leaseSeconds) && leaseSeconds >= 10 && leaseSeconds <= 600 ? leaseSeconds : 60;
   }
 
-  async runOnce({ embeddingProvider, modelVersion } = {}) {
+  async runOnce({ embeddingProvider, modelVersion, expectedDimensions = EMBEDDING_DIMENSIONS } = {}) {
     if (typeof embeddingProvider !== 'function' || !nonBlank(modelVersion)) return { state: 'DISABLED' };
     const job = await this.claimNext();
     if (!job) {
@@ -24,7 +24,7 @@ class PostgresAssetEmbeddingRepository {
     }
     try {
       const embedding = await embeddingProvider(job.display_text);
-      assertEmbedding(embedding);
+      assertEmbedding(embedding, expectedDimensions);
       const completed = await this.complete(job, embedding, modelVersion);
       return completed
         ? { state: 'COMPLETED', job_id: job.job_id, asset_id: job.asset_id, model_version: modelVersion }
@@ -64,7 +64,7 @@ class PostgresAssetEmbeddingRepository {
     return this.transaction(async (client) => {
       const written = await client.query(
         'INSERT INTO relationship_asset_embeddings (asset_id, account_id, character_id, embedding, embedding_model_version, created_at, updated_at, version)' +
-        " SELECT asset.asset_id, asset.account_id, asset.character_id, $2::vector(256), $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, asset.version" +
+        " SELECT asset.asset_id, asset.account_id, asset.character_id, $2::vector, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, asset.version" +
         ' FROM asset_embedding_jobs AS job JOIN relationship_assets AS asset ON asset.asset_id = job.asset_id' +
         " WHERE job.job_id = $1 AND job.state = 'PROCESSING' AND job.lease_expires_at > CURRENT_TIMESTAMP" +
         " AND asset.state = 'ACTIVE' AND asset.deleted_at IS NULL AND asset.version = job.asset_version" +
@@ -172,8 +172,8 @@ class PostgresAssetEmbeddingRepository {
   }
 }
 
-function assertEmbedding(value) {
-  if (!Array.isArray(value) || value.length !== EMBEDDING_DIMENSIONS || value.some((item) => !Number.isFinite(item))) {
+function assertEmbedding(value, expectedDimensions = EMBEDDING_DIMENSIONS) {
+  if (!Array.isArray(value) || value.length !== expectedDimensions || value.some((item) => !Number.isFinite(item))) {
     throw new TypeError('embedding provider returned an invalid vector');
   }
 }

@@ -17,7 +17,7 @@
 // 用法：DATABASE_URL=... node scripts/run-workers.js [--once] [--interval-ms 5000]
 
 const { createPersistenceFromEnvironment } = require('../src/persistence/composition');
-const { createQwenConversationSummaryGenerator } = require('../src/providers/qwen-adapter');
+const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider } = require('../src/providers/qwen-adapter');
 const { runNextConversationSummaryJob } = require('../src/domain/conversation-summary-worker');
 const { deterministicEmbedding, DEVELOPMENT_EMBEDDING_MODEL_VERSION } = require('../src/domain/asset-embedding-worker');
 const { advanceImageJob } = require('../src/domain/image-job-advance');
@@ -62,6 +62,8 @@ async function main() {
     throw new Error('run-workers 需要 QIYU_PERSISTENCE=postgres；内存模式的 Worker 由 API 进程内嵌运行');
   }
   const summaryGenerator = createQwenConversationSummaryGenerator(process.env) || null;
+  // 语义向量（P1-4）：Qwen 配置时用供应商语义向量建索引；否则确定性开发嵌入。
+  const embeddingProvider = createQwenEmbeddingProvider(process.env) || null;
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
   const embeddingRepository = new PostgresAssetEmbeddingRepository({ pool });
   const imageDeps = buildImageDepsFromEnvironment(process.env);
@@ -144,8 +146,9 @@ async function main() {
     let embeddings = 0;
     for (let round = 0; round < 20; round += 1) {
       const outcome = await embeddingRepository.runOnce({
-        embeddingProvider: deterministicEmbedding,
-        modelVersion: DEVELOPMENT_EMBEDDING_MODEL_VERSION
+        embeddingProvider: embeddingProvider ? embeddingProvider.embed : deterministicEmbedding,
+        modelVersion: embeddingProvider ? embeddingProvider.modelVersion : DEVELOPMENT_EMBEDDING_MODEL_VERSION,
+        expectedDimensions: embeddingProvider ? embeddingProvider.dimensions : undefined
       });
       if (outcome.state !== 'COMPLETED') break;
       embeddings += 1;
@@ -218,7 +221,7 @@ async function main() {
     return worked;
   }
 
-  console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}）。`);
+  console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；资产向量：${embeddingProvider ? `qwen ${embeddingProvider.modelVersion}（${embeddingProvider.dimensions} 维）` : '确定性开发嵌入'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}）。`);
   let running = true;
   process.on('SIGINT', () => { running = false; });
 

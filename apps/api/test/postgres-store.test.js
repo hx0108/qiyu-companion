@@ -124,21 +124,27 @@ test('PostgresStore normalizes subscription timestamps so persisted trial TTS qu
   });
 });
 
-test('PostgresStore vector recall stays inside the authenticated account, character, active state, and indexed version', async () => {
+test('PostgresStore vector recall stays inside the authenticated account, character, active state, indexed version, and matching embedding model version', async () => {
   const pool = fakePool();
   const store = new PostgresStore({ pool });
   const accountId = store.resolveAccountId('acct_dev_alice');
   await store.withAccountTransaction(accountId, async (scoped) => {
-    await scoped.rankActiveAssetsByVector({ accountId, characterId: 'character-1', queryVector: new Array(256).fill(0), limit: 3 });
+    // 缺 embeddingModelVersion（跨版本向量不可比）时不得发起任何向量查询。
+    const guarded = await scoped.rankActiveAssetsByVector({ accountId, characterId: 'character-1', queryVector: new Array(256).fill(0), limit: 3 });
+    assert.deepEqual(guarded, []);
+    await scoped.rankActiveAssetsByVector({ accountId, characterId: 'character-1', queryVector: new Array(256).fill(0), embeddingModelVersion: 'deterministic-char-ngram-256-v1', limit: 3 });
   });
   const ranking = pool.calls.find((call) => call.sql.includes('FROM relationship_asset_embeddings AS embedding') && call.sql.includes('<=>'));
   assert.ok(ranking);
   assert.match(ranking.sql, /embedding\.account_id = \$1/);
   assert.match(ranking.sql, /embedding\.character_id = \$2/);
+  assert.match(ranking.sql, /embedding\.embedding_model_version = \$4/);
   assert.match(ranking.sql, /asset\.state = 'ACTIVE'/);
   assert.match(ranking.sql, /asset\.index_state = 'READY'/);
   assert.match(ranking.sql, /asset\.version = embedding\.version/);
+  assert.ok(!/\(256\)/.test(ranking.sql), '不得再钉死 256 维');
   assert.deepEqual(ranking.values.slice(0, 2), [accountId, 'character-1']);
+  assert.equal(ranking.values[3], 'deterministic-char-ngram-256-v1');
   assert.equal(ranking.values.at(-1), 3);
 });
 
