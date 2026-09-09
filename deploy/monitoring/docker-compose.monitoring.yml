@@ -1,0 +1,76 @@
+# 栖语监控栈（个人项目可完成项）：与 deploy/docker-compose.yml 同项目叠加运行——
+#   docker compose -f deploy/docker-compose.yml -f deploy/monitoring/docker-compose.monitoring.yml up -d
+# 组件：Prometheus（抓取 API /internal/metrics 与 postgres-exporter）、
+#   Alertmanager（个人 Push Webhook + 邮件）、Grafana（分位/失败率/单位成本看板）、
+#   postgres-exporter（PG 全实例标准指标 + 自定义查询）。
+# 诚实边界：本机未执行 docker pull（磁盘受限）；本文件经 `docker compose config`
+# 校验结构有效，但监控栈尚未实际运行——台账以实际 up 后的截图/状态为准。
+# 凭据不入库：bearer token 放 monitoring/secrets/api-bearer-token（见 README）。
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: qiyu-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-rules.yml:/etc/prometheus/rules.yml:ro
+      - ./secrets:/etc/prometheus/secrets:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - postgres-exporter
+    networks: [default]
+    mem_limit: 384m
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: qiyu-alertmanager
+    restart: unless-stopped
+    # alertmanager 不读环境变量：通知渠道占位值由 deploy/.env 生成——
+    # 用 shell 展开 envsubst 模板（见 README“告警渠道”一节）。
+    entrypoint: ["/bin/sh", "-c", "envsubst < /etc/alertmanager/alertmanager.tpl.yml > /etc/alertmanager/alertmanager.yml && exec alertmanager --config.file=/etc/alertmanager/alertmanager.yml"]
+    environment:
+      ALERT_PUSH_WEBHOOK_URL: ${ALERT_PUSH_WEBHOOK_URL:-http://127.0.0.1:1/unconfigured}
+      ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-localhost}
+      ALERT_SMTP_PORT: ${ALERT_SMTP_PORT:-587}
+      ALERT_SMTP_FROM: ${ALERT_SMTP_FROM:-unconfigured@localhost}
+      ALERT_SMTP_TO: ${ALERT_SMTP_TO:-unconfigured@localhost}
+    volumes:
+      - ./alertmanager.tpl.yml:/etc/alertmanager/alertmanager.tpl.yml:ro
+    networks: [default]
+    mem_limit: 128m
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: qiyu-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in deploy/.env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/qiyu-dashboard.json:ro
+      - ./grafana-provisioning.yml:/etc/grafana/provisioning/dashboards/qiyu.yml:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks: [default]
+    mem_limit: 256m
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: qiyu-postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/${POSTGRES_DB:-qiyu}?sslmode=disable
+      PG_EXPORTER_EXTEND_QUERY_PATH: /etc/postgres-exporter/queries.yaml
+    volumes:
+      - ./postgres-exporter-queries.yaml:/etc/postgres-exporter/queries.yaml:ro
+    networks: [default]
+    mem_limit: 128m
+
+volumes:
+  prometheus_data:
+  grafana_data:

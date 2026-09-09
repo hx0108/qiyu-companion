@@ -2,7 +2,7 @@
 
 三运行容器编排：API + 独立 Worker + PostgreSQL(pgvector)，另含一次性 `migrate`
 服务。它会在 API/Worker 启动前补齐未执行的 SQL 迁移；已执行的迁移仅按文件名跳过。
-已在本地 Docker 验证 compose 语法、全新卷自动应用全部 45 个迁移、已有卷的迁移账本
+已在本地 Docker 验证 compose 语法、全新卷自动应用全部 54 个迁移、已有卷的迁移账本
 可被安全读取，以及容器命名与同机其他项目共存。
 
 ## ⚠️ 诚实边界（先读）
@@ -59,7 +59,7 @@ cd deploy && docker compose up -d --build
 # 4) 验证
 docker compose ps                                  # postgres/api healthy、worker running、migrate Exited (0)
 curl http://127.0.0.1:3000/health                  # {"status":"ok",...}
-docker exec qiyu-beta-postgres psql -U postgres -d qiyu -Atc "SELECT count(*) FROM schema_migrations;"  # 45
+docker exec qiyu-beta-postgres psql -U postgres -d qiyu -Atc "SELECT count(*) FROM schema_migrations;"  # 54
 docker compose logs -f api worker                  # 观察日志（Ctrl+C 退出）
 
 # 5) 对外：阿里云安全组放行 API_PORT（建议仅白名单 IP），浏览器访问 http://<服务器IP>:3000/
@@ -143,8 +143,16 @@ docker compose exec api npm run verify:closed-trial-qwen
 ## 三点五、监控与语义向量（P1-6/P1-4 新增）
 
 - 指标：`GET /internal/metrics`（Prometheus 文本；审核员 Bearer 同其它 `/internal/*`）。
-  抓取与告警规则见 `deploy/monitoring/prometheus-rules.yml` 与 `development/OPERATIONS_RUNBOOK.md`。
-  注意：PG 模式下该端点是请求作用域样本，生产全实例口径需按 runbook 的说明接独立导出。
+- **监控栈部署件已交付（2026-09-09）**：`deploy/monitoring/` 下有 Prometheus + Alertmanager + Grafana + postgres-exporter 的 compose 覆盖层、告警规则、Grafana 看板（P50/P90/P99、失败率、估算成本、单位成功成本、死信/注销积压/图片在途、PG 实例与审计行数）。运行方式：
+  ```bash
+  # 1) 放 bearer token（与 QIYU_REVIEWER_TOKENS 一致的静态令牌，供 Prometheus 抓取）
+  echo -n "你的审核员token" > deploy/monitoring/secrets/api-bearer-token
+  # 2) deploy/.env 配 GRAFANA_ADMIN_PASSWORD 与告警渠道（ALERT_PUSH_WEBHOOK_URL / ALERT_SMTP_*）
+  # 3) 叠加启动
+  docker compose -f deploy/docker-compose.yml -f deploy/monitoring/docker-compose.monitoring.yml up -d
+  ```
+  **诚实边界：本机未执行镜像拉取（磁盘受限），栈尚未实际运行**——`docker compose ... config` 结构校验通过；"已接入告警"须以实际 up 且触发过一次测试告警为准。postgres-exporter 提供 PG 全实例标准指标 + 自定义查询（库大小/TOP 表行数/迁移账本/审计追加行数）。
+  注意：PG 模式下 `/internal/metrics` 是请求作用域样本，生产全实例口径仍需独立导出。
 - 语义记忆向量：配置 `QIYU_LLM_PROVIDER=qwen + QWEN_API_KEY` 后资产索引与召回
   查询自动切换到 Qwen embedding（默认 `text-embedding-v4` 1024 维；
   `QWEN_EMBEDDING_MODEL`/`QWEN_EMBEDDING_DIMENSIONS` 可覆盖），未配置则回退确定性开发嵌入。
@@ -157,7 +165,7 @@ docker compose exec worker node scripts/rebuild-asset-embedding-index.js        
 
 ## 三点六、真实短信登录（P2-10 新增）
 
-默认未配置时验证码走开发固定码（响应如实标注 `dev_code`）。配置以下环境变量后切换真实通道（随机 6 位码、响应不回显）：
+默认未配置时验证码走开发固定码（响应如实标注 `dev_code`）。真实通道需要腾讯云已审核签名与模板；个人开发者若控制台要求企业主体或未具备适用资格，应保持关闭，不得把开发固定码对外使用。配置以下环境变量后才可切换真实通道（随机 6 位码、响应不回显）：
 
 ```
 QIYU_SMS_PROVIDER=tencent
@@ -170,6 +178,28 @@ TENCENT_SECRET_ID / TENCENT_SECRET_KEY / TENCENT_REGION
 ```bash
 QIYU_SMS_VERIFY_PHONE=138... node scripts/verify-tencent-sms-provider.js   # 输出 acceptance=passed 才可记录“已验证”
 ```
+
+当前仓库与本机 `deploy/.env` 未配置上述腾讯 SMS 字段及验收手机号，因此只有适配器、限流和契约测试证据，尚无真实短信送达证据。
+
+## 三点七、成本看板与供应商账单对账
+
+审核员可从独立运营台或 `GET /internal/cost-report` 查看按供应商/能力聚合的调用量、估算成本、失败率与 P50/P90/P99。费率通过 `QIYU_COST_RATE_CARD_JSON` 注入；告警阈值使用 `QIYU_ALERT_P99_LATENCY_MS`、`QIYU_ALERT_FAILURE_RATE` 与 `QIYU_ALERT_UNIT_COST_FEN`。
+
+供应商账单必须另行导出为 JSON，并与同周期调用指标执行：
+
+```bash
+node scripts/reconcile-provider-bill.js --metrics=metrics.json --bill=bill.json --rate-card=rate-card.json [--bucket=day|month]
+```
+
+费率表支持三口径：固定价、按生效时间调价（`effective`，估算按调用当日仍在效的最近一档）、阶梯价（`tiers`，按单次输出 token 命档）；账单可带调整项 `adjustments: [{ kind, fen, note }]`（kind ∈ COUPON/FREE_CREDIT/REFUND/TAX/TIER_DELTA/OTHER）解释优惠券、代金券、退款与税差——`billed = estimated + Σadjustments ± 容差` 时才判 MATCHED。无 `created_at` 的历史埋点对时间档"不猜价"（计入 unpriced_calls）。
+返回 `MATCHED` 才能作为该周期对账证据；退出码 2 表示金额差异待人工复核。**当前未导入真实供应商账单（本机仅以合成样例验证过程，含调整项 MATCHED/超差 REVIEW_REQUIRED 两路径），页面金额仅为费率估算，不能声称真实金额已核对。**
+
+## 三点八、PWA、CI 与灰度边界
+
+- Web 已提供 Manifest、静态壳 Service Worker、AES-GCM 会话令牌缓存与通用 Push 隐私载荷；尚无原生 App 构建、签名、应用商店发布或真实 Push 投递。
+- `.github/workflows/ci.yml` 固化单元/契约、主浏览器、42 原型状态、运营台和 Compose 配置门禁；`real-provider-e2e.yml` 仅允许人工触发并从受控环境注入供应商密钥。
+- `docker-compose.canary.yml` 提供独立 canary 实例语法和健康检查，但尚未接入真实流量分配、自动晋级或回滚控制面。
+- 灾备当前只有删除账本重放和运维手册级演练，尚未在真实备份介质完成恢复验证。
 
 ## 四、非 Docker 备选（systemd 直跑）
 

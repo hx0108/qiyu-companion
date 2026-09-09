@@ -1,0 +1,89 @@
+{
+  "title": "栖语运营监控（P50/P90/P99 · 失败率 · 单位成本）",
+  "uid": "qiyu-ops",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "供应商调用失败率（按能力/供应商）",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [{ "expr": "sum by (capability, provider) (rate(qiyu_provider_calls_total{outcome=\"FAILED\"}[5m])) / clamp_min(sum by (capability, provider) (rate(qiyu_provider_calls_total[5m])), 0.000001)" }]
+    },
+    {
+      "id": 2,
+      "title": "时延分位 P50/P90/P99（毫秒，API 内存窗口）",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [{ "expr": "qiyu_provider_latency_quantile_ms" }]
+    },
+    {
+      "id": 3,
+      "title": "平均时延（latency_sum / calls_total）",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
+      "targets": [{ "expr": "rate(qiyu_provider_latency_ms_sum[5m]) / clamp_min(rate(qiyu_provider_calls_total[5m]), 0.000001)" }]
+    },
+    {
+      "id": 4,
+      "title": "估算成本（分，按配置费率）",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 8 },
+      "targets": [{ "expr": "qiyu_provider_estimated_cost_fen" }]
+    },
+    {
+      "id": 5,
+      "title": "单位成功成本（分/成功调用）",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
+      "targets": [{ "expr": "qiyu_provider_estimated_cost_per_success_fen" }]
+    },
+    {
+      "id": 6,
+      "title": "死信队列未解决数（按队列）",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 6 },
+      "targets": [{ "expr": "qiyu_dead_letters_open" }]
+    },
+    {
+      "id": 7,
+      "title": "账户注销清理积压（承诺 24h）",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 16, "w": 6, "h": 6 },
+      "targets": [{ "expr": "qiyu_deletion_jobs_pending" }]
+    },
+    {
+      "id": 8,
+      "title": "图片任务在途数（滞留告警口径）",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 16, "w": 6, "h": 6 },
+      "targets": [{ "expr": "qiyu_image_jobs_inflight" }]
+    },
+    {
+      "id": 9,
+      "title": "运营审计追加行总数（只增）",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 16, "w": 6, "h": 6 },
+      "targets": [{ "expr": "pg_append_only_audit_rows" }]
+    },
+    {
+      "id": 10,
+      "title": "PostgreSQL 实例：活跃连接 / 数据库大小",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "pg_stat_activity_count{datname=~\"qiyu.*\"}" },
+        { "expr": "pg_postgres_size_database_size_bytes / 1024 / 1024" }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "迁移账本（schema_migrations 条数）",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "targets": [{ "expr": "pg_migration_ledger_migrations_applied" }]
+    }
+  ]
+}

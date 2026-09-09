@@ -11,8 +11,14 @@
 | 开发者 | 两者（小团队现实） | 全部 | **同一天内不得既做变更又审核自己变更的队列处置**——自己部署后产生的死信重放，须在日志留痕说明原因 |
 
 实现事实：
-- 审核员身份由 `QIYU_REVIEWER_TOKENS` 注入，服务端只认 Bearer token → reviewer_id；默认 `reviewer-dev-token` 仅限本地开发，生产 compose 必须覆盖。
-- `/internal/*` 与用户 Bearer 体系完全分离（app.js `requireReviewer`）；审核动作（重放、手工授予）幂等键落库可查。
+- **审核员账号体系（2026-09-09 起）**：正式路径为账号登录 `POST /internal/auth/login`——用户名 + 密码（scrypt 哈希落库）+ TOTP 动态码（启用 MFA 的账号，RFC 6238）。失败 5 次锁定 15 分钟；会话令牌 `ops_*` 8 小时有效、可即时吊销（`/internal/auth/logout`）。首个账号用 `scripts/seed-ops-reviewer.js` 引导（避免"无账号无法建账号"），后续账号走运营台 `/internal/reviewer-accounts`（需安全管理员，MFA 密钥只显示一次）。
+- 旧静态 token `QIYU_REVIEWER_TOKENS` 保留为开发兜底（本地 `reviewer-dev-token` 持全部角色）；生产部署应改用账号体系并覆盖静态 token。
+- **RBAC**：逻辑角色 `REVIEWER / RELEASE / SECURITY_ADMIN`，权限矩阵见 `src/domain/reviewer-identity.js` 的 `PERMISSION_ROLES`（路由层逐条检查，403 明确拒绝）。
+- **双人审批**：`PERSONA_STABLE_RELEASE`（人格发布为 stable）与 `SUBSCRIPTION_MANUAL_REVOKE`（人工撤销订阅）执行前须另一名具备权限的账号批准（`/internal/dual-approvals`，24 小时过期，一次性消费）。**单人项目诚实声明：机制要求两个不同账号，但同一自然人可持有多个账号——这是逻辑双人控制，不构成真实组织内的职责分离，对外表述不得写成"双人复核"。**
+- **运营审计**：登录成功/失败/锁定、会话吊销、审批申请/批准/驳回/执行、订阅撤销、人格发布、敏感材料调取全部追加写 `ops_audit_events`（PG 迁移 055）：应用角色仅 INSERT/SELECT，UPDATE/DELETE 被行级触发器拒绝（超主亦然）；审计查询走 `/internal/audit-events`（仅安全管理员）。**TRUNCATE 边界**：PostgreSQL 无 TRUNCATE 事件触发器，应用角色已显式无该权限，但表主/超主仍可 TRUNCATE——彻底不可变需外部 WORM/异地归档，列为生产加固项。
+- **敏感材料按需解密**：年龄申报材料配置 `QIYU_OPS_MATERIAL_KEY`（64 位十六进制）时以 AES-256-GCM 封装存储，队列视图永不返回原文；调取走 `/internal/age-reviews/{id}/sensitive-material`——先写 `SENSITIVE_MATERIAL_VIEWED` 审计再解密返回。
+- **PG 审核员数据库会话**：`qiyu_reviewer` 角色（迁移 024/055）+ 请求作用域 `SET LOCAL ROLE` + `set_config('app.reviewer_id')`，RLS 限定只能读本人账号行、本人参与的审批、（安全管理员）全量审计。容器内 12/12 真实验收：`scripts/verify-reviewer-pg-session.js`。
+- `/internal/*` 与用户 Bearer 体系完全分离（app.js `requireReviewer`）；审核动作幂等键落库可查。
 - 用户数据隔离靠 PG RLS（`app.current_account_id()`）；Worker 走 `qiyu_asset_embedding_worker` BYPASSRLS 专用角色，只授予任务表与向量表的最小列权限（迁移 043）。
 
 ## 二、值班（on-call）

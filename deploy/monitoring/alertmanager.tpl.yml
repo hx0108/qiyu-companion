@@ -1,0 +1,30 @@
+# Alertmanager 配置模板（容器 entrypoint 用 envsubst 展开以下占位）：
+#   ${ALERT_PUSH_WEBHOOK_URL}  个人 Push（Bark/Server酱/企业微信机器人等通用 webhook）
+#   ${ALERT_SMTP_HOST/PORT/FROM/TO}  邮件通道（warning 级）
+# 渠道值放 deploy/.env，不入库。未配置时占位指向 127.0.0.1:1——投递必然失败并
+# 显式暴露“告警未接线”，不静默吞掉。
+route:
+  receiver: personal-push
+  group_by: [alertname, provider, capability]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  routes:
+    - matchers: [severity="critical"]
+      receiver: personal-push
+      continue: true
+    - matchers: [severity="warning"]
+      receiver: ops-email
+
+receivers:
+  - name: personal-push
+    webhook_configs:
+      - url: ${ALERT_PUSH_WEBHOOK_URL}
+        send_resolved: true
+  - name: ops-email
+    email_configs:
+      - to: ${ALERT_SMTP_TO}
+        from: ${ALERT_SMTP_FROM}
+        smarthost: ${ALERT_SMTP_HOST}:${ALERT_SMTP_PORT}
+        require_tls: true
+        send_resolved: true

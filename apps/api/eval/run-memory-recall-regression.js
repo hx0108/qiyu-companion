@@ -43,7 +43,7 @@ async function main() {
   console.log(report);
   const outputDir = path.resolve(__dirname, '../../../development/eval');
   fs.mkdirSync(outputDir, { recursive: true });
-  const outputFile = path.join(outputDir, 'memory-recall-regression-' + new Date().toISOString().slice(0, 10) + '.md');
+  const outputFile = path.join(outputDir, 'memory-recall-regression-' + (embeddingProvider ? 'qwen' : 'mock') + '-' + new Date().toISOString().slice(0, 10) + '.md');
   fs.writeFileSync(outputFile, report, 'utf8');
   console.log('\n报告已写入 ' + outputFile);
   process.exitCode = passed ? 0 : 1;
@@ -63,7 +63,7 @@ function runCase(testCase) {
 function semanticIndexStore(provider) {
   const store = {
     assets: new Map(ASSETS.map((asset) => [asset.asset_id, { ...asset, version: 1, index_state: 'PENDING' }])),
-    assetEmbeddings: new Map(), assetEmbeddingJobs: new Map(), outboxEvents: new Map(),
+    assetEmbeddings: new Map(), assetEmbeddingJobs: new Map(), assetEmbeddingDeadLetters: new Map(), outboxEvents: new Map(),
     next: ((count) => () => `semantic_${count += 1}`)(0)
   };
   for (const asset of store.assets.values()) enqueueAssetEmbedding({ store, asset });
@@ -71,13 +71,24 @@ function semanticIndexStore(provider) {
 }
 
 async function drainEmbeddingJobs(store, provider) {
+  const errors = [];
+  let now = new Date();
   for (let round = 0; round < 20; round += 1) {
-    const outcome = await runNextAssetEmbeddingJob({ store, embeddingProvider: provider.embed, modelVersion: provider.modelVersion, expectedDimensions: provider.dimensions, now: new Date() });
-    if (outcome.state !== 'COMPLETED') break;
+    const outcome = await runNextAssetEmbeddingJob({ store, embeddingProvider: provider.embed, modelVersion: provider.modelVersion, expectedDimensions: provider.dimensions, now });
+    if (outcome.state === 'COMPLETED') continue;
+    const job = outcome.job_id ? store.assetEmbeddingJobs.get(outcome.job_id) : null;
+    if (job?.last_error) errors.push(job.last_error);
+    // 失败时按队列回退时间推进测试时钟，确保评测报告能展示真实的
+    // 重试/DLQ 原因，而不是把尚未到期的 PENDING 静默误报为“未完成”。
+    if (outcome.state === 'RETRY_SCHEDULED') {
+      now = new Date(new Date(job.next_attempt_at).getTime() + 1);
+      continue;
+    }
+    break;
   }
   const readyCount = [...store.assets.values()].filter((asset) => asset.state === 'ACTIVE' && asset.index_state === 'READY').length;
   const activeCount = [...store.assets.values()].filter((asset) => asset.state === 'ACTIVE').length;
-  return { complete: readyCount === activeCount, readyCount, activeCount };
+  return { complete: readyCount === activeCount, readyCount, activeCount, error: errors.at(-1) || null };
 }
 
 async function runSemanticCases(provider, useQwen) {
@@ -86,7 +97,7 @@ async function runSemanticCases(provider, useQwen) {
   const outcome = [];
   for (const testCase of SEMANTIC_CASES) {
     if (!useQwen) { outcome.push({ ...testCase, status: 'SKIP', recalled_asset_ids: [] }); continue; }
-    if (!drain.complete) { outcome.push({ ...testCase, status: 'FAIL', note: `索引未完成（READY ${drain.readyCount}/${drain.activeCount}）` }); continue; }
+    if (!drain.complete) { outcome.push({ ...testCase, status: 'FAIL', note: `索引未完成（READY ${drain.readyCount}/${drain.activeCount}）${drain.error ? `：${drain.error}` : ''}` }); continue; }
     const ranked = await rankAssetsForContext(store, ACCOUNT_ID, CHARACTER_ID, testCase.query, provider);
     const ids = ranked.map((asset) => asset.asset_id);
     outcome.push({ ...testCase, status: ids.slice(0, 3).includes(testCase.expected_top3_asset_id) ? 'PASS' : 'FAIL', recalled_asset_ids: ids });
@@ -100,7 +111,7 @@ async function runSemanticCases(provider, useQwen) {
 async function runVersionMismatchGuard(provider) {
   const store = semanticIndexStore(provider);
   const drain = await drainEmbeddingJobs(store, provider);
-  if (!drain.complete) return { passed: false, error: `索引未完成（READY ${drain.readyCount}/${drain.activeCount}）` };
+  if (!drain.complete) return { passed: false, error: `索引未完成（READY ${drain.readyCount}/${drain.activeCount}）${drain.error ? `：${drain.error}` : ''}` };
   const alienProvider = { modelVersion: `${provider.modelVersion}#alien`, dimensions: provider.dimensions, embed: provider.embed };
   try {
     const ranked = await rankAssetsForContext(store, ACCOUNT_ID, CHARACTER_ID, SEMANTIC_CASES[0].query, alienProvider);
@@ -138,7 +149,10 @@ function renderReport(summary) {
   }
   lines.push('', '## 语义改写用例（混合召回层）', '', '| 用例 | 查询 | 预期 Top-3 | 实际候选 | 结论 |', '|---|---|---|---|---|');
   for (const item of summary.semantic) {
-    lines.push('| ' + item.case_id + ' | ' + item.query + ' | ' + item.expected_top3_asset_id + ' | ' + (item.recalled_asset_ids.join(', ') || '—') + ' | ' + item.status + (item.note ? '（' + item.note + '）' : '') + ' |');
+    // 索引未完成等失败路径没有候选数组；报告必须如实输出失败，不能因
+    // 展示层异常吞掉原始评测结论。
+    const recalled = Array.isArray(item.recalled_asset_ids) ? item.recalled_asset_ids : [];
+    lines.push('| ' + item.case_id + ' | ' + item.query + ' | ' + item.expected_top3_asset_id + ' | ' + (recalled.join(', ') || '—') + ' | ' + item.status + (item.note ? '（' + item.note + '）' : '') + ' |');
   }
   lines.push('', summary.passed ? '固定召回门禁通过。' : '固定召回门禁失败。');
   return lines.join('\n');

@@ -34,9 +34,14 @@ class DevelopmentStore {
     this.worldStateEvents = new Map();
     this.messageFeedback = new Map();
     this.trialFeedback = new Map();
+    this.notifications = new Map();
     this.ocImports = new Map();
     this.contentRightsReviews = new Map();
     this.contentRightsAppeals = new Map();
+    this.reviewerAccounts = new Map();
+    this.reviewerSessions = new Map();
+    this.dualApprovalRequests = new Map();
+    this.opsAuditEvents = new Map();
     this.contentRightsDecisions = new Map();
     this.ageReviewDecisions = new Map();
     this.idempotency = new Map();

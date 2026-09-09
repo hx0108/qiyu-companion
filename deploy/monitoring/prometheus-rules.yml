@@ -38,3 +38,10 @@ groups:
         annotations:
           summary: "图片任务滞留 {{ $value }} 个（检查 run-workers 图片推进队列）"
           runbook: "development/OPERATIONS_RUNBOOK.md#图片任务滞留"
+      - alert: QiyuProviderP99LatencyHigh
+        expr: qiyu_provider_latency_quantile_ms{quantile="0.99"} > 15000
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.provider }} 的 {{ $labels.capability }} P99 超过 15 秒"
+          runbook: "development/OPERATIONS_RUNBOOK.md#供应商失败率告警"

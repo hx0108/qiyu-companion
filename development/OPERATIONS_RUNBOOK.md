@@ -2,6 +2,8 @@
 
 ## 指标采集
 
+**当前封测补偿控制：人工巡检，不是 Prometheus 已接入。** Compose 尚未部署 Prometheus/Alertmanager；每次试用前及每日检查 API/Worker 健康、`/internal/provider-health`、待处理删除/图片任务、Worker 错误日志与宿主磁盘。只有独立导出和告警服务实际运行后，才可改写为“监控已接入”。
+
 - 端点：`GET /internal/metrics`（Prometheus 文本格式；与其它 `/internal/*` 相同的审核员 Bearer 边界，未授权返回 401）。
 - 指标族：`qiyu_provider_calls_total{capability,provider,outcome}`、`qiyu_provider_latency_ms_sum{capability,provider}`、`qiyu_dead_letters_open{queue}`、`qiyu_deletion_jobs_pending`、`qiyu_image_jobs_inflight`。
 - 指标不含消息正文与个人数据；label 只有枚举值。

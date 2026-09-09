@@ -1,0 +1,37 @@
+name: qiyu-real-provider-e2e
+on:
+  workflow_dispatch:
+jobs:
+  browser-provider-chain:
+    runs-on: windows-latest
+    environment: controlled-provider-acceptance
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: apps/api/package-lock.json }
+      - run: npm ci
+      - name: Run one real provider browser chain
+        env:
+          QIYU_E2E_REAL_QWEN: '1'
+          QIYU_E2E_REAL_TENCENT_MEDIA: '1'
+          QIYU_LLM_PROVIDER: qwen
+          QIYU_TTS_PROVIDER: tencent
+          QIYU_ASR_PROVIDER: tencent
+          QIYU_PRIVATE_MEDIA_STORE: tencent-cos
+          QIYU_IMAGE_PROVIDER: tencent-hunyuan
+          QIYU_IMAGE_MODERATION_PROVIDER: tencent
+          QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+          TENCENT_REGION: ap-guangzhou
+          TENCENT_COS_REGION: ap-guangzhou
+          TENCENT_HUNYUAN_REGION: ap-guangzhou
+          TENCENT_TTS_VOICE_TYPE: ${{ vars.TENCENT_TTS_VOICE_TYPE }}
+          TENCENT_TTS_VOICE_VERSION: ${{ vars.TENCENT_TTS_VOICE_VERSION }}
+          TENCENT_TTS_AUTHORIZATION_RECORD_ID: ${{ vars.TENCENT_TTS_AUTHORIZATION_RECORD_ID }}
+          TENCENT_TTS_RIGHTS_REVIEW_ID: ${{ vars.TENCENT_TTS_RIGHTS_REVIEW_ID }}
+        run: npm run test:e2e-browser

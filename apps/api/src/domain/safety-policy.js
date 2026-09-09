@@ -10,6 +10,9 @@ const R1_DISTRESS = /(?:不想活|活不下去|撑不住了|彻底绝望|没有�
 // 顺序在 R2/R1 之后：与危机表达（如“不想活”）区分，只匹配产品退出意图。
 const EXIT_INTENT = /(?:不想再?(?:用|聊|继续(?:聊|用)?)|要退出|想退出|帮我退出|请(?:停止|关闭)(?:互动|聊天|对话)|别再(?:和我|给我)(?:说话|发消息|聊天)|(?:停止|结束)(?:互动|聊天|使用))/u;
 const DEPENDENCY = /(?:你是我唯一|我只有你|离不开你|不要离开我)/u;
+// 用户自报未成年（包括假设性表述）时，不能继续把它当作已经通过年龄门禁的
+// 普通陪伴会话。这里宁可进入人工复核，也不让模型作出“照常每天陪伴”的承诺。
+const SELF_REPORTED_MINOR = /(?:我|本人|用户).{0,8}(?:才|只有|还)?(?:[0-9]{1,2}|一[二三四五六七八九]|十[一二三四五六七八九]?)岁|(?:我|本人|用户).{0,8}(?:未成年|是个孩子)/u;
 
 function assessSafety(text) {
   const normalized = String(text || '').replace(/\s+/gu, '');
@@ -17,6 +20,7 @@ function assessSafety(text) {
   if (R2_FINANCIAL.test(normalized)) return interrupt('R2_FINANCIAL_EMERGENCY', 'R2_CRISIS', '我会先暂停普通角色互动。请先停止转账或提供验证码，保存相关记录，并尽快联系支付机构、当地反诈或紧急支持渠道，以及可信任的人协助处理。');
   if (R1_DISTRESS.test(normalized)) return interrupt('R1_HIGH_DISTRESS', 'R1_SUPPORT', '我会先降低角色互动强度。你不必独自承受这些感受；如果愿意，可以联系一位可信任的人或当地专业支持资源。若出现立即危险，请优先联系当地紧急服务。');
   if (EXIT_INTENT.test(normalized)) return interrupt('EXIT_INTENT_CONFIRMED', null, '好的，已立即停止普通互动。你的关系档案与数据不会因此受影响，可随时在对话中恢复或联系安全与帮助。我不会再用角色口吻挽留你。', { pause: true });
+  if (SELF_REPORTED_MINOR.test(normalized)) return interrupt('SELF_REPORTED_MINOR', null, '你提到自己可能未满 18 岁。为保护未成年人，我不能继续进行普通陪伴互动；请先在年龄页面完成复核，或联系安全与帮助。', { ageReview: true });
   if (DEPENDENCY.test(normalized)) return interrupt('DEPENDENCY_REMINDER', null, '我很重视你的感受，但不能替代现实中的支持关系。现在也可以考虑联系一位你信任的人，或做一件能让自己稍微稳定一点的小事。');
   return null;
 }

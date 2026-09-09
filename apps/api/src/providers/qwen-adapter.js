@@ -41,7 +41,10 @@ class QwenAdapter {
           messages: buildMessages(text.trim(), context),
           enable_thinking: false,
           preserve_thinking: false,
-          stream: false
+          stream: false,
+          // qwen3.8-flash 支持 OpenAI-compatible json_object。仅结构化回复
+          // 启用它，避免影响摘要和普通文本调用；提示词同时明确要求 JSON。
+          ...(context?.response_schema ? { response_format: { type: 'json_object' } } : {})
         }),
         signal: controller.signal
       });
@@ -295,14 +298,21 @@ function summaryPrompt(previousSummary, messages) {
 
 function parseCompanionReply(value) {
   let reply;
-  try { reply = JSON.parse(value); } catch { throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效'); }
+  try { reply = JSON.parse(extractJsonObject(value)); } catch { throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效'); }
   const required = ['schema_version', 'reply_text', 'style_tags', 'emotion', 'speech', 'image_suggestion', 'world_state_patch_candidate', 'reality_action_candidate'];
-  if (!reply || typeof reply !== 'object' || Array.isArray(reply) || Object.keys(reply).length !== required.length || required.some((key) => !(key in reply))) throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效');
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply) || required.some((key) => !(key in reply))) throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效');
   if (reply.schema_version !== 'companion_reply.v1' || typeof reply.reply_text !== 'string' || !reply.reply_text.trim() || reply.reply_text.trim().length > 2000) throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效');
   if (!Array.isArray(reply.style_tags) || reply.style_tags.length > 5 || reply.style_tags.some((tag) => typeof tag !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(tag))) throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效');
   if (typeof reply.emotion !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/.test(reply.emotion)) throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效');
   if (!validEligibility(reply.speech, 'style') || !validEligibility(reply.image_suggestion, 'scene_code') || reply.world_state_patch_candidate !== null || reply.reality_action_candidate !== null) throw new QwenProviderError('QWEN_REPLY_SCHEMA_INVALID', 'Qwen 回复格式无效');
-  return Object.freeze({ ...reply, reply_text: reply.reply_text.trim(), fallback: false });
+  // 上游偶尔会附带无消费字段；在通过所有已消费字段的强校验后将其丢弃，
+  // 避免无关元数据触发降级，也防止未验证字段进入领域层。
+  return Object.freeze(Object.fromEntries(required.map((key) => [key, reply[key]]).concat([['reply_text', reply.reply_text.trim()], ['fallback', false]])));
+}
+function extractJsonObject(value) {
+  const trimmed = String(value || '').trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu);
+  return fenced ? fenced[1].trim() : trimmed;
 }
 function validEligibility(value, field) { return value && typeof value === 'object' && !Array.isArray(value) && typeof value.eligible === 'boolean' && (value[field] === null || (typeof value[field] === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(value[field]))); }
 function fallbackCompanionReply() { return Object.freeze({ schema_version: 'companion_reply.v1', reply_text: '我暂时无法整理出合适的回复。你可以换一种说法，或稍后再试。', style_tags: ['gentle'], emotion: 'calm', speech: { eligible: false, style: null }, image_suggestion: { eligible: false, scene_code: null }, world_state_patch_candidate: null, reality_action_candidate: null, fallback: true }); }

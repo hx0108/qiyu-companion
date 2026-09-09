@@ -1,0 +1,35 @@
+# postgres-exporter 自定义查询（PG 全实例汇总的补充维度）。
+# 标准实例指标（连接数/缓存/事务/WAL 等）由 exporter 内建收集，此处补充
+# 业务侧表规模与迁移账本，用于容量与发布状态观测。
+pg_postgres_size:
+  query: SELECT pg_database_size(current_database()) AS size_bytes
+  metrics:
+    - database_size_bytes:
+        usage: "GAUGE"
+        description: "当前数据库总大小（字节）"
+
+pg_table_row_estimates:
+  query: |
+    SELECT relname AS table_name, n_live_tup AS live_rows
+      FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 20
+  metrics:
+    - table_name:
+        usage: "LABEL"
+        description: "表名"
+    - live_rows:
+        usage: "GAUGE"
+        description: "估算行数（TOP 20 表）"
+
+pg_migration_ledger:
+  query: SELECT count(*)::float AS migrations_applied FROM schema_migrations
+  metrics:
+    - migrations_applied:
+        usage: "GAUGE"
+        description: "已应用迁移数（schema_migrations 账本）"
+
+pg_append_only_audit_rows:
+  query: SELECT count(*)::float AS audit_rows FROM ops_audit_events
+  metrics:
+    - audit_rows:
+        usage: "GAUGE"
+        description: "运营审计追加行总数（只增指标，回落即异常）"

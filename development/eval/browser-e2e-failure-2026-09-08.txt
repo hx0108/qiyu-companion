@@ -1,0 +1,7 @@
+page.waitForSelector: Timeout 45000ms exceeded.
+Call log:
+[2m  - waiting for locator('article.message.ai .bubble') to be visible[22m
+
+    at C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:120:18
+    at async step (C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:68:7)
+    at async main (C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:115:5)

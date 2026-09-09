@@ -105,6 +105,19 @@ test('Qwen structured reply retries one invalid response, then falls back withou
   assert.equal(result.reply.fallback, false);
 });
 
+test('Qwen structured reply requests JSON mode and safely ignores unconsumed upstream fields', async () => {
+  let request;
+  const adapter = new QwenAdapter({ apiKey: 'test-key', fetchImpl: async (url, options) => {
+    request = JSON.parse(options.body);
+    const reply = { ...validReply('格式正确'), upstream_trace: 'must-not-reach-domain' };
+    return { ok: true, json: async () => ({ id: 'structured', model: 'qwen3.8-flash', choices: [{ message: { content: `\`\`\`json\n${JSON.stringify(reply)}\n\`\`\`` } }], usage: {} }) };
+  } });
+  const result = await adapter.generateStructured({ text: '你好' });
+  assert.deepEqual(request.response_format, { type: 'json_object' });
+  assert.equal(result.reply.reply_text, '格式正确');
+  assert.equal(Object.hasOwn(result.reply, 'upstream_trace'), false);
+});
+
 test('QwenAdapter 把角色、有限历史与已确认资产组装进系统段与消息序列', async () => {
   let captured;
   const adapter = new QwenAdapter({

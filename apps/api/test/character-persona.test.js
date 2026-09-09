@@ -134,6 +134,17 @@ test('人格草稿只能经审核员评测、影子、受限灰度后发布，�
   assert.equal(oversized.body.error.code, 'PERSONA_CANARY_TRAFFIC_INVALID');
   const canary = await postReview('canary', { traffic_percent: 5, shadow_report_ref: 'shadow-pr-2' });
   assert.equal(canary.body.persona_version.state, 'CANARY');
+  // stable 发布受双人审批门保护：发布员申请，另一名具备权限的账号批准（不同账号）。
+  const blocked = await postReview('stable', { canary_report_ref: 'canary-pr-2' });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.body.error.code, 'DUAL_APPROVAL_REQUIRED');
+  const releaseLogin = await request(base, '/internal/auth/login', { method: 'POST', key: 'pr-login-1', body: { username: 'dev-release', password: 'dev-release-local-only' } });
+  assert.equal(releaseLogin.status, 201);
+  const approval = await request(base, '/internal/dual-approvals', { method: 'POST', token: releaseLogin.body.session_token, key: 'pr-appr', body: { action: 'PERSONA_STABLE_RELEASE', target_id: `${id}@v2`, reason: '灰度报告已复核，申请发布' } });
+  assert.equal(approval.status, 201);
+  const adminLogin = await request(base, '/internal/auth/login', { method: 'POST', key: 'pr-login-2', body: { username: 'dev-release-admin', password: 'dev-release-admin-local' } });
+  const approved = await request(base, `/internal/dual-approvals/${approval.body.dual_approval.approval_id}/decisions`, { method: 'POST', token: adminLogin.body.session_token, key: 'pr-appr-dec', body: { decision: 'APPROVE', reason: '第二审批人核对灰度报告' } });
+  assert.equal(approved.body.dual_approval.state, 'APPROVED');
   const stable = await postReview('stable', { canary_report_ref: 'canary-pr-2' });
   assert.equal(stable.body.persona_version.state, 'STABLE');
   assert.equal(stable.body.character.persona.personality, '更轻快，但仍尊重边界');

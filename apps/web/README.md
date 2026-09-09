@@ -32,6 +32,7 @@ node src\server.js
 
 - 浏览器从不本地判定 `AGE_PASS`、候选记忆确认、资产删除或删除完成。
 - 删除后会重新读取资产列表，且只展示 API 返回的删除任务；除 API 返回 `COMPLETED` 外绝不写“完成”。
-- 没有 `localStorage`、`sessionStorage` 或客户端 Mock 成功路径；主题仅为当前渲染会话的表现层状态。
+- 不使用 `localStorage`，也没有客户端 Mock 成功路径。封测会话令牌以 AES-GCM 密文保存在 `sessionStorage`，不可导出的密钥保存在 IndexedDB；安全存储不可用时不回退明文。主题仅为当前渲染会话的表现层状态。
+- PWA Service Worker 只缓存静态应用壳，明确排除 `/api`、`/internal` 与媒体请求；锁屏 Push 只显示通用文案，不携带关系内容、账号或事件类型。当前尚未接入真实 Push 订阅与投递供应商。
 - ASR 只接受腾讯一句话识别可用的短音频 MIME；浏览器端在服务端接受任务后立即释放其内存中的原始文件。转写确认只回填输入框，用户仍须手动发送；确认后原始音频删除状态来自 API。
 - 视觉变量通过相对引用复用 `designs/qiyu-v1-handoff/tokens/tokens.css`，移动主基线为 393px，控件最小触控尺寸为 44px。

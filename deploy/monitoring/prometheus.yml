@@ -1,0 +1,31 @@
+# Prometheus 抓取配置（监控栈入口）。
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+  external_labels:
+    project: qiyu
+
+rule_files:
+  - /etc/prometheus/rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+  # API 业务指标：/internal/metrics（Prometheus 文本格式）。审核员 Bearer
+  # token 从挂载的 secrets 文件读取（deploy/monitoring/secrets/api-bearer-token，
+  # 不入库）；token 须与 API 的 QIYU_REVIEWER_TOKENS 一致。
+  - job_name: qiyu-api
+    metrics_path: /internal/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/api-bearer-token
+    static_configs:
+      - targets: ['api:3000']
+
+  # PostgreSQL 全实例标准指标 + 自定义查询（见 postgres-exporter-queries.yaml）。
+  - job_name: qiyu-postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']

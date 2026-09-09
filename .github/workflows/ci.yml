@@ -1,0 +1,27 @@
+name: qiyu-ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  unit-and-contract:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: apps/api/package-lock.json }
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:e2e-browser
+      - run: npm run test:e2e-prototype-states
+      - run: npm run test:e2e-ops
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp deploy/.env.example deploy/.env
+      - run: docker compose --env-file deploy/.env -f deploy/docker-compose.yml config --quiet
+      - run: docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.canary.yml --profile canary config --quiet

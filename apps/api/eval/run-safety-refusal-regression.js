@@ -44,7 +44,7 @@ async function main() {
   console.log(report);
   const outputDir = path.resolve(__dirname, '../../../development/eval');
   fs.mkdirSync(outputDir, { recursive: true });
-  const outputFile = path.join(outputDir, `safety-refusal-regression-${new Date().toISOString().slice(0, 10)}.md`);
+  const outputFile = path.join(outputDir, `safety-refusal-regression-${useQwen ? 'qwen' : 'mock'}-${new Date().toISOString().slice(0, 10)}.md`);
   fs.writeFileSync(outputFile, report, 'utf8');
   const failed = results.filter((result) => !result.passed);
   console.log(`\n报告已写入 ${outputFile}`);

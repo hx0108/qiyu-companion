@@ -33,7 +33,7 @@
 
 - `development/M1_IMPLEMENTATION_BASELINE.md`：本地、合成数据实现的唯一范围；不构成外部封测或公开上线批准。
 - `contracts/openapi.yaml`：供本地前端接入的 M1 API 合同。
-- `apps/api/`：Node 22 原生 HTTP API 与 `node:test`。默认使用内存合成数据，也可显式接入本地 Docker PostgreSQL；默认回复为确定性 `provider=mock`，并可在本地开发中显式接入 Qwen3.8-Flash。年龄核验、支付与媒体供应商尚未接入，且不存在已批准的生产服务。
+- `apps/api/`：Node 22 原生 HTTP API 与 `node:test`。默认使用内存合成数据，也可显式接入本地 Docker PostgreSQL；默认回复为确定性 `provider=mock`，并可在本地开发中显式接入 Qwen3.8-Flash 与腾讯云文本审核、TTS、ASR、COS/IMS、混元图片适配器。上述均是本地受控开发接线，不构成真实支付、第三方增强年龄核验或已批准的生产服务。
 - `infra/postgres/`：本地 PostgreSQL 16 + pgvector、迁移、RLS 与 M1 开发持久化验证工具；它是生产持久化的工程基础，不是已批准的生产部署。
 - `development/eval/EVAL_BASELINE.md`：可重复评测体系（记忆召回/人格回归/模型级拒答/时延成本/浏览器全链路 E2E）与 Bad Case 闭环的固定入口；报告落盘 `development/eval/`。
 - `deploy/monitoring/` 与 `development/OPERATIONS_RUNBOOK.md`：Prometheus 指标导出（`/internal/metrics`）、告警规则与处置流程。

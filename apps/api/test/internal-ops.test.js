@@ -156,13 +156,48 @@ test('线下收款人工发放：按订阅周期入账→用户可用→撤销�
   const beforeRevokeEntitlements = await request(base, '/api/v1/entitlements');
   assert.equal(beforeRevokeEntitlements.body.entitlements.find((item) => item.capability === 'IMAGE_GENERATION').committed_quantity, 1);
 
-  // 撤销：模拟全额退款。周期退出有效聚合（append-only 账本仍可审计），新预留失败。
+  // 撤销：模拟全额退款。双人审批门——未批准前直接撤销被拒（409）。
+  const blockedRevoke = await internal(base, `/internal/subscriptions/${granted.body.subscription.subscription_id}/revoke`, {
+    method: 'POST', key: 'mg-revoke-blocked', body: { reason: '用户申请退款，已原路退回 39 元' }
+  });
+  assert.equal(blockedRevoke.status, 409);
+  assert.equal(blockedRevoke.body.error.code, 'DUAL_APPROVAL_REQUIRED');
+
+  // 审批流：安全管理员（真实登录会话）申请 → 另一名具备权限的审核员批准 → 执行。
+  const secadminLogin = await request(base, '/internal/auth/login', { method: 'POST', key: 'mg-login-1', body: { username: 'dev-secadmin', password: 'dev-secadmin-local-only' } });
+  assert.equal(secadminLogin.status, 201);
+  const secadminToken = secadminLogin.body.session_token;
+  const approvalRequest = await request(base, '/internal/dual-approvals', {
+    method: 'POST', token: secadminToken, key: 'mg-approval',
+    body: { action: 'SUBSCRIPTION_MANUAL_REVOKE', target_id: granted.body.subscription.subscription_id, reason: '用户申请退款，线下转账已原路退回' }
+  });
+  assert.equal(approvalRequest.status, 201);
+  const releaseAdminLogin = await request(base, '/internal/auth/login', { method: 'POST', key: 'mg-login-2', body: { username: 'dev-release-admin', password: 'dev-release-admin-local' } });
+  assert.equal(releaseAdminLogin.status, 201);
+  // 自我批准被拒：申请人自己不能批准。
+  const selfApprove = await request(base, `/internal/dual-approvals/${approvalRequest.body.dual_approval.approval_id}/decisions`, {
+    method: 'POST', token: secadminToken, key: 'mg-self-approve', body: { decision: 'APPROVE', reason: '自己批自己' }
+  });
+  assert.equal(selfApprove.status, 409);
+  assert.equal(selfApprove.body.error.code, 'SELF_APPROVAL_FORBIDDEN');
+  const approved = await request(base, `/internal/dual-approvals/${approvalRequest.body.dual_approval.approval_id}/decisions`, {
+    method: 'POST', token: releaseAdminLogin.body.session_token, key: 'mg-approve', body: { decision: 'APPROVE', reason: '核对退款凭证无误' }
+  });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.body.dual_approval.state, 'APPROVED');
+
   const revoked = await internal(base, `/internal/subscriptions/${granted.body.subscription.subscription_id}/revoke`, {
     method: 'POST', key: 'mg-revoke', body: { reason: '用户申请退款，已原路退回 39 元' }
   });
   assert.equal(revoked.status, 200);
   assert.equal(revoked.body.subscription.state, 'REVOKED');
   assert.equal(revoked.body.subscription.refund_status, 'FULL');
+
+  // 审计留痕：登录、申请、批准、执行、撤销全程可审计，且为只读追加。
+  const audit = await internal(base, '/internal/audit-events?action=SUBSCRIPTION_REVOKED');
+  assert.equal(audit.status, 200);
+  assert.equal(audit.body.audit_events.length, 1);
+  assert.equal(audit.body.audit_events[0].after.state, 'REVOKED');
 
   const afterRevoke = await request(base, `/api/v1/characters/${characterId}/image-jobs`, { method: 'POST', key: 'mg-job-2', body: sceneBody });
   assert.equal(afterRevoke.body.image_job.failure_code, 'ENTITLEMENT_QUOTA_EXCEEDED');
@@ -172,6 +207,21 @@ test('线下收款人工发放：按订阅周期入账→用户可用→撤销�
   const finalImage = finalEntitlements.body.entitlements.find((item) => item.capability === 'IMAGE_GENERATION');
   assert.equal(finalImage.granted_quantity, 0);
   assert.equal(finalImage.available_quantity, 0);
+});
+
+test('运营只读队列覆盖投诉、安全事件与删除异常，且拒绝用户令牌', async (t) => {
+  const { DevelopmentStore } = require('../src/domain/store');
+  const store = new DevelopmentStore();
+  const account = store.accounts.get('acct_dev_alice');
+  account.safety_mode = 'R2_CRISIS';
+  store.complaints.set('cpl_ops', { complaint_id: 'cpl_ops', account_id: account.account_id, kind: 'SAFETY', description: '需要人工跟进', state: 'OPEN', created_at: '2026-09-09T00:00:00.000Z', updated_at: '2026-09-09T00:00:00.000Z' });
+  store.deletionJobs.set('del_failed', { deletion_job_id: 'del_failed', account_id: account.account_id, scope: 'ACCOUNT', state: 'FAILED', physical_cleanup_state: 'FAILED', created_at: '2026-09-09T00:00:00.000Z' });
+  store.deletionTargets.set('dt_failed', { deletion_target_id: 'dt_failed', deletion_job_id: 'del_failed', account_id: account.account_id, target_type: 'MEDIA_OBJECT', state: 'FAILED', attempts: 3, last_error_code: 'UPSTREAM_TIMEOUT', updated_at: '2026-09-09T00:01:00.000Z' });
+  const base = await start(t, { store });
+  assert.equal((await internal(base, '/internal/complaints')).body.complaints.length, 1);
+  assert.equal((await internal(base, '/internal/safety-events')).body.safety_events[0].safety_mode, 'R2_CRISIS');
+  assert.equal((await internal(base, '/internal/deletion-exceptions')).body.deletion_exceptions[0].failed_targets.length, 1);
+  assert.equal((await request(base, '/internal/complaints')).status, 401);
 });
 
 test('摘要死信仅向审核员暴露无正文元数据，带理由且最多可重放一次', async (t) => {

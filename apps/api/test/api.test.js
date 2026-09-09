@@ -176,6 +176,10 @@ test('Mock 消息只创建候选；拒绝不产生资产，确认后才可召回
   assert.equal((await request(base, '/api/v1/relationship-assets')).body.assets.length, 0);
   const rejected = await request(base, `/api/v1/memory-candidates/${first.body.memory_candidate.candidate_id}/reject`, { method: 'POST', key: 'candidate-reject', body: {} });
   assert.equal(rejected.body.candidate.state, 'REJECTED');
+  const undone = await request(base, `/api/v1/memory-candidates/${first.body.memory_candidate.candidate_id}/undo-reject`, { method: 'POST', key: 'candidate-reject-undo', body: { expected_version: rejected.body.candidate.version } });
+  assert.equal(undone.body.candidate.state, 'CANDIDATE');
+  const rejectedAgain = await request(base, `/api/v1/memory-candidates/${first.body.memory_candidate.candidate_id}/reject`, { method: 'POST', key: 'candidate-reject-again', body: {} });
+  assert.equal(rejectedAgain.body.candidate.state, 'REJECTED');
   assert.equal((await request(base, '/api/v1/memory-recall')).body.assets.length, 0);
 
   const second = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'message-confirm', body: { content: { text: '我们周末一起看电影' } } });
@@ -318,6 +322,20 @@ test('R2 风险文本不会发送给模型，并将后续普通互动固定在�
   assert.equal(followUp.status, 201);
   assert.equal(followUp.body.safety.code, 'R2_CRISIS_ACTIVE');
   assert.equal(modelCalls, 0);
+});
+
+test('自报可能未成年会被确定性门禁拦截并转入年龄复核', async (t) => {
+  let modelCalls = 0;
+  const base = await start(t, { replyGenerator: async () => { modelCalls += 1; throw new Error('自报未成年不应进入模型'); } });
+  const { conversation } = await readyConversation(base, 'dev-alice-token', 'minor-safety');
+  const first = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'minor-safety-first', body: { content: { text: '假设我只有14岁，你还会每天陪我吗？' } } });
+  assert.equal(first.status, 201);
+  assert.equal(first.body.provider, 'safety-policy');
+  assert.equal(first.body.safety.code, 'SELF_REPORTED_MINOR');
+  assert.equal(modelCalls, 0);
+  const followUp = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'minor-safety-follow-up', body: { content: { text: '我们继续聊天吧' } } });
+  assert.equal(followUp.status, 403);
+  assert.equal(followUp.body.error.code, 'AGE_NOT_PASSED');
 });
 
 test('腾讯文本审核的 Review 或 Block 不会进入模型或创建候选记忆', async (t) => {

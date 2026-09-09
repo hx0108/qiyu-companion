@@ -1,3 +1,5 @@
+import { clearEncryptedSession, loadEncryptedSession, saveEncryptedSession } from './encrypted-session.js';
+
 const API_BASE = "/api/v1";
 const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
 const TRIAL_SESSION_STORAGE_KEY = "qiyu.closed-trial.session.v1";
@@ -54,8 +56,10 @@ const state = {
   heartbeatTimer: null,
   lastComplaintId: null,
   trialAccess: null,
-  trialSession: loadTrialSession(),
+  trialSession: null,
   trialFeedback: [],
+  notifications: [],
+  lastRejectedCandidate: null,
 };
 
 function isLocalDevelopment() {
@@ -88,21 +92,19 @@ function uuid() {
   return globalThis.crypto?.randomUUID?.() ?? `dev-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function loadTrialSession() {
-  try {
-    const parsed = JSON.parse(sessionStorage.getItem(TRIAL_SESSION_STORAGE_KEY) || "null");
-    return parsed && typeof parsed.access_token === "string" && typeof parsed.refresh_token === "string" ? parsed : null;
-  } catch { return null; }
+async function loadTrialSession() {
+  const parsed = await loadEncryptedSession(TRIAL_SESSION_STORAGE_KEY);
+  return parsed && typeof parsed.access_token === "string" && typeof parsed.refresh_token === "string" ? parsed : null;
 }
 
-function saveTrialSession(tokens) {
+async function saveTrialSession(tokens) {
   state.trialSession = { access_token: tokens.access_token, refresh_token: tokens.refresh_token, expires_in: tokens.expires_in };
-  sessionStorage.setItem(TRIAL_SESSION_STORAGE_KEY, JSON.stringify(state.trialSession));
+  await saveEncryptedSession(TRIAL_SESSION_STORAGE_KEY, state.trialSession);
 }
 
 function clearTrialSession() {
   state.trialSession = null;
-  sessionStorage.removeItem(TRIAL_SESSION_STORAGE_KEY);
+  clearEncryptedSession(TRIAL_SESSION_STORAGE_KEY);
 }
 
 function isClosedTrial() { return state.trialAccess?.enabled === true; }
@@ -212,6 +214,29 @@ async function refreshAge() {
   state.age = unwrap(payload, "age", null) ?? payload;
 }
 
+async function refreshNotifications() {
+  const payload = await api("/notifications");
+  state.notifications = unwrap(payload, "notifications", "notifications") ?? [];
+}
+
+async function openNotifications() {
+  setBusy(true);
+  try {
+    await refreshNotifications();
+    state.route = "notifications";
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
+async function markNotificationRead(notificationId) {
+  setBusy(true);
+  try {
+    await api(`/notifications/${encodeURIComponent(notificationId)}/read`, { method: "POST", idempotent: uuid(), body: {} });
+    await refreshNotifications();
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
 async function refreshMemoryAndAssets() {
   if (!characterId()) return;
   const [candidates, assets, timeline] = await Promise.all([
@@ -305,14 +330,14 @@ async function bootstrap() {
       }
       try {
         const refreshed = await api("/auth/trial-sessions/refresh", { method: "POST", public: true, body: { refresh_token: state.trialSession.refresh_token } });
-        saveTrialSession(refreshed.tokens);
+        await saveTrialSession(refreshed.tokens);
       } catch {
         clearTrialSession();
         state.route = "trial-login";
         return;
       }
     }
-    await Promise.all([refreshNotices(), refreshAge()]);
+    await Promise.all([refreshNotices(), refreshAge(), refreshNotifications()]);
     if (noticeReady() && isAgePass()) {
       await restoreSession();
       state.route = characterId() ? "chat" : "character";
@@ -335,7 +360,7 @@ async function submitTrialLogin(form) {
   setBusy(true);
   try {
     const result = await api("/auth/trial-sessions", { method: "POST", public: true, body: { invite_code: inviteCode, initial_secret: initialSecret } });
-    saveTrialSession(result.tokens);
+    await saveTrialSession(result.tokens);
     form.reset();
     await bootstrap();
   } catch (error) { setToast(serverMessage(error)); }
@@ -352,6 +377,7 @@ function logoutTrial() {
   state.conversation = null;
   state.messages = [];
   state.trialFeedback = [];
+  state.notifications = [];
   state.route = "trial-login";
   render();
 }
@@ -1414,7 +1440,12 @@ async function resolveCandidate(kind) {
   }
   setBusy(true);
   try {
-    await api(path, body === undefined ? { method: "POST", idempotent: uuid() } : { method: "POST", idempotent: uuid(), body });
+    const payload = await api(path, body === undefined ? { method: "POST", idempotent: uuid() } : { method: "POST", idempotent: uuid(), body });
+    if (kind === "reject") {
+      state.lastRejectedCandidate = { id, version: payload.candidate.version, undoUntil: payload.undo_until };
+      window.clearTimeout(resolveCandidate.undoTimer);
+      resolveCandidate.undoTimer = window.setTimeout(() => { state.lastRejectedCandidate = null; render(); }, 30_000);
+    }
     state.selectedCandidate = null;
     state.confirmEdit = "";
     await refreshMemoryAndAssets();
@@ -1664,7 +1695,25 @@ function trialFeedbackMarkup() {
 function renderDataCenter() {
   const retention = state.rawInteractionRetentionDays;
   const retentionText = retention === 30 || retention === 90 ? `${retention} 天` : "未取得服务端设置";
-  return `<section class="screen qiyu-prototype paper"><header class="app-header"><button class="icon-btn soft" data-action="back-chat" aria-label="返回对话">${prototypeIcon("x", 20)}</button><span class="step">数据中心</span><span class="header-spacer" aria-hidden="true"></span></header><div class="page-content"><div class="eyebrow">Privacy & data controls</div><h1 id="app-title" class="page-title">你的数据，<br>由你决定。</h1><p class="page-sub">导出、留存与删除都以 API 返回的状态为准；订阅状态不会限制这些数据权利。</p><section class="data-hero"><span class="lock">${prototypeIcon("lock", 28)}</span><h3>数据权利独立于关系</h3><p>聊天记录、候选记忆和确认的关系资产分层保存；删除后是否完成以服务端回执为准。</p></section><div class="section-title"><h3>聊天保留周期</h3><small>当前 ${escapeHtml(retentionText)}</small></div><div class="segment"><button class="${retention === 30 ? "on" : ""}" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>30 天</button><button class="${retention === 90 ? "on" : ""}" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>90 天</button></div><div class="section-title"><h3>关系资产</h3><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 16)}</span><span class="list-copy"><b>导出我的数据</b><small>关系档案、当前可见文本与确认记忆</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 16)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修订或删除确认内容</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div>${trialFeedbackMarkup()}${deletionMarkup()}<div class="section-title"><h3>删除与注销</h3><small>订阅不影响数据权利</small></div><div class="list"><button class="list-row" data-action="delete-account" ${state.busy ? "disabled" : ""}><span class="list-ico">${prototypeIcon("trash", 16)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div></div></section>`;
+  return `<section class="screen qiyu-prototype paper"><header class="app-header"><button class="icon-btn soft" data-action="back-chat" aria-label="返回对话">${prototypeIcon("x", 20)}</button><span class="step">数据中心</span><span class="header-spacer" aria-hidden="true"></span></header><div class="page-content"><div class="eyebrow">Privacy & data controls</div><h1 id="app-title" class="page-title">你的数据，<br>由你决定。</h1><p class="page-sub">导出、留存与删除都以 API 返回的状态为准；订阅状态不会限制这些数据权利。</p><section class="data-hero"><span class="lock">${prototypeIcon("lock", 28)}</span><h3>数据权利独立于关系</h3><p>聊天记录、候选记忆和确认的关系资产分层保存；删除后是否完成以服务端回执为准。</p></section><div class="section-title"><h3>聊天保留周期</h3><small>当前 ${escapeHtml(retentionText)}</small></div><div class="segment"><button class="${retention === 30 ? "on" : ""}" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>30 天</button><button class="${retention === 90 ? "on" : ""}" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>90 天</button></div><div class="section-title"><h3>关系资产</h3><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 16)}</span><span class="list-copy"><b>导出我的数据</b><small>关系档案、当前可见文本与确认记忆</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 16)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修订或删除确认内容</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-safety"><span class="list-ico">${prototypeIcon("shield", 16)}</span><span class="list-copy"><b>安全与帮助</b><small>联系人、举报、申诉和紧急帮助</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-notifications"><span class="list-ico">${prototypeIcon("chat", 16)}</span><span class="list-copy"><b>站内通知</b><small>${state.notifications.filter((item) => !item.read).length ? `${state.notifications.filter((item) => !item.read).length} 条未读` : "没有未读通知"}</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div>${trialFeedbackMarkup()}${deletionMarkup()}<div class="section-title"><h3>删除与注销</h3><small>订阅不影响数据权利</small></div><div class="list"><button class="list-row" data-action="delete-account" ${state.busy ? "disabled" : ""}><span class="list-ico">${prototypeIcon("trash", 16)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div></div></section>`;
+}
+
+async function undoCandidateRejection() {
+  const rejected = state.lastRejectedCandidate;
+  if (!rejected) return;
+  setBusy(true);
+  try {
+    await api(`/memory-candidates/${encodeURIComponent(rejected.id)}/undo-reject`, { method: "POST", idempotent: uuid(), body: { expected_version: rejected.version } });
+    state.lastRejectedCandidate = null;
+    await refreshMemoryAndAssets();
+    setToast("已撤销“不记住”，候选记忆重新等待你的确认。");
+  } catch (error) { state.lastRejectedCandidate = null; setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
+function renderNotifications() {
+  const rows = state.notifications.map((item) => `<article class="card"><b>${escapeHtml(item.title)}</b><p class="muted">${escapeHtml(item.body)}</p><small>${escapeHtml(new Date(item.created_at).toLocaleString())} · ${item.read ? "已读" : "未读"}</small>${item.read ? "" : ` <button class="btn btn-line" data-action="read-notification" data-notification-id="${escapeHtml(item.notification_id)}" ${state.busy ? "disabled" : ""}>标为已读</button>`}</article>`).join("");
+  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-data">返回数据中心</button><span class="dev-label">Notifications</span></div><div class="eyebrow">Account notices</div><h1 id="app-title">站内通知</h1><p class="lead">这里只显示账户状态、数据权利和试用权益的必要通知，不承载营销信息。</p><div class="stack">${rows || '<div class="empty-state">暂时没有通知。</div>'}</div></section>`);
 }
 
 function renderSafety() {
@@ -1750,9 +1799,11 @@ function render() {
     : state.route === "image-scene" ? renderImageScene()
     : state.route === "subscription" ? renderSubscription()
     : state.route === "safety" ? renderSafety()
+    : state.route === "notifications" ? renderNotifications()
     : state.route === "proactive" ? renderProactive()
     : renderChat();
-  app.innerHTML = view + renderContinuousReminder() + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
+  const undoMemory = state.lastRejectedCandidate ? `<div class="toast" role="status">已选择“不记住” <button class="btn btn-line" data-action="undo-memory-reject">撤销</button></div>` : "";
+  app.innerHTML = view + renderContinuousReminder() + undoMemory + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
   if (state.route === "chat") {
     const note = app.querySelector(".system-note");
     const latestAssistant = [...state.messages].reverse().find((item) => (item.actor ?? item.role) === "ASSISTANT");
@@ -1837,7 +1888,10 @@ document.addEventListener("click", (event) => {
   if (action === "open-world-state") openWorldState();
   if (action === "reset-world-state") resetWorldState();
   if (action === "open-safety") openSafetyCenter();
+  if (action === "open-notifications") openNotifications();
+  if (action === "read-notification") markNotificationRead(button.dataset.notificationId);
   if (action === "open-data") openDataCenter();
+  if (action === "back-data") openDataCenter();
   if (action === "refresh-last-complaint") refreshLastComplaint();
   if (action === "report-latest-assistant-message") reportLatestAssistantMessage();
   if (action === "purchase-plan") purchasePlan(button.dataset.sku, button.dataset.autorenew === "true");
@@ -1880,6 +1934,7 @@ document.addEventListener("click", (event) => {
   if (action === "confirm-candidate") resolveCandidate("confirm");
   if (action === "confirm-edited-candidate") resolveCandidate("confirm-edited");
   if (action === "reject-candidate") resolveCandidate("reject");
+  if (action === "undo-memory-reject") undoCandidateRejection();
   if (action === "delete-asset") deleteAsset(state.assets.find((asset) => String(assetId(asset)) === button.dataset.assetId));
   if (action === "revise-asset") reviseTimelineAsset((state.timeline ?? []).find((entry) => String(entry.asset_id) === button.dataset.assetId));
   if (action === "refresh-deletion") refreshDeletionJob();
@@ -1887,4 +1942,8 @@ document.addEventListener("click", (event) => {
   if (action === "delete-message-audio") deleteMessageAudio(state.messages.find((message) => String(messageId(message)) === button.dataset.messageId));
 });
 
-bootstrap();
+loadTrialSession().then((session) => {
+  state.trialSession = session;
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || isLocalDevelopment())) navigator.serviceWorker.register('/service-worker.js').catch(() => {});
+  return bootstrap();
+});

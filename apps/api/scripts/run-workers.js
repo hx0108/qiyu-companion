@@ -32,6 +32,7 @@ const { createTencentCosPrivateImageStoreFromEnvironment } = require('../src/med
 const { createTencentCosPrivateMediaStoreFromEnvironment } = require('../src/media/tencent-cos-private-media-store');
 const { LocalPrivateMediaStore } = require('../src/media/local-private-media-store');
 const { fetchTencentGeneratedImage } = require('../src/media/tencent-image-result-fetcher');
+const { scheduleAccountNotifications } = require('../src/domain/notification-scheduler');
 const pg = require('pg');
 
 function parseArgs(argv) {
@@ -204,6 +205,22 @@ async function main() {
         await runAccountDeletionCleanup(scoped, account, job, { mediaStore, imageStore: imageDeps?.imageStore || null });
         console.log(`[worker] 账户注销清理 ${job.deletion_job_id} → ${job.state}（${job.physical_cleanup_state}）`);
       }).catch((error) => console.error(`[worker] 账户 ${accountId} 注销清理失败：`, error.message));
+    }
+
+    const notificationAccounts = await discoverAccounts(`
+      SELECT account_id FROM accounts
+      WHERE account_status IN ('OPEN', 'CLOSING')
+         OR EXISTS (SELECT 1 FROM deletion_jobs d WHERE d.account_id = accounts.account_id AND d.scope = 'ACCOUNT' AND d.state = 'COMPLETED')`);
+    for (const accountId of notificationAccounts) {
+      const scheduled = await store.withAccountTransaction(accountId, async (scoped) => {
+        const account = [...scoped.accounts.values()][0];
+        return account ? scheduleAccountNotifications(scoped, account, new Date()).length : 0;
+      }).catch((error) => {
+        console.error(`[worker] 账户 ${accountId} 通知调度失败：`, error.message);
+        return 0;
+      });
+      if (scheduled > 0) console.log(`[worker] 账户 ${accountId}：通知 +${scheduled}`);
+      worked += scheduled;
     }
 
     if (cleanupWorker) {

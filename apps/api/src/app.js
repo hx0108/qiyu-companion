@@ -28,6 +28,9 @@ const { recordOperationMetric, providerName, providerModelVersion, moderateTextW
 const { invalidateSummaries, validSummary } = require('./domain/conversation-summary');
 const { cancelConversationSummaryJobs, enqueueConversationSummary, replayConversationSummaryDeadLetter } = require('./domain/conversation-summary-worker');
 const { DEVELOPMENT_EMBEDDING_MODEL_VERSION, cosineSimilarity, deterministicEmbedding, enqueueAssetEmbedding, invalidateAssetEmbedding, replayAssetEmbeddingDeadLetter, startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
+const { scheduleAccountNotifications } = require('./domain/notification-scheduler');
+const { buildCostReport, parseRateCard } = require('./domain/cost-accounting');
+const reviewerIdentity = require('./domain/reviewer-identity');
 
 const TOKENS = new Map([
   ['dev-alice-token', 'acct_dev_alice'],
@@ -59,6 +62,9 @@ const STATIC_FILES = new Map([
   ['/', { file: path.resolve(__dirname, '../../web/index.html'), type: 'text/html; charset=utf-8' }],
   ['/favicon.svg', { file: path.resolve(__dirname, '../../web/favicon.svg'), type: 'image/svg+xml' }],
   ['/app.js', { file: path.resolve(__dirname, '../../web/app.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/encrypted-session.js', { file: path.resolve(__dirname, '../../web/encrypted-session.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/manifest.webmanifest', { file: path.resolve(__dirname, '../../web/manifest.webmanifest'), type: 'application/manifest+json; charset=utf-8' }],
+  ['/service-worker.js', { file: path.resolve(__dirname, '../../web/service-worker.js'), type: 'text/javascript; charset=utf-8' }],
   ['/styles.css', { file: path.resolve(__dirname, '../../web/styles.css'), type: 'text/css; charset=utf-8' }],
   ['/prototype-restoration.css', { file: path.resolve(__dirname, '../../web/prototype-restoration.css'), type: 'text/css; charset=utf-8' }],
   ['/assets/qiyu-character.png', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/prototype/imgs/qiyu-character.png'), type: 'image/png' }],
@@ -85,7 +91,9 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const status = error.status || 500;
       send(res, status, { error: {
         code: error.code || 'INTERNAL_ERROR',
-        message: error.expose ? error.message : '开发服务发生未预期错误',
+        // 域层主动抛出的 API 错误带 status/code（如登录失败、权限不足、状态机
+        // 拒绝），如实透出；未预期的崩溃仍隐藏细节。
+        message: error.expose || error.status ? error.message : '开发服务发生未预期错误',
         request_id: requestId,
         retryable: Boolean(error.retryable),
         details: error.details || {}
@@ -122,13 +130,38 @@ async function route(context) {
   // 运营内部接口（技术设计 8.10）：独立审核员身份，与用户 Bearer 体系完全分离；
   // 生产部署须独立域名 + MFA + RBAC（迁移 024 的 qiyu_reviewer 角色已对齐）。
   if (path.startsWith('/internal/')) {
-    const reviewer = requireReviewer(req);
+    seedDevelopmentReviewerAccounts(store);
+    const ops = reviewerOpsFor(store);
+    // 登录换取会话令牌：唯一的免鉴权内部接口（失败计数/锁定/审计在域层/仓库）。
+    if (method === 'POST' && path === '/internal/auth/login') {
+      if (process.env.QIYU_DEBUG_LOGIN) {
+        const dbg = [...store.reviewerAccounts.values()].find((entry) => entry.username === String(body?.username || '').toLowerCase());
+        console.error('[login-req]', JSON.stringify({ username: body?.username, password_len: String(body?.password || '').length, totp: body?.totp_code, found: Boolean(dbg), state: dbg?.state, mfa: dbg?.mfa_required, attempts: dbg?.failed_login_attempts, locked: dbg?.locked_until, verify: dbg ? require('./domain/reviewer-identity').verifyPassword(body?.password, dbg.password_hash) : null }));
+      }
+      return created(await ops.login({ username: body?.username, password: body?.password, totp_code: body?.totp_code, ip: requestIp(req) }));
+    }
+    const reviewer = await requireReviewer(req, store);
+    for (const [routeMethod, pattern, permission] of INTERNAL_ROUTE_PERMISSIONS) {
+      if (method === routeMethod && pattern.test(path)) requirePermission(reviewer, permission);
+    }
+    if (method === 'POST' && path === '/internal/auth/logout') return ok({ revoked: await ops.revokeSession(String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')) });
+    if (method === 'GET' && path === '/internal/auth/session') return ok({ reviewer, roles: reviewer.roles ?? [], note: '会话令牌有效期 8 小时，吊销后立即失效。' });
+    if (method === 'GET' && path === '/internal/audit-events') return listOpsAuditEvents(store, ops, url, reviewer);
+    if (method === 'GET' && path === '/internal/dual-approvals') return listDualApprovals(ops, url);
+    if (method === 'POST' && path === '/internal/dual-approvals') return idempotent(context, { account_id: `reviewer:${reviewer.reviewer_id}` }, () => createDualApproval(store, ops, reviewer, body));
+    if (method === 'POST' && /^\/internal\/dual-approvals\/[^/]+\/decisions$/.test(path)) return idempotent(context, { account_id: `reviewer:${reviewer.reviewer_id}` }, () => decideDualApproval(store, ops, reviewer, path, body));
+    if (method === 'POST' && path === '/internal/reviewer-accounts') return idempotent(context, { account_id: `reviewer:${reviewer.reviewer_id}` }, () => createReviewerAccountRoute(store, reviewer, body));
+    if (method === 'GET' && /^\/internal\/age-reviews\/[^/]+\/sensitive-material$/.test(path)) return viewAgeSensitiveMaterial(store, reviewer, path, req);
     if (method === 'GET' && path === '/internal/content-rights-reviews') return listInternalContentRightsReviews(store, url);
     if (method === 'POST' && /^\/internal\/content-rights-reviews\/[^/]+\/decisions$/.test(path)) return idempotent(context, { account_id: `reviewer:${reviewer.reviewer_id}` }, () => decideInternalContentRightsReview(store, reviewer, path, body));
     if (method === 'GET' && path === '/internal/deletion-jobs') return listInternalDeletionJobs(store, url);
+    if (method === 'GET' && path === '/internal/deletion-exceptions') return listInternalDeletionExceptions(store);
+    if (method === 'GET' && path === '/internal/complaints') return listInternalComplaints(store, url);
+    if (method === 'GET' && path === '/internal/safety-events') return listInternalSafetyEvents(store);
     if (method === 'GET' && path === '/internal/provider-health') return internalProviderHealth(store);
     if (method === 'GET' && path === '/internal/feature-flags') return internalFeatureFlags(featureFlags);
     if (method === 'GET' && path === '/internal/metrics') return internalMetricsText(store);
+    if (method === 'GET' && path === '/internal/cost-report') return internalCostReport(store);
     if (method === 'GET' && path === '/internal/conversation-summary-dead-letters') return listInternalConversationSummaryDeadLetters(store);
     if (method === 'POST' && /^\/internal\/conversation-summary-dead-letters\/[^/]+\/replay$/.test(path)) return idempotent(context, { account_id: 'reviewer:' + reviewer.reviewer_id }, () => replayInternalConversationSummaryDeadLetter(store, reviewer, path, body));
     if (method === 'GET' && path === '/internal/asset-embedding-dead-letters') return listInternalAssetEmbeddingDeadLetters(store);
@@ -231,7 +264,7 @@ async function route(context) {
     return idempotent(context, account, () => deleteMediaAsset(store, account, path, mediaStore, imageStore));
   }
   if (method === 'GET' && path === '/api/v1/memory-candidates') return ok({ candidates: ownCandidates(store, account.account_id) });
-  if (method === 'POST' && /^\/api\/v1\/memory-candidates\/[^/]+\/(confirm|confirm-edited|reject)$/.test(path)) {
+  if (method === 'POST' && /^\/api\/v1\/memory-candidates\/[^/]+\/(confirm|confirm-edited|reject|undo-reject)$/.test(path)) {
     return idempotent(context, account, () => resolveCandidate(store, account, path, body));
   }
   if (method === 'GET' && path === '/api/v1/relationship-assets') return ok({ assets: activeAssets(store, account.account_id) });
@@ -291,6 +324,11 @@ function declareAge(account, body) {
     account.age_status = 'AGE_PASS';
     account.age_reason_codes = [];
     account.declared_date_of_birth = body.date_of_birth;
+    // 敏感材料按需解密（运营台）：配置密钥时同时落一份 AES-GCM 封装，
+    // 队列视图永不返回原文，复核员调取走 /internal/age-reviews/{id}/sensitive-material（先留痕后解密）。
+    if (/^[0-9a-fA-F]{64}$/.test(String(process.env.QIYU_OPS_MATERIAL_KEY || ''))) {
+      account.age_material_envelope = reviewerIdentity.encryptMaterial(JSON.stringify({ date_of_birth: body.date_of_birth, declared_at: new Date().toISOString() }));
+    }
   }
   return ok(ageStatus(account));
 }
@@ -364,10 +402,16 @@ function publicOcImport(value) { return { import_id: value.import_id, state: val
 function publicContentRightsReview(value) { return { review_id: value.review_id, subject_type: value.subject_type, subject_ref: value.subject_ref, declaration_version: value.declaration_version, risk_codes: value.risk_codes, state: value.state, decision_reason: value.decision_reason, appeal_available: ['REVIEW_REQUIRED', 'REJECTED'].includes(value.state), created_at: value.created_at, updated_at: value.updated_at }; }
 
 // ---- 运营内部接口（技术设计 8.10 开发实现）----
-// 审核员身份：开发内置 token，可用 QIYU_REVIEWER_TOKENS="token:reviewer_id,..." 覆盖。
-// 生产为独立域名 + MFA + 数据库身份（迁移 024 的 qiyu_reviewer / 身份表）；本进程
-// 已被生产门禁禁止以生产身份运行，故该内置身份只在本地开发存在。
-const DEFAULT_REVIEWER_IDENTITIES = Object.freeze(new Map([['reviewer-dev-token', Object.freeze({ reviewer_id: 'rev_dev_0001', display_name: '开发审核员' })]]));
+// 审核员身份两级：
+//   1) 账号体系（正式路径）：POST /internal/auth/login 用用户名 + 密码（scrypt）
+//      + TOTP（启用 MFA 的账号）换取会话令牌 ops_*；失败锁定与会话吊销见
+//      domain/reviewer-identity.js；RBAC 角色矩阵同文件 PERMISSION_ROLES。
+//   2) 静态开发 token（仅开发环境）：QIYU_REVIEWER_TOKENS="token:reviewer_id,..."，
+//      持有全部角色以便本地单进程回归；生产部署（独立域名 + MFA + 迁移 055
+//      的 qiyu_reviewer 数据库会话）不得依赖该路径。
+// 诚实边界：单人项目的“审核员/发布员/安全管理员”是逻辑角色——双人审批要求
+// 两个不同账号，但不构成真实组织内的职责分离。
+const DEFAULT_REVIEWER_IDENTITIES = Object.freeze(new Map([['reviewer-dev-token', Object.freeze({ reviewer_id: 'rev_dev_0001', display_name: '开发审核员', roles: [...reviewerIdentity.ROLES] })]]));
 
 function reviewerIdentities() {
   const fromEnvironment = process.env.QIYU_REVIEWER_TOKENS;
@@ -375,16 +419,87 @@ function reviewerIdentities() {
   const identities = new Map();
   for (const pair of fromEnvironment.split(',')) {
     const [token, reviewerId] = pair.split(':').map((part) => part && part.trim());
-    if (token && reviewerId && /^[A-Za-z0-9._-]{1,64}$/.test(reviewerId)) identities.set(token, Object.freeze({ reviewer_id: reviewerId, display_name: `审核员 ${reviewerId}` }));
+    if (token && reviewerId && /^[A-Za-z0-9._-]{1,64}$/.test(reviewerId)) identities.set(token, Object.freeze({ reviewer_id: reviewerId, display_name: `审核员 ${reviewerId}`, roles: [...reviewerIdentity.ROLES] }));
   }
   return identities.size > 0 ? identities : DEFAULT_REVIEWER_IDENTITIES;
 }
 
-function requireReviewer(req) {
+function requestIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.socket?.remoteAddress || null;
+}
+
+// 审核员操作后端：Postgres 模式用迁移 055 的仓库（行锁/RLS/追加写触发器），
+// 内存开发模式用域层实现——两条路径语义一致，路由不感知存储。
+function reviewerOpsFor(store) {
+  if (store.reviewerIdentity) return store.reviewerIdentity;
+  return {
+    login: (input) => reviewerIdentity.loginReviewer(store, input),
+    authenticateSession: (token, options) => reviewerIdentity.authenticateReviewerSession(store, token, options),
+    revokeSession: (token) => reviewerIdentity.revokeReviewerSession(store, token),
+    listDualApprovals: async (state) => [...store.dualApprovalRequests.values()]
+      .filter((request) => !state || request.state === state)
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
+    createApproval: async (input) => reviewerIdentity.createApprovalRequest(store, input),
+    decideApproval: async (input) => reviewerIdentity.decideApprovalRequest(store, input),
+    requireApprovedFor: async (input) => reviewerIdentity.requireApprovedRequestFor(store, input),
+    markExecuted: async (approval, executedBy) => reviewerIdentity.markExecuted(store, approval, { executed_by: executedBy }),
+    listAudit: async ({ action, limit = 500 } = {}) => [...store.opsAuditEvents.values()]
+      .filter((event) => !action || event.action === action)
+      .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+      .slice(0, limit)
+  };
+}
+
+async function requireReviewer(req, store) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const identity = token && reviewerIdentities().get(token);
+  if (!token) throw apiError(401, 'REVIEWER_AUTH_REQUIRED', '需要有效的运营审核员身份');
+  if (token.startsWith('ops_')) {
+    const session = await reviewerOpsFor(store).authenticateSession(token);
+    if (!session) throw apiError(401, 'REVIEWER_AUTH_REQUIRED', '会话无效、已过期或已吊销');
+    return session;
+  }
+  const identity = reviewerIdentities().get(token);
   if (!identity) throw apiError(401, 'REVIEWER_AUTH_REQUIRED', '需要有效的运营审核员身份');
   return identity;
+}
+
+function requirePermission(reviewer, permission) {
+  if (!reviewerIdentity.can(reviewer, permission)) {
+    throw apiError(403, 'PERMISSION_DENIED', `该操作需要 ${permission} 权限（当前角色：${(reviewer.roles || []).join('+') || '无'}）`);
+  }
+}
+
+// 内部路由权限矩阵：方法 + 路径模式 → 所需权限（登录接口除外）。
+const INTERNAL_ROUTE_PERMISSIONS = [
+  ['GET', /^\/internal\/age-reviews$/, 'VIEW_QUEUES'],
+  ['POST', /^\/internal\/age-reviews\/[^/]+\/decisions$/, 'DECIDE_AGE_REVIEW'],
+  ['GET', /^\/internal\/age-reviews\/[^/]+\/sensitive-material$/, 'VIEW_SENSITIVE_MATERIAL'],
+  ['GET', /^\/internal\/content-rights-reviews$/, 'VIEW_QUEUES'],
+  ['POST', /^\/internal\/content-rights-reviews\/[^/]+\/decisions$/, 'DECIDE_CONTENT_RIGHTS'],
+  ['GET', /^\/internal\/conversation-summary-dead-letters$/, 'VIEW_QUEUES'],
+  ['POST', /^\/internal\/conversation-summary-dead-letters\/[^/]+\/replay$/, 'REPLAY_DLQ'],
+  ['GET', /^\/internal\/asset-embedding-dead-letters$/, 'VIEW_QUEUES'],
+  ['POST', /^\/internal\/asset-embedding-dead-letters\/[^/]+\/replay$/, 'REPLAY_DLQ'],
+  ['POST', /^\/internal\/subscriptions\/manual-grant$/, 'GRANT_SUBSCRIPTION'],
+  ['POST', /^\/internal\/subscriptions\/[^/]+\/revoke$/, 'REVOKE_SUBSCRIPTION'],
+  ['POST', /^\/internal\/persona-versions\/[^/]+\/\d+\/stable$/, 'RELEASE_PERSONA']
+];
+
+// 开发种子账号（仅 DevelopmentStore；PG 模式用 scripts/seed-ops-reviewer.js 供给）：
+// 密码为公开的开发口令，生产部署禁止复用。MFA 由种子脚本为正式账号强制启用。
+function seedDevelopmentReviewerAccounts(store) {
+  if (!store.reviewerAccounts || typeof store.resolveAccountId === 'function') return;
+  // 按固定 reviewer_id 判断是否已播种——不能以 size>0 判断（测试可能先注入自己的账号）。
+  const seeds = [
+    { reviewer_id: 'rev_dev_0001', username: 'dev-reviewer', password: 'dev-reviewer-local-only', roles: ['REVIEWER'], display_name: '开发审核员' },
+    { reviewer_id: 'rev_dev_0002', username: 'dev-release', password: 'dev-release-local-only', roles: ['RELEASE'], display_name: '开发发布员' },
+    { reviewer_id: 'rev_dev_0003', username: 'dev-secadmin', password: 'dev-secadmin-local-only', roles: ['SECURITY_ADMIN'], display_name: '开发安全管理员' },
+    { reviewer_id: 'rev_dev_0004', username: 'dev-release-admin', password: 'dev-release-admin-local', roles: ['RELEASE', 'SECURITY_ADMIN'], display_name: '开发发布兼安全管理员（E2E 双人审批第二人）' }
+  ];
+  for (const seed of seeds) {
+    if (!store.reviewerAccounts.has(seed.reviewer_id)) reviewerIdentity.createReviewerAccount(store, seed);
+  }
 }
 
 // 队列视图：给审核员看判断所需的最小材料。OC 原文只给截断摘要（技术设计：
@@ -597,6 +712,18 @@ function internalMetricsText(store) {
   lines.push('# HELP qiyu_image_jobs_inflight 处于 PENDING/RUNNING 的图片任务数（滞留告警口径）');
   lines.push('# TYPE qiyu_image_jobs_inflight gauge');
   lines.push(`qiyu_image_jobs_inflight ${stuckImageJobs}`);
+  let costReport = { rows: [] };
+  try { costReport = buildCostReport([...store.operationMetrics?.values() ?? []], parseRateCard(process.env.QIYU_COST_RATE_CARD_JSON)); } catch { /* cost endpoint exposes invalid configuration explicitly */ }
+  lines.push('# HELP qiyu_provider_latency_quantile_ms 供应商调用时延分位数（当前内存窗口）');
+  lines.push('# TYPE qiyu_provider_latency_quantile_ms gauge');
+  lines.push('# HELP qiyu_provider_estimated_cost_fen 依据配置费率估算的成本（分）');
+  lines.push('# TYPE qiyu_provider_estimated_cost_fen gauge');
+  for (const row of costReport.rows) {
+    for (const [quantile, value] of [['0.50', row.p50_latency_ms], ['0.90', row.p90_latency_ms], ['0.99', row.p99_latency_ms]]) {
+      lines.push(`qiyu_provider_latency_quantile_ms{capability="${escapeLabel(row.capability)}",provider="${escapeLabel(row.provider)}",quantile="${quantile}"} ${value}`);
+    }
+    lines.push(`qiyu_provider_estimated_cost_fen{capability="${escapeLabel(row.capability)}",provider="${escapeLabel(row.provider)}"} ${row.estimated_cost_fen}`);
+  }
   return { status: 200, body: `${lines.join('\n')}\n`, contentType: 'text/plain; version=0.0.4; charset=utf-8' };
 }
 
@@ -646,6 +773,56 @@ function decideInternalAgeReview(store, reviewer, path, body) {
   return ok({ decision: { decision_id: record.decision_id, account_id: accountId, decision, reviewer_id: reviewer.reviewer_id, created_at: record.created_at }, age_status: account.age_status, note: '复核结论已留痕；申诉材料与本决策记录按 30 天留存策略清理。' });
 }
 
+// ---- 审核员身份 / 双人审批 / 运营审计（域层与 PG 仓库共用路由层）----
+async function listOpsAuditEvents(store, ops, url, reviewer) {
+  requirePermission(reviewer, 'VIEW_AUDIT');
+  const action = url.searchParams.get('action');
+  const events = await ops.listAudit({ action });
+  return ok({ audit_events: events, note: '运营审计为追加写：本接口只读，仓库不提供更新/删除入口（PG 侧由迁移 055 触发器强制）。' });
+}
+
+async function listDualApprovals(ops, url) {
+  const state = url.searchParams.get('state');
+  const validStates = ['REQUESTED', 'APPROVED', 'EXECUTED', 'REJECTED', 'EXPIRED'];
+  if (state && !validStates.includes(state)) throw apiError(400, 'VALIDATION_ERROR', `state 只能是 ${validStates.join('/')}`);
+  const requests = await ops.listDualApprovals(state);
+  return ok({ dual_approvals: requests.map(({ payload_json, ...rest }) => ({ ...rest, payload: payload_json ? JSON.parse(payload_json) : null })), actions: Object.entries(reviewerIdentity.DUAL_CONTROLLED_ACTIONS).map(([action, spec]) => ({ action, ...spec })) });
+}
+
+async function createDualApproval(store, ops, reviewer, body) {
+  const request = await ops.createApproval({ action: body?.action, target_id: body?.target_id, payload: body?.payload, requested_by: reviewer.reviewer_id, requester_roles: reviewer.roles, reason: body?.reason });
+  return created({ dual_approval: { ...request, payload: request.payload_json ? JSON.parse(request.payload_json) : null }, note: '需另一名具备对应权限的审核员批准后才可执行（同一自然人多账号不构成真实职责分离）。' });
+}
+
+async function decideDualApproval(store, ops, reviewer, path, body) {
+  const request = await ops.decideApproval({ approval_id: path.split('/')[3], reviewer_id: reviewer.reviewer_id, reviewer_roles: reviewer.roles, decision: body?.decision === 'APPROVE' ? 'APPROVE' : body?.decision === 'REJECT' ? 'REJECT' : body?.decision, reason: body?.reason });
+  return ok({ dual_approval: { ...request } });
+}
+
+function createReviewerAccountRoute(store, reviewer, body) {
+  requirePermission(reviewer, 'MANAGE_REVIEWERS');
+  const mfaRequired = body?.mfa_required === true;
+  const mfaSecret = mfaRequired ? reviewerIdentity.generateTotpSecret() : (body?.mfa_secret || null);
+  const account = reviewerIdentity.createReviewerAccount(store, {
+    reviewer_id: body?.reviewer_id, username: body?.username, password: body?.password, display_name: body?.display_name,
+    roles: body?.roles, mfa_required: mfaRequired, mfa_secret: mfaSecret
+  });
+  reviewerIdentity.appendOpsAudit(store, { actor_type: 'REVIEWER', actor_id: reviewer.reviewer_id, action: 'REVIEWER_ACCOUNT_CREATED', resource_type: 'REVIEWER_ACCOUNT', resource_id: account.reviewer_id, after: { username: account.username, roles: account.roles, mfa_required: account.mfa_required } });
+  // MFA 密钥只在创建响应中出现一次（不在任何存储/日志中重复出现）。
+  return created({ reviewer: reviewerIdentity.publicAccount(account), mfa: mfaRequired ? { secret: account.mfa_secret, otpauth_uri: reviewerIdentity.totpUri(account) } : null });
+}
+
+function viewAgeSensitiveMaterial(store, reviewer, path, req) {
+  const accountId = decodeAccountId(path.split('/')[3]);
+  const account = store.accounts.get(accountId);
+  if (!account) throw apiError(404, 'RESOURCE_NOT_FOUND', '账户不存在');
+  if (!account.age_material_envelope) throw apiError(404, 'RESOURCE_NOT_FOUND', '该账户没有按需解密的材料封装（申报发生在配置 QIYU_OPS_MATERIAL_KEY 之前，或未产生有效申报）');
+  const plaintext = reviewerIdentity.viewSensitiveMaterial(store, {
+    reviewer, material_type: 'AGE_DECLARATION', resource_id: accountId, envelope: account.age_material_envelope, ip: requestIp(req)
+  });
+  return ok({ account_id: accountId, material: JSON.parse(plaintext), note: '本次调取已写入运营审计（SENSITIVE_MATERIAL_VIEWED，先留痕后解密）。' });
+}
+
 // ---- 封测期线下收款：人工发放订阅周期（PRD 9.4 可退款预订阅路径）----
 // 发放走真实订阅周期（channel=MANUAL_OFFLINE_PAYMENT），从而复用到期、撤销与
 // 权益账本的全部既有语义；撤销后当期已用量不回收，新预留立即失败。
@@ -679,6 +856,7 @@ function manualGrantSubscription(store, reviewer, body) {
   const mediaService = new MediaEntitlementService({ store });
   const grant = mediaService.grantSubscriptionCycle({ subscription, product: plan, sourceEventId: `manual-${subscription.subscription_id}` });
   recordNotification(store, accountId, {
+    dedupeKey: `SUBSCRIPTION_MANUAL_GRANT:${subscription.subscription_id}`,
     type: 'SUBSCRIPTION_MANUAL_GRANT',
     title: '订阅已由运营人工开通',
     body: `订阅（${plan.sku}）已按线下收款人工开通并按完整周期入账；本通知为账户级知情记录，不自动续费。`
@@ -686,18 +864,23 @@ function manualGrantSubscription(store, reviewer, body) {
   return created({ subscription, order, entitlement_id: grant.entitlement_id, note: '线下收款人工发放：按完整订阅周期入账，撤销走 /internal/subscriptions/{id}/revoke。' });
 }
 
-function revokeSubscriptionManually(store, reviewer, path, body) {
+async function revokeSubscriptionManually(store, reviewer, path, body) {
   const subscription = store.subscriptions.get(path.split('/')[3]);
   if (!subscription) throw apiError(404, 'RESOURCE_NOT_FOUND', '订阅不存在');
   if (subscription.channel !== 'MANUAL_OFFLINE_PAYMENT') throw apiError(409, 'STATE_TRANSITION_INVALID', '仅线下人工发放的订阅可由运营撤销');
   if (subscription.state === 'REVOKED') return ok({ subscription, note: '订阅已处于撤销状态。' });
   if (subscription.state !== 'ACTIVE') throw apiError(409, 'STATE_TRANSITION_INVALID', '当前状态不能撤销');
+  // 双人审批（SUBSCRIPTION_MANUAL_REVOKE）：另一名安全管理员批准后才可执行。
+  const ops = reviewerOpsFor(store);
+  const approval = await ops.requireApprovedFor({ action: 'SUBSCRIPTION_MANUAL_REVOKE', target_id: subscription.subscription_id, reviewer_id: reviewer.reviewer_id });
   const reason = requiredText(body?.reason, 'reason');
   if (reason.length > 1000) throw apiError(400, 'VALIDATION_ERROR', 'reason 超过 1000 字');
   subscription.state = 'REVOKED';
   subscription.refund_status = 'FULL';
   subscription.updated_at = new Date().toISOString();
-  subscription.manual_revoke = { reviewer_id: reviewer.reviewer_id, reason, revoked_at: subscription.updated_at };
+  subscription.manual_revoke = { reviewer_id: reviewer.reviewer_id, reason, revoked_at: subscription.updated_at, approval_id: approval.approval_id };
+  await ops.markExecuted(approval, reviewer.reviewer_id);
+  reviewerIdentity.appendOpsAudit(store, { actor_type: 'REVIEWER', actor_id: reviewer.reviewer_id, action: 'SUBSCRIPTION_REVOKED', resource_type: 'SUBSCRIPTION', resource_id: subscription.subscription_id, before: { state: 'ACTIVE' }, after: { state: 'REVOKED', refund_status: 'FULL' }, reason });
   return ok({ subscription, note: '已撤销：新额度预留立即失败，当期已用量不回收；退款请按原收款渠道退回。' });
 }
 
@@ -752,8 +935,11 @@ function canaryPersonaVersion(store, reviewer, path, body) {
   replacePersonaVersion(character, updated);
   return ok({ persona_version: publicPersonaVersion(updated) });
 }
-function stabilizePersonaVersion(store, reviewer, path, body) {
+async function stabilizePersonaVersion(store, reviewer, path, body) {
   const { character, entry } = internalPersonaVersion(store, path);
+  // 双人审批（PERSONA_STABLE_RELEASE）：stable 是面向全部用户的不可逆发布动作。
+  const ops = reviewerOpsFor(store);
+  const approval = await ops.requireApprovedFor({ action: 'PERSONA_STABLE_RELEASE', target_id: `${character.character_id}@v${entry.version}`, reviewer_id: reviewer.reviewer_id });
   let updated;
   try { updated = personaRelease.promoteStable(entry, { reviewerId: reviewer.reviewer_id, canaryReportRef: body?.canary_report_ref }); } catch (error) { releaseApiError(error); }
   const priorStable = character.persona_history.find((item) => item.state === 'STABLE' && item.version !== updated.version);
@@ -762,6 +948,8 @@ function stabilizePersonaVersion(store, reviewer, path, body) {
   character.persona = updated.persona;
   character.version = updated.version;
   character.active_persona_version = updated.version;
+  await ops.markExecuted(approval, reviewer.reviewer_id);
+  reviewerIdentity.appendOpsAudit(store, { actor_type: 'REVIEWER', actor_id: reviewer.reviewer_id, action: 'PERSONA_RELEASED_STABLE', resource_type: 'PERSONA_VERSION', resource_id: `${character.character_id}@v${updated.version}`, after: { state: 'STABLE' }, reason: `approval=${approval.approval_id}` });
   return ok({ persona_version: publicPersonaVersion(updated), character: publicCharacter(character) });
 }
 function rollbackPersonaVersion(store, reviewer, path, body) {
@@ -1587,6 +1775,12 @@ function createModelAuthorityGuardResponse(store, account, conversation, text, a
 
 function createSafetyResponse(store, account, conversation, text, safety) {
   if (safety.safetyMode) account.safety_mode = safety.safetyMode;
+  // 自报可能未成年不是由模型判断；固定门禁把账户打回 AGE_REVIEW，
+  // 后续普通互动由既有 authorize/evaluateAccess 拦截，数据权利入口仍可用。
+  if (safety.ageReview) {
+    account.age_status = 'AGE_REVIEW';
+    account.age_reason_codes = ['SELF_REPORTED_MINOR'];
+  }
   // AC-10：退出意图立即暂停普通互动；数据权利与恢复入口保持可用。
   if (safety.pause) account.user_pause_state = 'PAUSED';
   const userMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'USER', text, provider: null, ai_generated: false, created_at: new Date().toISOString() };
@@ -1987,11 +2181,20 @@ function resolveCandidate(store, account, path, body) {
   const parts = path.split('/');
   const candidate = ownCandidate(store, account.account_id, parts[4]);
   const action = parts[5];
+  if (action === 'undo-reject') {
+    if (candidate.state !== 'REJECTED') throw apiError(409, 'STATE_TRANSITION_INVALID', '仅刚刚拒绝的候选记忆可撤销');
+    if (body?.expected_version !== candidate.version) throw apiError(409, 'VERSION_CONFLICT', '候选记忆版本冲突');
+    if (!candidate.rejection_undo_until || Date.now() > new Date(candidate.rejection_undo_until).getTime()) throw apiError(409, 'MEMORY_REJECTION_UNDO_EXPIRED', '撤销窗口已结束');
+    candidate.state = 'CANDIDATE'; candidate.version += 1; candidate.rejected_at = null; candidate.rejection_undo_until = null;
+    return ok({ candidate });
+  }
   if (candidate.state !== 'CANDIDATE') throw apiError(409, 'STATE_TRANSITION_INVALID', '候选记忆已处理');
   if (new Date(candidate.expires_at).getTime() <= Date.now()) { candidate.state = 'EXPIRED'; throw apiError(409, 'STATE_TRANSITION_INVALID', '候选记忆已过期'); }
   if (action === 'reject') {
-    candidate.state = 'REJECTED'; candidate.version += 1;
-    return ok({ candidate });
+    const rejectedAt = new Date();
+    candidate.state = 'REJECTED'; candidate.version += 1; candidate.rejected_at = rejectedAt.toISOString();
+    candidate.rejection_undo_until = new Date(rejectedAt.getTime() + 30_000).toISOString();
+    return ok({ candidate, undo_until: candidate.rejection_undo_until });
   }
   if (body.expected_version !== candidate.version) throw apiError(409, 'VERSION_CONFLICT', '候选记忆版本冲突');
   if (action === 'confirm-edited') {
@@ -2531,17 +2734,18 @@ function optionalHour(value) {
 }
 
 // ---- 站内通知（P2-10）：账户级知情通知。当前写点：注销已启动、线下订阅人工授予。----
-function recordNotification(store, accountId, { type, title, body }) {
+function recordNotification(store, accountId, { type, title, body, dedupeKey = `legacy:${type}:${randomUUID()}` }) {
   if (!store.notifications) store.notifications = new Map();
   const notification = {
-    notification_id: store.next('ntf'), account_id: accountId,
-    type, title, body, read: false, created_at: new Date().toISOString()
+    notification_id: store.next('ntf'), account_id: accountId, dedupe_key: dedupeKey,
+    type, title, body, read: false, read_at: null, created_at: new Date().toISOString()
   };
   store.notifications.set(notification.notification_id, notification);
   return notification;
 }
 
 function listNotifications(store, account) {
+  scheduleAccountNotifications(store, account, new Date());
   const items = [...store.notifications?.values() ?? []]
     .filter((item) => item.account_id === account.account_id)
     .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))
@@ -2553,7 +2757,59 @@ function readNotification(store, account, path) {
   const notification = [...store.notifications?.values() ?? []].find((item) => item.account_id === account.account_id && item.notification_id === path.split('/')[4]);
   if (!notification) throw apiError(404, 'RESOURCE_NOT_FOUND', '通知不存在');
   notification.read = true;
+  notification.read_at = notification.read_at || new Date().toISOString();
   return ok({ notification });
+}
+
+function internalCostReport(store) {
+  let rateCard = {};
+  try { rateCard = parseRateCard(process.env.QIYU_COST_RATE_CARD_JSON); }
+  catch { throw apiError(503, 'COST_RATE_CARD_INVALID', 'QIYU_COST_RATE_CARD_JSON 不是有效费率表'); }
+  const report = buildCostReport([...store.operationMetrics?.values() ?? []], rateCard, {
+    p99_latency_ms: Number(process.env.QIYU_ALERT_P99_LATENCY_MS || 15000),
+    failure_rate: Number(process.env.QIYU_ALERT_FAILURE_RATE || 0.05),
+    cost_per_success_fen: process.env.QIYU_ALERT_UNIT_COST_FEN === undefined ? null : Number(process.env.QIYU_ALERT_UNIT_COST_FEN)
+  });
+  return ok({ ...report, currency: 'CNY_FEN', rate_card_configured: Object.keys(rateCard).length > 0, note: '金额为调用埋点乘供应商费率表的估算值；供应商账单需用 reconcile-provider-bill.js 对账后才是结算证据。' });
+}
+
+function listInternalDeletionExceptions(store) {
+  const exceptions = [...store.deletionJobs.values()]
+    .filter((job) => job.state === 'FAILED' || String(job.physical_cleanup_state || '').includes('FAIL'))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .map((job) => ({
+      deletion_job_id: job.deletion_job_id, account_id: job.account_id, scope: job.scope,
+      state: job.state, physical_cleanup_state: job.physical_cleanup_state, created_at: job.created_at,
+      failed_targets: [...store.deletionTargets.values()]
+        .filter((target) => target.deletion_job_id === job.deletion_job_id && target.state === 'FAILED')
+        .map(({ deletion_target_id, target_type, attempts, last_error_code, updated_at }) => ({ deletion_target_id, target_type, attempts, last_error_code, updated_at }))
+    }));
+  return ok({ deletion_exceptions: exceptions, note: '只读异常队列；重试仍由删除 Worker 的确定性状态机执行。' });
+}
+
+function listInternalComplaints(store, url) {
+  const state = url.searchParams.get('state');
+  const complaints = [...store.complaints.values()]
+    .filter((item) => !state || item.state === state)
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    .map((item) => ({
+      complaint_id: item.complaint_id, account_id: item.account_id, kind: item.kind,
+      target_resource_id: item.target_resource_id, description_preview: String(item.description || '').slice(0, 200),
+      state: item.state, resolution_note: item.resolution_note, created_at: item.created_at, updated_at: item.updated_at
+    }));
+  return ok({ complaints, note: '默认仅展示投诉描述前 200 字；本开发台暂不提供无审计的直接结案操作。' });
+}
+
+function listInternalSafetyEvents(store) {
+  const events = [...store.accounts.values()]
+    .filter((account) => account.safety_mode !== 'R0_NORMAL' || account.age_status === 'AGE_REVIEW')
+    .map((account) => ({
+      account_id: account.account_id, safety_mode: account.safety_mode, age_status: account.age_status,
+      service_mode: account.service_mode, user_pause_state: account.user_pause_state,
+      reason_codes: account.age_reason_codes ?? [], review_requested_at: account.age_review_requested_at ?? null,
+      revocation_epoch: account.revocation_epoch
+    }));
+  return ok({ safety_events: events, note: '安全模式由确定性策略设置；运营台只观察，不能绕过安全状态机。' });
 }
 
 // ---- 账户注销：二次确认后立即停止互动与召回；生产清理按删除任务编排。----
@@ -2581,6 +2837,7 @@ function requestAccountDeletion(store, account, body) {
   // P0 删除编排：登记逐数据域删除账本；回执经 GET /deletion-jobs/:id 可见。
   registerAccountDeletionTargets(store, account, deletionJob, deletionJob.created_at);
   recordNotification(store, account.account_id, {
+    dedupeKey: `ACCOUNT_DELETION_STARTED:${deletionJob.deletion_job_id}`,
     type: 'ACCOUNT_DELETION_STARTED',
     title: '账户注销已启动',
     body: '互动与召回已立即停止。数据清理将在 24 小时内由后台完成，备份最长保留 30 天；删除回执可在数据中心查看。'

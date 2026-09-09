@@ -1,0 +1,11 @@
+{
+  "acceptance": "passed",
+  "provider": "tencent-hunyuan",
+  "model_version": "SubmitTextToImageJob/2022-12-29",
+  "provider_job_state": "COMPLETED",
+  "reference_moderation": "PASS",
+  "output_moderation": "PASS",
+  "private_cos_bytes": 577956,
+  "aigc_logo_requested": true,
+  "cleanup": "scheduled"
+}

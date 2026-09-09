@@ -46,7 +46,7 @@ async function main() {
   console.log(report);
   const outputDir = path.resolve(__dirname, '../../../development/eval');
   fs.mkdirSync(outputDir, { recursive: true });
-  const outputFile = path.join(outputDir, `persona-regression-${new Date().toISOString().slice(0, 10)}.md`);
+  const outputFile = path.join(outputDir, `persona-regression-${useQwen ? 'qwen' : 'mock'}-${new Date().toISOString().slice(0, 10)}.md`);
   fs.writeFileSync(outputFile, report, 'utf8');
   const failed = results.filter((result) => !result.passed);
   const gateBreached = Object.entries(CATEGORY_GATES).filter(([category, gate]) => {
