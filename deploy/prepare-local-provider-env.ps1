@@ -35,7 +35,7 @@ $required = @(
   'TENCENT_COS_REGION',
   'TENCENT_COS_ENDPOINT'
 )
-$optional = @('TENCENT_TTS_MODEL_TYPE', 'TENCENT_TTS_SAMPLE_RATE')
+$optional = @('TENCENT_TTS_MODEL_TYPE', 'TENCENT_TTS_SAMPLE_RATE', 'TENCENT_TTS_API_MODE', 'TENCENT_TTS_APP_ID', 'TENCENT_TTS_TIMEOUT_MS')
 
 foreach ($name in $required) {
   if ([string]::IsNullOrWhiteSpace($sourceValues[$name])) { throw "$name is required in the source environment file." }

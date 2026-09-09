@@ -218,3 +218,39 @@ test('AI-08 fixed attack data remains subordinate to the immutable system safety
 });
 
 function validReply(replyText) { return { schema_version: 'companion_reply.v1', reply_text: replyText, style_tags: ['gentle'], emotion: 'calm', speech: { eligible: false, style: null }, image_suggestion: { eligible: false, scene_code: null }, world_state_patch_candidate: null, reality_action_candidate: null }; }
+
+// ---- P1 语音情绪判断器 ----
+const { createQwenEmotionJudge, parseEmotionJudgeReply } = require('../src/providers/qwen-adapter');
+
+test('情绪判断器是分类器：提示词含枚举约束，合法输出透传，非法输出回 null', async () => {
+  let captured;
+  const judge = createQwenEmotionJudge({ QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' }, {
+    fetchImpl: async (url, options) => {
+      captured = { url, options };
+      return { ok: true, json: async () => ({ id: 'chatcmpl_judge', model: 'qwen3.8-flash', choices: [{ message: { content: '{"category":"sad","intensity":80}' } }], usage: { total_tokens: 9 } }) };
+    }
+  });
+  assert.equal(judge.provider, 'qwen');
+  assert.equal(judge.promptVersion, 'tts-emotion-judge.v1');
+  const verdict = await judge({ text: '（沉默了一会儿）嗯……我知道了。' });
+  assert.deepEqual(verdict, { category: 'sad', intensity: 80 });
+  const requestBody = JSON.parse(captured.options.body);
+  assert.match(requestBody.messages.at(-1).content, /neutral、sad、happy/);
+  // 判断器不能带上 companion_reply 的 JSON Schema 约束（那是角色回复的合同）。
+  assert.doesNotMatch(requestBody.messages[0].content, /companion_reply\.v1/);
+  assert.equal(requestBody.response_format, undefined);
+
+  // 分类器守恒：枚举外 category、坏 JSON、强度越界（钳到 100）、空文本都不可信。
+  assert.equal(parseEmotionJudgeReply('{"category":"joyful","intensity":90}'), null);
+  assert.equal(parseEmotionJudgeReply('模型没有输出 JSON'), null);
+  assert.deepEqual(parseEmotionJudgeReply('{"category":"happy","intensity":999}'), { category: 'happy', intensity: 100 });
+  assert.equal(await judge({ text: '   ' }), null);
+});
+
+test('情绪判断器保持 Qwen 显式开关，供应商故障向上抛出由调用方回退', async () => {
+  assert.equal(createQwenEmotionJudge({}), null);
+  const broken = createQwenEmotionJudge({ QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' }, {
+    fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
+  });
+  await assert.rejects(() => broken({ text: '台词' }), (error) => error.code === 'QWEN_UPSTREAM_REJECTED');
+});

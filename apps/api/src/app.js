@@ -25,6 +25,7 @@ const { rankRelationshipAssets } = require('./domain/relationship-recall');
 const { registerAccountDeletionTargets, registerConversationDeletionTargets, registerDeletionTargets, completeDeletionTarget, failDeletionTarget, runAccountDeletionCleanup, deletionReceipt } = require('./domain/deletion-orchestration');
 const { advanceImageJob, releaseImageEntitlement } = require('./domain/image-job-advance');
 const { recordOperationMetric, providerName, providerModelVersion, moderateTextWithMetric, moderateImageWithMetric } = require('./domain/operation-metrics');
+const { resolveEmotion, emotionSpeedHint, isSupportedEmotionCategory, sanitizeTtsText, truncateForTts } = require('./domain/tts-delivery');
 const { invalidateSummaries, validSummary } = require('./domain/conversation-summary');
 const { cancelConversationSummaryJobs, enqueueConversationSummary, replayConversationSummaryDeadLetter } = require('./domain/conversation-summary-worker');
 const { DEVELOPMENT_EMBEDDING_MODEL_VERSION, cosineSimilarity, deterministicEmbedding, enqueueAssetEmbedding, invalidateAssetEmbedding, replayAssetEmbeddingDeadLetter, startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
@@ -69,12 +70,14 @@ const STATIC_FILES = new Map([
   ['/prototype-restoration.css', { file: path.resolve(__dirname, '../../web/prototype-restoration.css'), type: 'text/css; charset=utf-8' }],
   ['/assets/qiyu-character.png', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/prototype/imgs/qiyu-character.png'), type: 'image/png' }],
   ['/assets/qiyu-night-scene.png', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/prototype/imgs/qiyu-night-scene.png'), type: 'image/png' }],
+  ['/assets/player-play-filled.svg', { file: path.resolve(__dirname, '../../web/assets/player-play-filled.svg'), type: 'image/svg+xml' }],
+  ['/assets/player-pause-filled.svg', { file: path.resolve(__dirname, '../../web/assets/player-pause-filled.svg'), type: 'image/svg+xml' }],
   ['/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }],
   // Compatibility with the existing relative @import in apps/web/styles.css.
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -82,7 +85,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -118,7 +121,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -255,7 +258,7 @@ async function route(context) {
     return idempotent(context, account, () => confirmAsrJob(store, account, path, body, mediaStore));
   }
   if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/tts-jobs$/.test(path)) {
-    return idempotent(context, account, () => createTtsJob(store, account, path, ttsGenerator, textModerator, mediaStore, imageEntitlementService));
+    return idempotent(context, account, () => createTtsJob(store, account, path, ttsGenerator, textModerator, mediaStore, imageEntitlementService, emotionJudge));
   }
   if (method === 'GET' && /^\/api\/v1\/tts-jobs\/[^/]+$/.test(path)) return getTtsJob(store, account, path);
   if (method === 'GET' && /^\/api\/v1\/media-assets\/[^/]+\/content$/.test(path)) return getMediaAssetContent(store, account, path, mediaStore, imageStore);
@@ -1492,104 +1495,107 @@ function getConversationStream(store, account, path, requestId, streamingReplyGe
 // 真流式执行体（技术设计 7.5）：额度预留→Qwen 流式→按句片段过本地权限门禁
 // 与 OUTPUT 审核→通过才下发 chunk；拦截/失败走 replaced/failed 终态并释放额度。
 // SSE 请求与 POST 同处账户事务模型：流式期间同账户其他请求按公平使用语义排队。
-function liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null) {
+function liveConversationStream(requestStore, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null) {
+  const produce = async (store, emit, signal) => {
+    const conversation = ownConversation(store, account.account_id, entry.conversationId);
+    requireOpenConversation(conversation);
+    const activeSafety = responseForExistingSafetyMode(account.safety_mode) || assessSafety(entry.text);
+    if (activeSafety) {
+      const assistantMessageId = store.next('msg');
+      emit('safety.response', { request_id: requestId, code: activeSafety.code, assistant_message_id: assistantMessageId });
+      persistStreamingFinal(store, account, conversation, { reply_text: activeSafety.text, provider: 'safety-policy', model_version: 'deterministic-safety-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
+      return;
+    }
+    authorize(account, 'SEND_MESSAGE', store);
+    let reservation;
+    try {
+      reservation = reserveDailyChatUsage(store, { accountId: account.account_id, estimatedInputTokens: estimateInputTokens(entry.text) });
+    } catch (error) {
+      emit('message.failed', { request_id: requestId, code: error.code || 'DAILY_CHAT_LIMIT_REACHED', retryable: false });
+      return;
+    }
+    const assistantMessageId = store.next('msg');
+    emit('message.accepted', { request_id: requestId, assistant_message_id: assistantMessageId });
+    let sequence = 0;
+    let settled = false;
+    const release = () => { if (!settled) { settled = true; try { releaseDailyChatUsage(store, reservation); } catch { /* 事务已回滚则忽略 */ } } };
+    const commitUsage = (modelReply) => { if (!settled) { settled = true; return commitDailyChatUsage(store, reservation, { billedInputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens) }); } return null; };
+    let contextPack;
+    try {
+      // buildContextPack 包含异步的 pgvector 召回。必须先等待完成，
+      // 否则 Qwen 只会收到 Promise，角色姓名、人格与记忆都会丢失。
+      contextPack = await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
+      const onFragment = async (fragment) => {
+        const visibleFragment = normalizeUnpromptedCharacterSelfIntroduction(
+          { reply_text: fragment },
+          entry.text,
+          contextPack.character?.name,
+          true
+        ).reply_text;
+        // 模型偶发地把“我是角色名”单独作为首句时，去除后不应产生一个空 SSE 气泡。
+        if (!visibleFragment) return true;
+        // 本地确定性门禁（7.5 本地规则，零成本）先于供应商审核。
+        if (assessModelOutputAuthority(visibleFragment)) return false;
+        if (typeof textModerator === 'function') {
+          const moderation = await textModerator({ text: visibleFragment, accountId: account.account_id, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
+          if (!moderation || moderation.decision !== 'PASS') return false;
+        }
+        sequence += 1;
+        emit('message.chunk', { sequence, text: visibleFragment });
+        return true;
+      };
+      const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
+        await streamingReplyGenerator.generateStream(entry.text, contextPack, onFragment, signal),
+        entry.text,
+        contextPack.character?.name
+      );
+      // 终稿复核：片段全过不代表拼接终稿安全（跨片段可能拼出新表述）。
+      if (assessModelOutputAuthority(modelReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '终稿未通过输出门禁');
+      const usage = commitUsage(modelReply);
+      persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true });
+    } catch (error) {
+      const intercepted = error?.code === 'QWEN_STREAM_INTERCEPTED' || error?.code === 'MODEL_CLAIMED_AUTHORITY';
+      if (intercepted) {
+        release();
+        emit('message.replaced', { request_id: requestId, reason: 'OUTPUT_MODERATION' });
+        persistStreamingFinal(store, account, conversation, { reply_text: '这条回复的部分内容未通过安全审核，已停止生成。你可以换一个话题继续。', provider: 'model-output-guard', model_version: 'stream-gate-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
+        return;
+      }
+      if (signal?.aborted) { release(); emit('message.cancelled', { request_id: requestId, reason: 'CLIENT_DISCONNECTED' }); return; }
+      // 真流式在网络、SSE 或上游协议层失败时，同一轮自动降级为
+      // 非流式 Qwen 请求。不重复写入用户消息，也不把临时占位当成 AI 回复。
+      if (typeof replyGenerator === 'function') {
+        try {
+          const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
+          const fallbackReply = normalizeUnpromptedCharacterSelfIntroduction(
+            await replyGenerator(entry.text, fallbackContext),
+            entry.text,
+            fallbackContext.character?.name
+          );
+          if (assessModelOutputAuthority(fallbackReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '降级终稿未通过输出门禁');
+          if (typeof textModerator === 'function') {
+            const moderation = await moderateTextWithMetric(store, account, textModerator, { text: fallbackReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
+            if (!moderation || moderation.decision !== 'PASS') throw apiError(200, 'OUTPUT_MODERATION_REJECTED', '降级终稿未通过输出审核');
+          }
+          emit('message.replaced', { request_id: requestId, reason: 'STREAM_PROVIDER_FALLBACK' });
+          const usage = commitUsage(fallbackReply);
+          persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true });
+          return;
+        } catch {
+          // 降级也失败时由下方统一释放额度并返回可重试终态。
+        }
+      }
+      release();
+      emit('message.failed', { request_id: requestId, code: error?.code || 'MODEL_UNAVAILABLE', retryable: Boolean(error?.retryable ?? true) });
+    }
+  };
   return {
     status: 200,
     sseLive: {
       requestId,
-      produce: async (emit, signal) => {
-        const conversation = ownConversation(store, account.account_id, entry.conversationId);
-        requireOpenConversation(conversation);
-        const activeSafety = responseForExistingSafetyMode(account.safety_mode) || assessSafety(entry.text);
-        if (activeSafety) {
-          const assistantMessageId = store.next('msg');
-          emit('safety.response', { request_id: requestId, code: activeSafety.code, assistant_message_id: assistantMessageId });
-          persistStreamingFinal(store, account, conversation, { reply_text: activeSafety.text, provider: 'safety-policy', model_version: 'deterministic-safety-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
-          return;
-        }
-        authorize(account, 'SEND_MESSAGE', store);
-        let reservation;
-        try {
-          reservation = reserveDailyChatUsage(store, { accountId: account.account_id, estimatedInputTokens: estimateInputTokens(entry.text) });
-        } catch (error) {
-          emit('message.failed', { request_id: requestId, code: error.code || 'DAILY_CHAT_LIMIT_REACHED', retryable: false });
-          return;
-        }
-        const assistantMessageId = store.next('msg');
-        emit('message.accepted', { request_id: requestId, assistant_message_id: assistantMessageId });
-        let sequence = 0;
-        let settled = false;
-        const release = () => { if (!settled) { settled = true; try { releaseDailyChatUsage(store, reservation); } catch { /* 事务已回滚则忽略 */ } } };
-        const commitUsage = (modelReply) => { if (!settled) { settled = true; return commitDailyChatUsage(store, reservation, { billedInputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens) }); } return null; };
-        let contextPack;
-        try {
-          // buildContextPack 包含异步的 pgvector 召回。必须先等待完成，
-          // 否则 Qwen 只会收到 Promise，角色姓名、人格与记忆都会丢失。
-          contextPack = await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
-          const onFragment = async (fragment) => {
-            const visibleFragment = normalizeUnpromptedCharacterSelfIntroduction(
-              { reply_text: fragment },
-              entry.text,
-              contextPack.character?.name,
-              true
-            ).reply_text;
-            // 模型偶发地把“我是角色名”单独作为首句时，去除后不应产生一个空 SSE 气泡。
-            if (!visibleFragment) return true;
-            // 本地确定性门禁（7.5 本地规则，零成本）先于供应商审核。
-            if (assessModelOutputAuthority(visibleFragment)) return false;
-            if (typeof textModerator === 'function') {
-              const moderation = await textModerator({ text: visibleFragment, accountId: account.account_id, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
-              if (!moderation || moderation.decision !== 'PASS') return false;
-            }
-            sequence += 1;
-            emit('message.chunk', { sequence, text: visibleFragment });
-            return true;
-          };
-          const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
-            await streamingReplyGenerator.generateStream(entry.text, contextPack, onFragment, signal),
-            entry.text,
-            contextPack.character?.name
-          );
-          // 终稿复核：片段全过不代表拼接终稿安全（跨片段可能拼出新表述）。
-          if (assessModelOutputAuthority(modelReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '终稿未通过输出门禁');
-          const usage = commitUsage(modelReply);
-          persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true });
-        } catch (error) {
-          const intercepted = error?.code === 'QWEN_STREAM_INTERCEPTED' || error?.code === 'MODEL_CLAIMED_AUTHORITY';
-          if (intercepted) {
-            release();
-            emit('message.replaced', { request_id: requestId, reason: 'OUTPUT_MODERATION' });
-            persistStreamingFinal(store, account, conversation, { reply_text: '这条回复的部分内容未通过安全审核，已停止生成。你可以换一个话题继续。', provider: 'model-output-guard', model_version: 'stream-gate-v1', ai_generated: false }, { assistantMessageId, emit, requestId, usage: null, candidate: null });
-            return;
-          }
-          if (signal?.aborted) { release(); emit('message.cancelled', { request_id: requestId, reason: 'CLIENT_DISCONNECTED' }); return; }
-          // 真流式在网络、SSE 或上游协议层失败时，同一轮自动降级为
-          // 非流式 Qwen 请求。不重复写入用户消息，也不把临时占位当成 AI 回复。
-          if (typeof replyGenerator === 'function') {
-            try {
-              const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
-              const fallbackReply = normalizeUnpromptedCharacterSelfIntroduction(
-                await replyGenerator(entry.text, fallbackContext),
-                entry.text,
-                fallbackContext.character?.name
-              );
-              if (assessModelOutputAuthority(fallbackReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '降级终稿未通过输出门禁');
-              if (typeof textModerator === 'function') {
-                const moderation = await moderateTextWithMetric(store, account, textModerator, { text: fallbackReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
-                if (!moderation || moderation.decision !== 'PASS') throw apiError(200, 'OUTPUT_MODERATION_REJECTED', '降级终稿未通过输出审核');
-              }
-              emit('message.replaced', { request_id: requestId, reason: 'STREAM_PROVIDER_FALLBACK' });
-              const usage = commitUsage(fallbackReply);
-              persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true });
-              return;
-            } catch {
-              // 降级也失败时由下方统一释放额度并返回可重试终态。
-            }
-          }
-          release();
-          emit('message.failed', { request_id: requestId, code: error?.code || 'MODEL_UNAVAILABLE', retryable: Boolean(error?.retryable ?? true) });
-        }
-      }
+      produce: (emit, signal) => typeof requestStore.runDeferredAccountTransaction === 'function'
+        ? requestStore.runDeferredAccountTransaction((store) => produce(store, emit, signal), { lockDailyUsage: true })
+        : produce(requestStore, emit, signal)
     }
   };
 }
@@ -1895,7 +1901,7 @@ async function confirmAsrJob(store, account, path, body, mediaStore) {
   return ok({ asr_job: publicAsrJob(job), input_audio_deletion: deletion && deletion.body.deletion_job });
 }
 
-async function createTtsJob(store, account, path, ttsGenerator, textModerator, mediaStore, mediaEntitlementService) {
+async function createTtsJob(store, account, path, ttsGenerator, textModerator, mediaStore, mediaEntitlementService, emotionJudge = null) {
   authorize(account, 'SYNTHESIZE_TTS', store);
   if (typeof ttsGenerator !== 'function') throw apiError(503, 'TTS_NOT_ENABLED', '本地开发未显式启用 TTS');
   const voiceProfile = resolvedTtsVoiceProfile(ttsGenerator);
@@ -1904,19 +1910,33 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
   const worldState = source.world_state_id
     ? { world_state_id: source.world_state_id, state_version: source.world_state_version }
     : publicWorldState(currentWorldState(store, account.account_id, store.characters.get(conversation.character_id)));
+  // 语音只朗读台词：剥离（动作描写）与超长截断后的 tts_text 是审核、计费
+  // 与合成三条链路共用的口径。情绪基线取角色当前世界状态（P1 判断器可覆盖）。
+  const ttsText = truncateForTts(sanitizeTtsText(source.text));
+  const moodRecord = store.worldStates.get(conversation.character_id);
+  const baseEmotion = resolveEmotion(moodRecord?.mood_code);
   const job = {
     job_id: store.next('tts'), account_id: account.account_id, character_id: conversation.character_id, conversation_id: conversation.conversation_id,
     source_message_id: source.message_id, entitlement_id: null, type: 'TTS', state: 'PENDING', attempts: 0, provider: 'tencent-tts', provider_request_id: null,
     moderation_policy_version: null, result_asset_id: null, failure_code: null,
     voice_id: voiceProfile.voice_id, voice_version: voiceProfile.voice_version, authorization_record_id: voiceProfile.authorization_record_id,
     rights_review_id: voiceProfile.rights_review_id, rights_review_state: voiceProfile.rights_review_state,
-    world_state_id: worldState.world_state_id, world_state_version: worldState.state_version, created_at: new Date().toISOString()
+    world_state_id: worldState.world_state_id, world_state_version: worldState.state_version,
+    tts_text: ttsText, emotion_category: baseEmotion.category, emotion_intensity: baseEmotion.intensity,
+    emotion_source: moodRecord ? 'world_state_mood' : 'fallback_neutral', tts_speed: baseEmotion.speed,
+    created_at: new Date().toISOString()
   };
   store.mediaJobs.set(job.job_id, job);
   await mediaStore.createPendingJob(job);
+  if (!ttsText) {
+    // 只有动作描写、没有可朗读台词：任务照常落审计链，但不烧审核调用、额度与供应商调用。
+    job.state = 'FAILED'; job.failure_code = 'TTS_TEXT_UNSUITABLE_FOR_SPEECH';
+    await mediaStore.updateJob(job);
+    return accepted({ tts_job: publicTtsJob(job), note: '这条回复只有动作描写，没有可朗读的台词。' });
+  }
   if (typeof textModerator === 'function') {
     try {
-      const moderation = await moderateTextWithMetric(store, account, textModerator, { text: source.text, conversationId: conversation.conversation_id, direction: 'TTS_OUTPUT' });
+      const moderation = await moderateTextWithMetric(store, account, textModerator, { text: ttsText, conversationId: conversation.conversation_id, direction: 'TTS_OUTPUT' });
       if (!moderation || !['PASS', 'REVIEW', 'BLOCK'].includes(moderation.decision)) throw apiError(502, 'TEXT_MODERATION_RESPONSE_INVALID', '内容审核未返回有效决策');
       job.moderation_policy_version = moderation.policyVersion;
       if (moderation.decision !== 'PASS') {
@@ -1931,7 +1951,7 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
     }
   }
   // 语音额度：按文本长度预留秒数，成功按同口径提交，失败/拦截全额返还（PRD 3.5）。
-  const reservedSeconds = estimateTtsSeconds(source.text);
+  const reservedSeconds = estimateTtsSeconds(ttsText);
   if (mediaEntitlementService) {
     try {
       const reservation = mediaEntitlementService.reserve({ accountId: account.account_id, jobId: job.job_id, capability: 'SYNTHESIZE_TTS', quantity: reservedSeconds });
@@ -1942,13 +1962,27 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
       return accepted({ tts_job: publicTtsJob(job), note: '角色语音额度不足；文字回复不受影响。' });
     }
   }
+  // P1：逐条情绪判断只覆盖合法枚举值；失败/非法输出静默回退世界状态基线，
+  // 语音流程不因判断器故障失败（回退来源已落 emotion_source 可审计）。
+  if (typeof emotionJudge === 'function') {
+    try {
+      const judged = await emotionJudge({ text: ttsText });
+      if (isSupportedEmotionCategory(judged?.category)) {
+        const intensity = Number.isInteger(judged.intensity) && judged.intensity >= 50 && judged.intensity <= 200 ? judged.intensity : 100;
+        job.emotion_category = judged.category;
+        job.emotion_intensity = intensity;
+        job.emotion_source = 'model_judgement';
+        job.tts_speed = emotionSpeedHint(judged.category);
+      }
+    } catch { /* 判断器失败不阻断语音合成。 */ }
+  }
   job.state = 'RUNNING'; job.attempts = 1;
   await mediaStore.updateJob(job);
   try {
     const providerStartedAt = Date.now();
     let result;
     try {
-      result = await ttsGenerator({ text: source.text, sessionId: job.job_id });
+      result = await ttsGenerator({ text: ttsText, sessionId: job.job_id, emotion: job.emotion_category, intensity: job.emotion_intensity, speed: job.tts_speed });
       recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(ttsGenerator, job.provider), modelVersion: providerModelVersion(ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: 'COMPLETED' });
     } catch (error) {
       recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(ttsGenerator, job.provider), modelVersion: providerModelVersion(ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: 'FAILED' });
@@ -2961,7 +2995,7 @@ function ownOperationMetrics(store, accountId) { return [...(store.operationMetr
 function ownTrialFeedback(store, accountId) { return [...(store.trialFeedback?.values() || [])].filter((item) => item.account_id === accountId).map(publicTrialFeedback); }
 function publicTrialFeedback(feedback) { return { feedback_id: feedback.feedback_id, category: feedback.category, rating: feedback.rating, note: feedback.note, created_at: feedback.created_at }; }
 function publicNotice(notice) { return { ...notice }; }
-function publicTtsJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, source_message_id: job.source_message_id, voice: { voice_id: job.voice_id || null, voice_version: job.voice_version || null, authorization_record_id: job.authorization_record_id || null, rights_review_id: job.rights_review_id || null, rights_review_state: job.rights_review_state || null }, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
+function publicTtsJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, source_message_id: job.source_message_id, voice: { voice_id: job.voice_id || null, voice_version: job.voice_version || null, authorization_record_id: job.authorization_record_id || null, rights_review_id: job.rights_review_id || null, rights_review_state: job.rights_review_state || null }, emotion: job.emotion_category ? { category: job.emotion_category, intensity: job.emotion_intensity ?? null, source: job.emotion_source || null } : null, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
 function publicAsrJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, input_asset_id: job.input_asset_id, transcript: job.transcript_text ? { text: job.transcript_text, state: job.transcript_state, version: 1 } : null, failure_code: job.failure_code, created_at: job.created_at }; }
 function publicImageJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, reference_asset_id: job.reference_asset_id, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
 function resolvedTtsVoiceProfile(ttsGenerator) {

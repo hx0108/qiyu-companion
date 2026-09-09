@@ -73,7 +73,7 @@ test('仅白名单开发壳资源由同源 API 服务托管，API 路由仍要�
   const page = await rawRequest(base, '/');
   assert.equal(page.status, 200);
   assert.match(page.contentType, /^text\/html/);
-  assert.match(page.text, /src="app\.js"/);
+  assert.match(page.text, /src="app\.js(?:\?[^\"]+)?"/);
   assert.match(page.csp, /connect-src 'self'/);
 
   const script = await rawRequest(base, '/app.js');
@@ -84,6 +84,7 @@ test('仅白名单开发壳资源由同源 API 服务托管，API 路由仍要�
   assert.match(script.text, /await fetch\(streamPath, \{/);
   assert.doesNotMatch(script.text, /fetch\(`\$\{API_BASE\}\$\{url\}`/);
   assert.match(script.text, /角色语音未生成/);
+  assert.match(script.text, /toggle-message-audio/);
   assert.match(script.text, /情境图额度不足/);
   assert.match(script.text, /额度与返还以服务端权益账本为准/);
 
@@ -101,6 +102,12 @@ test('仅白名单开发壳资源由同源 API 服务托管，API 路由仍要�
   const characterAsset = await rawRequest(base, '/assets/qiyu-character.png');
   assert.equal(characterAsset.status, 200);
   assert.match(characterAsset.contentType, /^image\/png/);
+  const playAsset = await rawRequest(base, '/assets/player-play-filled.svg');
+  assert.equal(playAsset.status, 200);
+  assert.match(playAsset.contentType, /^image\/svg\+xml/);
+  const pauseAsset = await rawRequest(base, '/assets/player-pause-filled.svg');
+  assert.equal(pauseAsset.status, 200);
+  assert.match(pauseAsset.contentType, /^image\/svg\+xml/);
   const tokens = await rawRequest(base, '/tokens.css');
   assert.equal(tokens.status, 200);
   assert.match(tokens.contentType, /^text\/css/);
@@ -479,10 +486,11 @@ test('TTS 先持久化任务、审核助手文本、保存私有音频元数据�
     async readTtsAudio(objectKey) { timeline.push('read-audio'); assert.match(objectKey, /^tts\/med_/); return Buffer.from('synthetic-mp3'); },
     async deleteAsset() { timeline.push('delete-audio'); }
   };
+  let ttsInput;
   const base = await start(t, {
-    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: `可朗读：${text}`, ai_generated: true, disclaimer: 'AI 生成内容。', memory_candidate: { type: 'development_note', normalized_value: { text }, display_text: text } }),
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: `（轻轻靠过来）可朗读：${text}`, ai_generated: true, disclaimer: 'AI 生成内容。', memory_candidate: { type: 'development_note', normalized_value: { text }, display_text: text } }),
     textModerator: async () => ({ decision: 'PASS', providerRequestId: 'tms_req_1', policyVersion: 'tms_dev_v1' }),
-    ttsGenerator: async () => { timeline.push('tts'); return { asset: { bytes: Buffer.from('synthetic-mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts_req_1' }; },
+    ttsGenerator: async (input) => { ttsInput = input; timeline.push('tts'); return { asset: { bytes: Buffer.from('synthetic-mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts_req_1' }; },
     mediaStore
   });
   const { character, conversation } = await readyConversation(base, 'dev-alice-token', 'tts');
@@ -497,6 +505,12 @@ test('TTS 先持久化任务、审核助手文本、保存私有音频元数据�
   assert.equal(created.body.tts_job.world_state_id, message.body.assistant_message.world_state_id);
   assert.equal(created.body.tts_job.world_state_version, 1);
   assert.deepEqual(created.body.tts_job.voice, { voice_id: 'development-synthetic-voice', voice_version: 'development-v1', authorization_record_id: 'development-synthetic-authorization', rights_review_id: 'development-synthetic-rights-review', rights_review_state: 'APPROVED' });
+  // 情感投放来自当前世界状态（HAPPY），供应商收到的是剥离（动作）后的台词与情感三元组。
+  assert.deepEqual(created.body.tts_job.emotion, { category: 'happy', intensity: 110, source: 'world_state_mood' });
+  assert.equal(ttsInput.text, '可朗读：请说一句晚安');
+  assert.equal(ttsInput.emotion, 'happy');
+  assert.equal(ttsInput.intensity, 110);
+  assert.equal(ttsInput.speed, 0.2);
   assert.ok(created.body.tts_job.result_asset_id);
   const ttsMetrics = await request(base, '/api/v1/development/operation-metrics');
   assert.ok(ttsMetrics.body.metrics.some((metric) => metric.capability === 'TTS' && metric.provider === 'tencent-tts' && metric.outcome === 'COMPLETED'));
@@ -542,6 +556,57 @@ test('TTS 输出审核未通过或 TTS 未启用时不调用语音供应商', as
   const disabledResponse = await request(disabled, `/api/v1/messages/${disabledMessage.body.assistant_message.message_id}/tts-jobs`, { method: 'POST', key: 'tts-disabled-job', body: {} });
   assert.equal(disabledResponse.status, 503);
   assert.equal(disabledResponse.body.error.code, 'TTS_NOT_ENABLED');
+});
+
+test('TTS 只朗读台词：剥离动作描写后没有台词时任务失败且不烧审核与额度', async (t) => {
+  let ttsCalls = 0;
+  let moderationCalls = 0;
+  const mediaStore = { async createPendingJob() {}, async updateJob() {}, async putAudio() { throw new Error('不应保存音频'); }, async deleteAsset() {} };
+  const base = await start(t, {
+    replyGenerator: async () => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: '（她只是安静地看着窗外）', ai_generated: true }),
+    textModerator: async ({ direction }) => { if (direction === 'TTS_OUTPUT') moderationCalls += 1; return { decision: 'PASS', providerRequestId: 'tms_req_1', policyVersion: 'tms_dev_v1' }; },
+    ttsGenerator: async () => { ttsCalls += 1; throw new Error('不应调用 TTS'); },
+    mediaStore
+  });
+  const { conversation } = await readyConversation(base, 'dev-alice-token', 'tts-silent');
+  const message = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'tts-silent-source', body: { content: { text: '你在看什么？' } } });
+  const created = await request(base, `/api/v1/messages/${message.body.assistant_message.message_id}/tts-jobs`, { method: 'POST', key: 'tts-silent-job', body: {} });
+  assert.equal(created.status, 202);
+  assert.equal(created.body.tts_job.state, 'FAILED');
+  assert.equal(created.body.tts_job.failure_code, 'TTS_TEXT_UNSUITABLE_FOR_SPEECH');
+  assert.equal(ttsCalls, 0);
+  assert.equal(moderationCalls, 0);
+});
+
+test('TTS 情绪判断器覆盖世界状态基线，非法输出或故障时静默回退且任务仍完成', async (t) => {
+  const ttsInputs = [];
+  const mediaStore = { async createPendingJob() {}, async updateJob() {}, async putAudio() { return { objectKey: 'tts/x.mp3', checksum: 'a'.repeat(64), byteLength: 3, mimeType: 'audio/mpeg' }; }, async deleteAsset() {} };
+  const base = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: text, ai_generated: true }),
+    textModerator: async () => ({ decision: 'PASS', providerRequestId: 'tms_req_1', policyVersion: 'tms_dev_v1' }),
+    ttsGenerator: async (input) => { ttsInputs.push(input); return { asset: { bytes: Buffer.from('mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts_req_1' }; },
+    emotionJudge: async ({ text }) => {
+      if (text.includes('开心')) return { category: 'exciting', intensity: 150 };
+      if (text.includes('非法')) return { category: 'JOYFUL', intensity: 999 };
+      throw new Error('judge down');
+    },
+    mediaStore
+  });
+  const { conversation } = await readyConversation(base, 'dev-alice-token', 'tts-judge');
+  const send = async (text, key) => (await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key, body: { content: { text } } })).body.assistant_message.message_id;
+
+  const judged = await request(base, `/api/v1/messages/${await send('今天真的很开心呀！', 'tts-judge-1')}/tts-jobs`, { method: 'POST', key: 'tts-judge-job-1', body: {} });
+  assert.equal(judged.body.tts_job.state, 'COMPLETED');
+  assert.deepEqual(judged.body.tts_job.emotion, { category: 'exciting', intensity: 150, source: 'model_judgement' });
+  assert.deepEqual({ emotion: ttsInputs[0].emotion, intensity: ttsInputs[0].intensity, speed: ttsInputs[0].speed }, { emotion: 'exciting', intensity: 150, speed: 0.3 });
+
+  const invalid = await request(base, `/api/v1/messages/${await send('非法输出的台词', 'tts-judge-2')}/tts-jobs`, { method: 'POST', key: 'tts-judge-job-2', body: {} });
+  assert.equal(invalid.body.tts_job.state, 'COMPLETED');
+  assert.deepEqual(invalid.body.tts_job.emotion, { category: 'neutral', intensity: 100, source: 'world_state_mood' });
+
+  const broken = await request(base, `/api/v1/messages/${await send('判断器故障时的台词', 'tts-judge-3')}/tts-jobs`, { method: 'POST', key: 'tts-judge-job-3', body: {} });
+  assert.equal(broken.body.tts_job.state, 'COMPLETED');
+  assert.deepEqual(broken.body.tts_job.emotion, { category: 'neutral', intensity: 100, source: 'world_state_mood' });
 });
 
 test('ASR 先写私有输入音频、返回待确认转写，确认后删除原始音频', async (t) => {

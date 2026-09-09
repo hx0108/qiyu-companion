@@ -57,7 +57,8 @@ function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, lo
             provider_job_id: null, moderation_policy_version: null, result_asset_id: null, transcript_text: null, transcript_state: null,
             failure_code: null, provider_error_code: null, world_state_id: null, world_state_version: null, scene_contract: null,
             voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', authorization_record_id: 'tts-auth',
-            rights_review_id: 'tts-rights', rights_review_state: 'APPROVED', created_at: new Date('2026-09-07T00:00:00.000Z')
+            rights_review_id: 'tts-rights', rights_review_state: 'APPROVED', tts_text: '一句清洗后的台词。', emotion_category: 'happy',
+            emotion_intensity: 110, emotion_source: 'world_state_mood', tts_speed: '0.20', created_at: new Date('2026-09-07T00:00:00.000Z')
           }] };
         }
         return { rows: [] };
@@ -93,6 +94,23 @@ test('PostgresStore scopes every request with a local RLS transaction and persis
   assert.deepEqual(controlsUpdate.values, [accountId, 'R0_NORMAL']);
   assert.equal(pool.calls.at(-2).sql, 'COMMIT');
   assert.equal(pool.calls.at(-1).sql, 'RELEASE');
+});
+
+test('PostgresStore runs deferred SSE work in a fresh account transaction before releasing it', async () => {
+  const pool = fakePool();
+  const store = new PostgresStore({ pool });
+  const accountId = store.resolveAccountId('acct_dev_alice');
+  let runDeferred;
+  await store.withAccountTransaction(accountId, async (scoped) => {
+    runDeferred = scoped.runDeferredAccountTransaction;
+  });
+  assert.equal(typeof runDeferred, 'function');
+  await runDeferred(async (scoped) => {
+    scoped.account(accountId).age_status = 'AGE_PASS';
+  }, { lockDailyUsage: true });
+  assert.equal(pool.calls.filter((call) => call.sql === 'BEGIN').length, 2);
+  assert.equal(pool.calls.filter((call) => call.sql === 'COMMIT').length, 2);
+  assert.equal(pool.calls.filter((call) => call.sql === 'RELEASE').length, 2);
 });
 
 test('PostgresStore rolls back and releases the client when a scoped operation fails', async () => {
@@ -294,7 +312,7 @@ test('PostgresStore persists scoped TTS job and private-media metadata without e
   const accountId = store.resolveAccountId('acct_dev_alice');
   await store.withAccountTransaction(accountId, async (scoped) => {
     scoped.mediaJobs.set('00000000-0000-7000-8000-0000000000f1', {
-      job_id: '00000000-0000-7000-8000-0000000000f1', account_id: accountId, character_id: '00000000-0000-7000-8000-0000000000f2', conversation_id: '00000000-0000-7000-8000-0000000000f3', source_message_id: '00000000-0000-7000-8000-0000000000f4', type: 'TTS', state: 'COMPLETED', attempts: 1, provider: 'tencent-tts', provider_request_id: 'tts_req_1', voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', authorization_record_id: 'tencent-service-entitlement-2026', rights_review_id: 'rights-review-voice-001', rights_review_state: 'APPROVED', created_at: '2026-09-03T00:00:00.000Z'
+      job_id: '00000000-0000-7000-8000-0000000000f1', account_id: accountId, character_id: '00000000-0000-7000-8000-0000000000f2', conversation_id: '00000000-0000-7000-8000-0000000000f3', source_message_id: '00000000-0000-7000-8000-0000000000f4', type: 'TTS', state: 'COMPLETED', attempts: 1, provider: 'tencent-tts', provider_request_id: 'tts_req_1', voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', authorization_record_id: 'tencent-service-entitlement-2026', rights_review_id: 'rights-review-voice-001', rights_review_state: 'APPROVED', tts_text: '一句清洗后的台词。', emotion_category: 'happy', emotion_intensity: 110, emotion_source: 'world_state_mood', tts_speed: 0.2, created_at: '2026-09-03T00:00:00.000Z'
     });
     scoped.mediaAssets.set('00000000-0000-7000-8000-0000000000f5', {
       asset_id: '00000000-0000-7000-8000-0000000000f5', account_id: accountId, character_id: '00000000-0000-7000-8000-0000000000f2', job_id: '00000000-0000-7000-8000-0000000000f1', type: 'TTS_AUDIO', state: 'AVAILABLE', media_type: 'AUDIO', mime_type: 'audio/mpeg', byte_length: 42, checksum: 'a'.repeat(64), object_key: 'tts/00000000-0000-7000-8000-0000000000f5.mp3', provider: 'tencent-tts', provider_request_id: 'tts_req_1', ai_generated: true, aigc_mark_version: 'not-implemented-development', created_at: '2026-09-03T00:00:00.000Z'
@@ -305,6 +323,7 @@ test('PostgresStore persists scoped TTS job and private-media metadata without e
   assert.ok(jobInsert);
   assert.ok(assetInsert);
   assert.deepEqual(jobInsert.values.slice(23, 28), ['tencent-standard-101001', 'provider-catalog-2026-09', 'tencent-service-entitlement-2026', 'rights-review-voice-001', 'APPROVED']);
+  assert.deepEqual(jobInsert.values.slice(28, 33), ['一句清洗后的台词。', 'happy', 110, 'world_state_mood', 0.2]);
   const assetParameters = [...new Set([...assetInsert.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
   assert.deepEqual(assetParameters, Array.from({ length: 20 }, (_, index) => index + 1));
   assert.equal(assetInsert.values.length, 20);
@@ -325,8 +344,8 @@ test('PostgresStore updates an existing TTS job with contiguous PostgreSQL param
   const update = pool.calls.find((call) => call.sql.startsWith('UPDATE media_jobs SET'));
   assert.ok(update);
   const parameters = [...new Set([...update.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
-  assert.deepEqual(parameters, Array.from({ length: 26 }, (_, index) => index + 1));
-  assert.equal(update.values.length, 26);
+  assert.deepEqual(parameters, Array.from({ length: 31 }, (_, index) => index + 1));
+  assert.equal(update.values.length, 31);
   assert.equal(update.values[6], 'trial-entitlement');
 });
 
@@ -474,6 +493,17 @@ test('TTS voice provenance migration requires a complete approved record for new
   assert.match(migration, /rights_review_state = 'APPROVED'/);
   assert.match(migration, /voice_id IS NULL AND voice_version IS NULL/);
   assert.match(migration, /media_jobs_tts_voice_provenance_idx/);
+});
+
+test('TTS emotion columns migration keeps category format open to provider growth and intensity bounded', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/056_tts_emotion_columns.sql'), 'utf8');
+  assert.match(migration, /ADD COLUMN IF NOT EXISTS tts_text text/);
+  assert.match(migration, /emotion_category ~ '\^\[a-z\]\[a-z0-9_\]/);
+  assert.match(migration, /emotion_intensity >= 50 AND emotion_intensity <= 200/);
+  assert.match(migration, /emotion_source IN \('model_judgement', 'world_state_mood', 'fallback_neutral'\)/);
+  assert.match(migration, /056_tts_emotion_columns\.sql/);
+  // 供应商扩充情感枚举时不应被数据库约束挡住（应用层 SUPPORTED 集合才是闸门）。
+  assert.doesNotMatch(migration, /emotion_category IN \(/);
 });
 
 test('content-rights reviewer migration excludes the application role and emits a decision event', () => {
