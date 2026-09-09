@@ -737,6 +737,7 @@ function messageId(message) { return message?.message_id ?? message?.id; }
 async function synthesizeMessageAudio(message) {
   const id = messageId(message);
   if (!id) return;
+  let autoplayReady = false;
   setBusy(true);
   try {
     // 语音额度是服务端事实。先读取再创建任务，避免用户在未领取试用时
@@ -774,11 +775,61 @@ async function synthesizeMessageAudio(message) {
     if (previous?.url) URL.revokeObjectURL(previous.url);
     const url = await apiAudio(`/media-assets/${encodeURIComponent(job.result_asset_id)}/content`);
     state.audioUrls.set(id, { assetId: job.result_asset_id, url });
+    autoplayReady = true;
     setToast("AI 生成语音已准备好播放。");
   } catch (error) {
-    state.lastTtsJob = { messageId: id, state: "FAILED", failure_code: error.payload?.error?.code ?? "TTS_REQUEST_FAILED" };
-    setToast(`${serverMessage(error)}；文字回复仍可正常阅读。`);
-  } finally { setBusy(false); }
+    const failureCode = error.payload?.error?.code ?? "TTS_REQUEST_FAILED";
+    if (failureCode === "RESOURCE_NOT_FOUND" && conversationId()) {
+      // 服务更新或旧版流式异常可能在页面里留下未落库的临时回复。不能把客户端
+      // 文本直接交给 TTS；重新读取服务端终稿，避免继续展示一个永远无法合成的按钮。
+      try {
+        const history = await api(`/conversations/${encodeURIComponent(conversationId())}/messages?limit=50`);
+        state.messages = unwrap(history, "messages", "messages") ?? [];
+      } catch { /* 原始 TTS 错误仍是主错误。 */ }
+      state.lastTtsJob = null;
+      setToast("这条旧回复未完成保存，已同步服务端对话。请发送一条新消息后播放语音。");
+    } else {
+      state.lastTtsJob = { messageId: id, state: "FAILED", failure_code: failureCode };
+      setToast(`${serverMessage(error)}；文字回复仍可正常阅读。`);
+    }
+  } finally {
+    setBusy(false);
+    if (autoplayReady) window.requestAnimationFrame(() => toggleMessageAudio(id, true));
+  }
+}
+
+async function toggleMessageAudio(messageIdValue, forcePlay = false) {
+  const control = [...document.querySelectorAll('[data-action="toggle-message-audio"]')]
+    .find((button) => button.dataset.messageId === String(messageIdValue));
+  const audio = control?.closest('.message')?.querySelector('.voice-audio');
+  if (!control || !audio) return;
+  const shouldPlay = forcePlay || audio.paused;
+  for (const item of document.querySelectorAll('.voice-audio')) {
+    if (item !== audio) item.pause();
+  }
+  if (shouldPlay) {
+    try {
+      await audio.play();
+      setVoiceControlState(control, true);
+      audio.onended = () => setVoiceControlState(control, false);
+      audio.onpause = () => setVoiceControlState(control, false);
+    } catch {
+      setVoiceControlState(control, false);
+      setToast("浏览器未允许自动播放，请再点一次语音按钮。");
+    }
+  } else {
+    audio.pause();
+    setVoiceControlState(control, false);
+  }
+}
+
+function setVoiceControlState(control, playing) {
+  if (!control?.isConnected) return;
+  control.dataset.playing = playing ? "true" : "false";
+  control.setAttribute("aria-label", playing ? "暂停角色语音" : "播放角色语音");
+  control.setAttribute("title", playing ? "暂停角色语音" : "播放角色语音");
+  const icon = control.querySelector("img");
+  if (icon) icon.src = playing ? "/assets/player-pause-filled.svg" : "/assets/player-play-filled.svg";
 }
 
 async function deleteMessageAudio(message) {
@@ -1548,8 +1599,11 @@ function messageMarkup(message) {
   const content = message.content ?? message.text ?? message.display_text ?? "";
   const id = messageId(message);
   const audio = !isUser && id ? state.audioUrls.get(id) : null;
-  const voice = !isUser && id ? (audio ? `<div class="voice-message"><span class="aigc">AI 生成语音</span><audio controls src="${escapeHtml(audio.url)}"></audio><button class="btn btn-line" data-action="delete-message-audio" data-message-id="${escapeHtml(id)}">删除语音</button></div>` : `<button class="btn btn-line" data-action="synthesize-message-audio" data-message-id="${escapeHtml(id)}" ${state.busy ? "disabled" : ""}>生成角色语音</button>`) : "";
-  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${escapeHtml(content) || "…"}</div>${voice}<div class="msg-meta"><span>${isUser ? "你" : "AI 生成"}</span></div></article>`;
+  // 参考对话视觉：括号动作描写转斜体弱化；先转义再包裹，不引入用户可控 HTML。
+  const bubbleHtml = (escapeHtml(content) || "…").replace(/([（(][^（）()]*[）)])/g, '<em class="action">$1</em>');
+  const voiceControl = !isUser && id ? `<button type="button" class="voice-trigger" data-action="${audio ? "toggle-message-audio" : "synthesize-message-audio"}" data-message-id="${escapeHtml(id)}" aria-label="${audio ? "播放角色语音" : "生成并播放角色语音"}" title="${audio ? "播放角色语音" : "生成并播放角色语音"}" ${state.busy ? "disabled" : ""}><span class="voice-trigger-visual"><img src="/assets/player-play-filled.svg" alt="" aria-hidden="true"></span></button>` : "";
+  const voicePlayback = !isUser && audio ? `<div class="voice-message"><audio class="voice-audio" preload="metadata" src="${escapeHtml(audio.url)}"></audio><span class="aigc">AI 生成语音</span><button class="voice-delete" data-action="delete-message-audio" data-message-id="${escapeHtml(id)}">删除语音</button></div>` : "";
+  return `<article class="message ${isUser ? "me" : "ai"}">${voiceControl}<div class="bubble">${bubbleHtml}</div>${voicePlayback}</article>`;
 }
 
 async function openWorldState() {
@@ -1939,6 +1993,7 @@ document.addEventListener("click", (event) => {
   if (action === "revise-asset") reviseTimelineAsset((state.timeline ?? []).find((entry) => String(entry.asset_id) === button.dataset.assetId));
   if (action === "refresh-deletion") refreshDeletionJob();
   if (action === "synthesize-message-audio") synthesizeMessageAudio(state.messages.find((message) => String(messageId(message)) === button.dataset.messageId));
+  if (action === "toggle-message-audio") toggleMessageAudio(button.dataset.messageId);
   if (action === "delete-message-audio") deleteMessageAudio(state.messages.find((message) => String(messageId(message)) === button.dataset.messageId));
 });
 
