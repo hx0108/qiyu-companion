@@ -2,6 +2,28 @@
 
 本目录只保留当前产品事实源、外部验证材料、设计交付件和可复现工具。历史原型、旧截图、浏览器缓存与调试目录已清理。
 
+## 产品截图
+
+来自本地开发壳（`apps/web`，内存合成数据、注入拟真角色回复）的真实渲染；截图脚本按 告知 → 年龄 → 建角色 → 对话 → 记忆确认 → 时间线 → 档案 → 数据中心 的完整用户旅程截取。
+
+| 对话 · 日间 | 对话 · 夜间 |
+|---|---|
+| ![对话·日间](docs/screenshots/04-chat-day.png) | ![对话·夜间](docs/screenshots/05-chat-night.png) |
+
+对话页：AI 深色气泡带括号动作斜体，用户琥珀气泡；语音胶囊挂在气泡左上角，按世界状态情绪与逐条台词情绪判断投放 `EmotionCategory` 情感合成（腾讯实时语音合成接口）。
+
+| 准入：必要告知 | 准入：年龄声明 |
+|---|---|
+| ![必要告知](docs/screenshots/01-notices.png) | ![年龄声明](docs/screenshots/02-age.png) |
+
+| 角色创建 | 关系时间线 |
+|---|---|
+| ![角色创建](docs/screenshots/03-character.png) | ![关系时间线](docs/screenshots/06-timeline.png) |
+
+| 角色档案 | 数据中心 |
+|---|---|
+| ![角色档案](docs/screenshots/07-character-profile.png) | ![数据中心](docs/screenshots/08-data-center.png) |
+
 ## 产品与技术事实源
 
 - `栖语PRD_v1.0.md`：当前产品需求、范围、指标与验收口径。
