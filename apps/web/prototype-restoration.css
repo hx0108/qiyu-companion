@@ -17,7 +17,11 @@
 .qiyu-prototype .step { color: var(--qy-muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
 .qiyu-prototype .orbit { width: 260px; height: 132px; border: 1px solid rgba(91,54,83,.14); border-radius: 50%; transform: rotate(-18deg); position: absolute; right: -84px; top: 95px; pointer-events: none; }
 .qiyu-prototype .orbit::before { content: ""; position: absolute; inset: 18px -15px; border: 1px solid rgba(189,143,148,.28); border-radius: 50%; }
-.qiyu-prototype .content { flex: 1; overflow: auto; scrollbar-width: none; padding: 20px 22px calc(110px + env(safe-area-inset-bottom)); position: relative; z-index: 1; }
+.qiyu-prototype .content { flex: 1; overflow: auto; scrollbar-width: none; padding: 20px 22px calc(28px + env(safe-area-inset-bottom)); position: relative; z-index: 1; }
+/* 引导页的表单壳（试用登录/角色创建）：让 form 成为透明的 flex 列，使内部
+   .content 重新获得 flex:1+滚动（否则超高内容被外层 overflow:hidden 裁掉）。
+   对话页的 #message-form 已有 absolute 定位，显式排除。 */
+.qiyu-prototype:not(.app-screen) form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .qiyu-prototype .content::-webkit-scrollbar, .qiyu-prototype .chat-scroll::-webkit-scrollbar, .qiyu-prototype .page-content::-webkit-scrollbar { display: none; }
 .qiyu-prototype .eyebrow { color: var(--qy-plum-2); font-size: 10px; letter-spacing: .18em; text-transform: uppercase; margin: 12px 0; }
 .qiyu-prototype h1, .qiyu-prototype h2 { color: var(--qy-ink); font: 500 34px/1.22 var(--qy-font-serif); letter-spacing: .015em; margin: 8px 0 14px; }
@@ -35,10 +39,10 @@
 .qiyu-prototype .check-row input:checked { border-color: var(--qy-plum); background: var(--qy-plum); }
 .qiyu-prototype .check-row input:checked::after { content: "✓"; color: #fff; font-weight: 700; font-size: 13px; position: absolute; left: 4px; top: 0; }
 .qiyu-prototype .check-row span { color: #51464c; font-size: 12px; line-height: 1.55; }
-.qiyu-prototype .bottom-action { padding: 12px 22px calc(18px + env(safe-area-inset-bottom)); position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; background: linear-gradient(180deg, transparent, var(--qy-paper) 22%); }
-/* 流式变体：按钮随内容滚动而非悬浮遮挡，用于键盘交互多的表单页（试用登录）。
-   手机键盘弹出时页面结构不跳动，符合常规表单页表现。 */
-.qiyu-prototype .bottom-action.in-flow { position: static; padding: 14px 0 4px; background: none; }
+/* 操作按钮走正常文档流（页脚）：不悬浮遮挡内容、键盘弹出不跳位、长表单
+   滚到底必然可达。2026-09-12 取代原 absolute 悬浮层（真实手机上按钮漂移
+   遮挡表单、内容被裁两连问题的根治方案）。 */
+.qiyu-prototype .bottom-action { padding: 14px 22px calc(18px + env(safe-area-inset-bottom)); position: static; background: none; }
 .qiyu-prototype .btn { min-height: 52px; width: 100%; padding: 0 18px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 17px; font-size: 14px; font-weight: 600; }
 .qiyu-prototype .btn-primary { color: #fff; background: var(--qy-plum); box-shadow: 0 12px 24px rgba(91,54,83,.2); }
 .qiyu-prototype .btn-line { color: var(--qy-ink); border: 1px solid var(--qy-line); background: transparent; }
