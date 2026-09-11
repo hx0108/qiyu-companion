@@ -15,12 +15,15 @@ class TencentModerationAdapter {
     this.imageBizType = imageBizType;
   }
 
-  async moderateText({ text, dataId, sessionId }) {
+  async moderateText({ text, dataId }) {
     if (!nonBlank(this.textBizType)) throw new TencentProviderError('TENCENT_TEXT_MODERATION_BIZ_TYPE_REQUIRED', '腾讯云文本审核策略未配置', 500);
     if (!nonBlank(text)) throw new TencentProviderError('TENCENT_TEXT_INPUT_INVALID', '待审核文本不能为空', 400);
+    // 不传 SessionId：腾讯 TMS 对该参数存在误判（2026-09-12 线上实测，
+    // 传入会话 UUID 后“你是谁”等普通问句被误判为 Ad Review 75 分，导致
+    // 用户完全无法对话）。追溯用 DataId 即可；会话归属在本服务留痕。
     const response = await this.client.request({
       service: 'tms', action: 'TextModeration', version: TMS_VERSION,
-      body: { Content: Buffer.from(text.trim(), 'utf8').toString('base64'), BizType: this.textBizType, DataId: safeIdentifier(dataId), SessionId: safeIdentifier(sessionId), Type: 'TEXT', SourceLanguage: 'zh' }
+      body: { Content: Buffer.from(text.trim(), 'utf8').toString('base64'), BizType: this.textBizType, DataId: safeIdentifier(dataId), Type: 'TEXT', SourceLanguage: 'zh' }
     });
     return normalize('TEXT_MODERATION', response, `tencent-tms-${TMS_VERSION}:${this.textBizType}`);
   }
@@ -41,7 +44,8 @@ class TencentModerationAdapter {
 function normalize(capability, response, policyVersion) {
   const decision = SUGGESTION_DECISION[response && response.Suggestion];
   if (!decision || !nonBlank(response.RequestId)) throw new TencentProviderError('TENCENT_MODERATION_RESPONSE_INVALID', '腾讯云内容审核未返回可用决策');
-  return assertAdapterResult(capability, { decision, providerRequestId: response.RequestId, policyVersion });
+  // 透出 Label/Score：拦截判定必须可解释（此前只留 decision，运营无法知道为什么被拦）。
+  return assertAdapterResult(capability, { decision, label: response.Label ?? null, score: Number.isFinite(response.Score) ? response.Score : null, providerRequestId: response.RequestId, policyVersion });
 }
 
 function createTencentTextModeratorFromEnvironment(environment = process.env, dependencies = {}) {
@@ -50,7 +54,7 @@ function createTencentTextModeratorFromEnvironment(environment = process.env, de
     client: new TencentTc3Client({ secretId: environment.TENCENT_SECRET_ID, secretKey: environment.TENCENT_SECRET_KEY, region: environment.TENCENT_REGION, fetchImpl: dependencies.fetchImpl || globalThis.fetch, timeoutMs: environment.TENCENT_MODERATION_TIMEOUT_MS, now: dependencies.now }),
     textBizType: environment.TENCENT_TEXT_MODERATION_BIZ_TYPE
   });
-  const moderateText = ({ text, accountId, conversationId }) => adapter.moderateText({ text, dataId: `msg-${accountId}`, sessionId: conversationId });
+  const moderateText = ({ text, accountId }) => adapter.moderateText({ text, dataId: `msg-${accountId}` });
   moderateText.provider = 'tencent-tms';
   moderateText.modelVersion = `TextModeration/${TMS_VERSION}`;
   return moderateText;

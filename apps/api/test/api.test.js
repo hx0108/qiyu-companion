@@ -353,22 +353,32 @@ test('自报可能未成年会被确定性门禁拦截并转入年龄复核', as
   assert.equal(followUp.body.error.code, 'AGE_NOT_PASSED');
 });
 
-test('腾讯文本审核的 Review 或 Block 不会进入模型或创建候选记忆', async (t) => {
-  for (const decision of ['REVIEW', 'BLOCK']) {
-    let modelCalls = 0;
-    const base = await start(t, {
-      replyGenerator: async () => { modelCalls += 1; throw new Error('审核未通过时不应调用模型'); },
-      textModerator: async () => ({ decision, providerRequestId: `tencent-${decision}`, policyVersion: 'tencent-tms-2020-12-29:qiyu_text_v1' })
-    });
-    const { conversation } = await readyConversation(base, 'dev-alice-token', `moderation-${decision}`);
-    const response = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: `moderation-message-${decision}`, body: { content: { text: '普通待审核文本' } } });
-    assert.equal(response.status, 201);
-    assert.equal(response.body.provider, 'content-moderation-policy');
-    assert.equal(response.body.assistant_message.ai_generated, false);
-    assert.equal(response.body.memory_candidate, null);
-    assert.equal(response.body.moderation.decision, decision);
-    assert.equal(modelCalls, 0);
-  }
+test('输入审核 Block 不进模型；Review 灰区放行给模型（2026-09-12 政策）', async (t) => {
+  // Block：确定性拦截，不调用模型、不创建候选。
+  let modelCalls = 0;
+  const blockedBase = await start(t, {
+    replyGenerator: async () => { modelCalls += 1; throw new Error('审核拦截时不应调用模型'); },
+    textModerator: async () => ({ decision: 'BLOCK', label: 'Polity', score: 100, providerRequestId: 'tencent-BLOCK', policyVersion: 'tencent-tms-2020-12-29:qiyu_text_v1' })
+  });
+  const { conversation } = await readyConversation(blockedBase, 'dev-alice-token', 'moderation-BLOCK');
+  const response = await request(blockedBase, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'moderation-message-BLOCK', body: { content: { text: '明确违规文本' } } });
+  assert.equal(response.status, 201);
+  assert.equal(response.body.provider, 'content-moderation-policy');
+  assert.equal(response.body.assistant_message.ai_generated, false);
+  assert.equal(response.body.memory_candidate, null);
+  assert.equal(response.body.moderation.decision, 'BLOCK');
+  assert.equal(response.body.moderation.label, 'Polity');
+  assert.equal(modelCalls, 0);
+  // Review：灰区放行（事故教训：误判 Review 一刀切会让用户完全无法对话）。
+  const reviewedBase = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: `（想了想）${text}`, ai_generated: true }),
+    textModerator: async () => ({ decision: 'REVIEW', label: 'Ad', score: 75, providerRequestId: 'tencent-REVIEW', policyVersion: 'tencent-tms-2020-12-29:qiyu_text_v1' })
+  });
+  const reviewedConversation = await readyConversation(reviewedBase, 'dev-alice-token', 'moderation-REVIEW');
+  const reviewed = await request(reviewedBase, `/api/v1/conversations/${reviewedConversation.conversation.conversation_id}/messages`, { method: 'POST', key: 'moderation-message-REVIEW', body: { content: { text: '普通待审核文本' } } });
+  assert.equal(reviewed.status, 201);
+  assert.equal(reviewed.body.provider, 'qwen', 'Review 应放行给模型');
+  assert.equal(reviewed.body.assistant_message.ai_generated, true);
 });
 
 test('模型输出审核未通过时不展示或持久化原始回复，不创建候选且释放本轮配额', async (t) => {
@@ -543,6 +553,29 @@ test('TTS 先持久化任务、审核助手文本、保存私有音频元数据�
   assert.equal(deleted.body.deletion_job.physical_cleanup_state, 'LOCAL_PRIVATE_OBJECT_DELETED');
   assert.ok(timeline.includes('delete-audio'));
   assert.equal((await request(base, `/api/v1/media-assets/${created.body.tts_job.result_asset_id}`)).status, 404);
+});
+
+test('输入审核 Review 是灰区放行不拦对话，Block 仍确定性拦截', async (t) => {
+  // 2026-09-12 事故：供应商把“你是谁”误判 Ad Review，旧逻辑 Review 也兜底
+  // 拦截，用户完全无法对话。政策：灰区放行给模型并留痕，仅 Block 拦截。
+  const calls = [];
+  const base = await start(t, {
+    textModerator: async ({ direction }) => { calls.push(direction); return { decision: direction === 'INPUT' ? 'REVIEW' : 'PASS', label: 'Ad', score: 75, providerRequestId: 'tms_review', policyVersion: 'tms_dev_v1' }; },
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: `（轻轻点头）${text}`, ai_generated: true })
+  });
+  const { conversation } = await readyConversation(base, 'dev-alice-token', 'input-review');
+  const review = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'input-review-msg', body: { content: { text: '你是谁' } } });
+  assert.equal(review.status, 201);
+  assert.equal(review.body.assistant_message.provider, 'qwen', 'Review 灰区应放行给模型，而不是审核兜底文案');
+
+  const blockedBase = await start(t, {
+    textModerator: async ({ direction }) => ({ decision: direction === 'INPUT' ? 'BLOCK' : 'PASS', providerRequestId: 'tms_block', policyVersion: 'tms_dev_v1' })
+  });
+  const blockedConversation = await readyConversation(blockedBase, 'dev-alice-token', 'input-block');
+  const blocked = await request(blockedBase, `/api/v1/conversations/${blockedConversation.conversation.conversation_id}/messages`, { method: 'POST', key: 'input-block-msg', body: { content: { text: '明确违规内容' } } });
+  assert.equal(blocked.status, 201);
+  assert.equal(blocked.body.provider, 'content-moderation-policy');
+  assert.equal(blocked.body.assistant_message.provider, 'content-moderation-policy');
 });
 
 test('TTS 输出审核未通过或 TTS 未启用时不调用语音供应商', async (t) => {

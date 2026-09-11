@@ -1247,7 +1247,10 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
   if (typeof textModerator === 'function') {
     const moderation = await moderateTextWithMetric(store, account, textModerator, { text, conversationId: conversation.conversation_id, direction: 'INPUT' });
     if (!moderation || !['PASS', 'REVIEW', 'BLOCK'].includes(moderation.decision)) throw apiError(502, 'TEXT_MODERATION_RESPONSE_INVALID', '内容审核未返回有效决策');
-    if (moderation.decision !== 'PASS') return createModerationResponse(store, account, conversation, text, moderation);
+    // 封测口径（2026-09-12 事故复盘）：仅 Block 直接拦截；Review 是灰区信号，
+    // 放行给模型并保留审核留痕，运营侧事后复核。此前 Review 也一刀切兜底，
+    // 叠加供应商误判（普通问句被认成 Ad Review）会让用户完全无法对话。
+    if (moderation.decision === 'BLOCK') return createModerationResponse(store, account, conversation, text, moderation);
   }
   // 技术设计 8.4/7.5：请求 stream:true 且配置了流式生成器时走 202 ACCEPTED——
   // 模型调用、额度预留与终稿持久化全部发生在一次性 SSE 令牌的消费请求中，
@@ -1279,7 +1282,9 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     if (typeof textModerator === 'function') {
       const moderation = await moderateTextWithMetric(store, account, textModerator, { text: modelReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
       if (!moderation || !['PASS', 'REVIEW', 'BLOCK'].includes(moderation.decision)) throw apiError(502, 'TEXT_MODERATION_RESPONSE_INVALID', '内容审核未返回有效决策');
-      if (moderation.decision !== 'PASS') {
+      // 与 INPUT 同口径（2026-09-12 事故复盘）：仅 Block 是终局拦截——原始回复
+      // 既不持久化也不展示、不扣额度；Review 属灰区，放行展示并由运营事后复核。
+      if (moderation.decision === 'BLOCK') {
         // The provider response is deliberately neither persisted nor exposed.
         // This is a final output gate, so the user is not charged for a reply
         // that the system replaces with a deterministic safety message.
@@ -1553,7 +1558,8 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
         if (assessModelOutputAuthority(visibleFragment)) return false;
         if (typeof textModerator === 'function') {
           const moderation = await textModerator({ text: visibleFragment, accountId: account.account_id, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
-          if (!moderation || moderation.decision !== 'PASS') return false;
+          // 与非流式同口径：仅 Block 拦截流式片段；Review 灰区放行（2026-09-12）。
+          if (!moderation || moderation.decision === 'BLOCK') return false;
         }
         sequence += 1;
         emit('message.chunk', { sequence, text: visibleFragment });
@@ -1590,7 +1596,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
           if (assessModelOutputAuthority(fallbackReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '降级终稿未通过输出门禁');
           if (typeof textModerator === 'function') {
             const moderation = await moderateTextWithMetric(store, account, textModerator, { text: fallbackReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
-            if (!moderation || moderation.decision !== 'PASS') throw apiError(200, 'OUTPUT_MODERATION_REJECTED', '降级终稿未通过输出审核');
+            if (!moderation || moderation.decision === 'BLOCK') throw apiError(200, 'OUTPUT_MODERATION_REJECTED', '降级终稿未通过输出审核');
           }
           emit('message.replaced', { request_id: requestId, reason: 'STREAM_PROVIDER_FALLBACK' });
           const usage = commitUsage(fallbackReply);
@@ -1757,7 +1763,7 @@ function createModerationResponse(store, account, conversation, text, moderation
   return created({
     user_message: userMessage, assistant_message: assistantMessage, memory_candidate: null,
     provider: 'content-moderation-policy', disclaimer: '这是固定内容审核响应，文本未发送给角色模型。',
-    moderation: { code, direction: 'INPUT', decision: moderation.decision, provider_request_id: moderation.providerRequestId, policy_version: moderation.policyVersion }
+    moderation: { code, direction: 'INPUT', decision: moderation.decision, label: moderation.label ?? null, score: moderation.score ?? null, provider_request_id: moderation.providerRequestId, policy_version: moderation.policyVersion }
   });
 }
 
