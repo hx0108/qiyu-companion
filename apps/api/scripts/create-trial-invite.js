@@ -23,10 +23,11 @@ function generatedInviteCode() {
   return `QY${value.slice(0, 6)}-${value.slice(6, 12)}-${value.slice(12, 18)}-${value.slice(18, 24)}`;
 }
 
-function oneTimeCredentialOutput({ inviteCode, initialSecret, days }) {
+function oneTimeCredentialOutput({ inviteCode, days }) {
   // ASCII keys are intentionally easy to copy from Windows PowerShell and
   // avoid terminal-encoding ambiguity. Nothing is written to disk.
-  return `INVITE_CODE=${inviteCode}\nINITIAL_SECRET=${initialSecret}\nEXPIRES_IN_DAYS=${days}\n`;
+  // 2026-09-11 起封测登录只凭邀请码（初始口令已取消）。
+  return `INVITE_CODE=${inviteCode}\nEXPIRES_IN_DAYS=${days}\nNOTE=凭邀请码即可登录；初始口令已取消。\n`;
 }
 
 async function main() {
@@ -42,8 +43,8 @@ async function main() {
       VALUES ($1, $2, $3, CURRENT_TIMESTAMP + ($4 * interval '1 day'))`,
     [credentialHash(inviteCode), await hashInitialSecret(initialSecret), label, days]);
   } finally { await client.end().catch(() => {}); }
-  process.stderr.write('[qiyu] Invite persisted. One-time credentials follow; do not save them to disk or Git.\n');
-  process.stdout.write(oneTimeCredentialOutput({ inviteCode, initialSecret, days }));
+  process.stderr.write('[qiyu] Invite persisted. One-time credential follows; do not save it to disk or Git.\n');
+  process.stdout.write(oneTimeCredentialOutput({ inviteCode, days }));
 }
 
 if (require.main === module) {

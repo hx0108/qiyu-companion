@@ -2960,7 +2960,7 @@ function refreshTokens(store, body) {
 
 async function createTrialSession(trialAuth, body) {
   try {
-    const result = await trialAuth.createSession({ inviteCode: body?.invite_code, initialSecret: body?.initial_secret });
+    const result = await trialAuth.createSession({ inviteCode: body?.invite_code });
     return created({ account: { account_id: result.account_id, age_status: 'AGE_UNVERIFIED' }, tokens: result.tokens,
       authentication: 'closed-trial-invite', note: '封闭试用账户已建立。完成 AI 告知和年龄声明后才能进入互动。' });
   } catch (error) { throw trialAuthApiError(error); }

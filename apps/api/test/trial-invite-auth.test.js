@@ -31,10 +31,11 @@ test('封闭试用：邀请码首次登录、年龄准入、反馈持久化与�
   assert.deepEqual(access.body, { enabled: true, authentication: 'closed-trial-invite', payment: 'disabled', external_age_verification: 'disabled' });
   const legacyToken = await request(base, '/api/v1/usage/daily', { token: 'dev-alice-token' });
   assert.equal(legacyToken.status, 401);
-  const rejected = await request(base, '/api/v1/auth/trial-sessions', { method: 'POST', body: { invite_code: 'QYTEST-ALPHA-BETA', initial_secret: 'wrong' } });
+  // 登录只凭邀请码（2026-09-11 取消初始口令）：错误邀请码必须被拒。
+  const rejected = await request(base, '/api/v1/auth/trial-sessions', { method: 'POST', body: { invite_code: 'QYTEST-ALPHA-WRONG' } });
   assert.equal(rejected.status, 401);
 
-  const login = await request(base, '/api/v1/auth/trial-sessions', { method: 'POST', body: { invite_code: 'QYTEST-ALPHA-BETA', initial_secret: 'a_secure_trial_secret_1234567890' } });
+  const login = await request(base, '/api/v1/auth/trial-sessions', { method: 'POST', body: { invite_code: 'QYTEST-ALPHA-BETA' } });
   assert.equal(login.status, 201);
   assert.equal(login.body.authentication, 'closed-trial-invite');
   const token = login.body.tokens.access_token;
@@ -66,7 +67,7 @@ test('封闭试用：由持久化 store 提供的认证仓库也会解析后续 
   const base = await start(t, { store, trialAuthEnabled: true });
 
   const login = await request(base, '/api/v1/auth/trial-sessions', {
-    method: 'POST', body: { invite_code: 'QYPERSIST-ALPHA-BETA', initial_secret: 'another_secure_trial_secret_1234567890' }
+    method: 'POST', body: { invite_code: 'QYPERSIST-ALPHA-BETA' }
   });
   assert.equal(login.status, 201);
   const notices = await request(base, '/api/v1/required-notices', { token: login.body.tokens.access_token });

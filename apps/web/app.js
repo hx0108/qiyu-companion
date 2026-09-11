@@ -116,7 +116,7 @@ function bearerToken() {
 
 function authenticatedHeaders(accept) {
   const token = bearerToken();
-  if (!token) throw apiError("试用会话已失效，请重新输入邀请码和初始口令。", 401);
+  if (!token) throw apiError("试用会话已失效，请重新输入邀请码。", 401);
   const headers = new Headers({ Accept: accept });
   headers.set("Authorization", `Bearer ${token}`);
   if (!isClosedTrial()) headers.set("X-Qiyu-Client-Environment", "local-development-synthetic");
@@ -355,11 +355,10 @@ async function bootstrap() {
 
 async function submitTrialLogin(form) {
   const inviteCode = form.elements.invite_code.value.trim();
-  const initialSecret = form.elements.initial_secret.value.trim();
-  if (!inviteCode || !initialSecret) return;
+  if (!inviteCode) return;
   setBusy(true);
   try {
-    const result = await api("/auth/trial-sessions", { method: "POST", public: true, body: { invite_code: inviteCode, initial_secret: initialSecret } });
+    const result = await api("/auth/trial-sessions", { method: "POST", public: true, body: { invite_code: inviteCode } });
     await saveTrialSession(result.tokens);
     form.reset();
     await bootstrap();
@@ -1826,7 +1825,7 @@ function prototypeNav(active) {
 function screen(content) { return `<section class="screen">${content}</section>`; }
 
 function renderTrialLogin() {
-  return prototypeShell(`<form id="trial-login-form"><div class="content"><div class="eyebrow">Invite-only trial</div><h1 id="app-title">凭邀请进入，<br>安心试用。</h1><p class="lead">这是仅限受邀成年用户的免费封闭试用：不提供支付、不公开注册，也不代表正式上线。</p><div class="fact-grid"><article class="fact"><span class="fact-icon">${prototypeIcon("spark")}</span><div><strong>你正在与 AI 互动</strong><small>角色回复由 AI 生成并保留明显标识。</small></div></article><article class="fact"><span class="fact-icon">${prototypeIcon("shield")}</span><div><strong>仅向受邀成年用户开放</strong><small>登录后仍需完成系统告知与年龄声明。</small></div></article></div><label class="field"><span>邀请码</span><input name="invite_code" autocomplete="off" autocapitalize="characters" required placeholder="例如 QYXXXX-XXXXXX-XXXXXX-XXXXXX"></label><label class="field"><span>初始口令</span><input name="initial_secret" type="password" autocomplete="off" required placeholder="由邀请方单独发送"></label><div class="rights">${prototypeIcon("lock", 17)}<span>登录凭据仅保留在本浏览器会话中。请勿输入他人的隐私、证件或支付信息。</span></div></div><div class="bottom-action"><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>进入封闭试用 ${prototypeIcon("arrow", 18)}</button><div class="note">如需退出，可在数据中心注销账户和发起数据删除。</div></div></form>`, "Closed beta");
+  return prototypeShell(`<form id="trial-login-form"><div class="content"><div class="eyebrow">Invite-only trial</div><h1 id="app-title">凭邀请进入，<br>安心试用。</h1><p class="lead">这是仅限受邀成年用户的免费封闭试用：不提供支付、不公开注册，也不代表正式上线。</p><div class="fact-grid"><article class="fact"><span class="fact-icon">${prototypeIcon("spark")}</span><div><strong>你正在与 AI 互动</strong><small>角色回复由 AI 生成并保留明显标识。</small></div></article><article class="fact"><span class="fact-icon">${prototypeIcon("shield")}</span><div><strong>仅向受邀成年用户开放</strong><small>登录后仍需完成系统告知与年龄声明。</small></div></article></div><label class="field"><span>邀请码</span><input name="invite_code" inputmode="latin" autocomplete="off" autocapitalize="characters" required placeholder="例如 QYXXXX-XXXXXX-XXXXXX-XXXXXX"></label><div class="bottom-action in-flow"><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>进入封闭试用 ${prototypeIcon("arrow", 18)}</button><div class="note">凭邀请码即可登录。如需退出，可在数据中心注销账户和发起数据删除。</div></div><div class="rights">${prototypeIcon("lock", 17)}<span>登录凭据仅保留在本浏览器会话中。请勿输入他人的隐私、证件或支付信息。</span></div></div></form>`, "Closed beta");
 }
 
 function renderError() {

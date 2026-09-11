@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { ACCESS_TOKEN_TTL_SECONDS, REFRESH_TOKEN_TTL_SECONDS, TrialAuthError, credentialHash, issueTokens, normalizeInviteCode, verifyInitialSecret } = require('../domain/trial-invite-auth');
+const { ACCESS_TOKEN_TTL_SECONDS, REFRESH_TOKEN_TTL_SECONDS, TrialAuthError, credentialHash, issueTokens, normalizeInviteCode } = require('../domain/trial-invite-auth');
 
 class PostgresTrialInviteAuthRepository {
   constructor({ pool } = {}) {
@@ -9,15 +9,16 @@ class PostgresTrialInviteAuthRepository {
     this.pool = pool;
   }
 
-  async createSession({ inviteCode, initialSecret }) {
+  // 封测登录只凭邀请码（口令已取消，见 domain/trial-invite-auth.js 同名注释）。
+  async createSession({ inviteCode }) {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      const inviteResult = await client.query(`SELECT invite_id, initial_secret_hash, status, account_id, expires_at
+      const inviteResult = await client.query(`SELECT invite_id, status, account_id, expires_at
         FROM trial_invites WHERE invite_code_hash = $1 FOR UPDATE`, [credentialHash(normalizeInviteCode(inviteCode))]);
       const invite = inviteResult.rows[0];
-      if (!invite || invite.status !== 'ACTIVE' || (invite.expires_at && new Date() >= new Date(invite.expires_at)) || !(await verifyInitialSecret(initialSecret, invite.initial_secret_hash))) {
-        throw new TrialAuthError('TRIAL_INVITE_INVALID', '邀请码或试用口令不正确');
+      if (!invite || invite.status !== 'ACTIVE' || (invite.expires_at && new Date() >= new Date(invite.expires_at))) {
+        throw new TrialAuthError('TRIAL_INVITE_INVALID', '邀请码不正确');
       }
       let accountId = invite.account_id;
       if (!accountId) {

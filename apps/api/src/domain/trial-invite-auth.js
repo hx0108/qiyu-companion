@@ -14,7 +14,7 @@ class TrialAuthError extends Error {
 function normalizeInviteCode(value) {
   const code = String(value || '').trim().toUpperCase();
   if (!/^[A-Z0-9]{4,32}(?:-[A-Z0-9]{4,32}){1,4}$/.test(code)) {
-    throw new TrialAuthError('TRIAL_INVITE_INVALID', '邀请码或试用口令不正确');
+    throw new TrialAuthError('TRIAL_INVITE_INVALID', '邀请码不正确');
   }
   return code;
 }
@@ -79,10 +79,13 @@ class MemoryTrialInviteAuth {
     return invite;
   }
 
-  async createSession({ inviteCode, initialSecret }) {
+  // 封测登录只凭邀请码（2026-09-11 产品决定取消初始口令）：邀请码本身即为
+  // 一次性长随机凭据，配合防火墙白名单构成封测边界。口令哈希仍随邀请生成
+  // 并入库（列约束不变），但不再参与会话签发校验。
+  async createSession({ inviteCode }) {
     const invite = this.store.trialInvites.get(credentialHash(normalizeInviteCode(inviteCode)).toString('hex'));
-    if (!invite || invite.status !== 'ACTIVE' || (invite.expires_at && this.now() >= invite.expires_at) || !(await verifyInitialSecret(initialSecret, invite.initial_secret_hash))) {
-      throw new TrialAuthError('TRIAL_INVITE_INVALID', '邀请码或试用口令不正确');
+    if (!invite || invite.status !== 'ACTIVE' || (invite.expires_at && this.now() >= invite.expires_at)) {
+      throw new TrialAuthError('TRIAL_INVITE_INVALID', '邀请码不正确');
     }
     if (!invite.account_id) {
       const { DevelopmentStore } = require('./store');

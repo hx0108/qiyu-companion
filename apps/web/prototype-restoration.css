@@ -36,6 +36,9 @@
 .qiyu-prototype .check-row input:checked::after { content: "✓"; color: #fff; font-weight: 700; font-size: 13px; position: absolute; left: 4px; top: 0; }
 .qiyu-prototype .check-row span { color: #51464c; font-size: 12px; line-height: 1.55; }
 .qiyu-prototype .bottom-action { padding: 12px 22px calc(18px + env(safe-area-inset-bottom)); position: absolute; z-index: 6; left: 0; right: 0; bottom: 0; background: linear-gradient(180deg, transparent, var(--qy-paper) 22%); }
+/* 流式变体：按钮随内容滚动而非悬浮遮挡，用于键盘交互多的表单页（试用登录）。
+   手机键盘弹出时页面结构不跳动，符合常规表单页表现。 */
+.qiyu-prototype .bottom-action.in-flow { position: static; padding: 14px 0 4px; background: none; }
 .qiyu-prototype .btn { min-height: 52px; width: 100%; padding: 0 18px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 0; border-radius: 17px; font-size: 14px; font-weight: 600; }
 .qiyu-prototype .btn-primary { color: #fff; background: var(--qy-plum); box-shadow: 0 12px 24px rgba(91,54,83,.2); }
 .qiyu-prototype .btn-line { color: var(--qy-ink); border: 1px solid var(--qy-line); background: transparent; }
