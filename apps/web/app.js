@@ -188,7 +188,10 @@ function setBusy(busy) { state.busy = busy; render(); }
 
 function serverMessage(error) {
   if (error.status === 428) return "服务端仍要求完成必要告知；请刷新告知状态后继续。";
-  if (error.status === 401) return isClosedTrial() ? "试用会话已失效，请重新输入邀请码和初始口令。" : "开发 Token 未被本地 API 接受；请检查 API 的合成账户配置。";
+  if (error.status === 401) {
+    if (isClosedTrial()) return error.payload?.error?.message || "试用会话已失效，请重新输入邀请码。";
+    return "开发 Token 未被本地 API 接受；请检查 API 的合成账户配置。";
+  }
   if (error.status === 403) return "服务端策略拒绝此操作（可能不是 AGE_PASS 或资源不属于当前账户）。";
   if (error.status === 409) return "服务端发现版本或幂等冲突；已保留服务端事实，请刷新后重试。";
   return error.message || "服务端未确认该操作。";
