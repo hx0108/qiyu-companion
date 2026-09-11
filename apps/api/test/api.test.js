@@ -134,18 +134,25 @@ test('未成年人和未鉴权账户无法进入普通互动，但年龄声明�
   assert.equal(character.body.error.code, 'AGE_NOT_PASSED');
 });
 
-test('出生日期变更或申诉会进入增强核验等待态，且普通互动保持关闭', async (t) => {
+test('自声明修正出生日期不再死锁：改期视为修正直接通过，可继续创建角色', async (t) => {
   const base = await start(t);
   await displayAndPass(base, 'dev-alice-token', 'age-review');
   const first = await request(base, '/api/v1/age/declarations', { method: 'POST', key: 'age-review-first', body: { date_of_birth: '1990-01-01', confirmed_18_plus: true } });
   assert.equal(first.body.status, 'AGE_PASS');
+  // 2026-09-12 调整：封测口径无增强核验供应商，改期即锁 AGE_REVIEW 是无出路
+  // 死锁（真实用户打错一次生日后被锁）；防未成年防线在 DECLARED_MINOR 与
+  // SELF_REPORTED_MINOR 路径，不依赖本分支。
   const changed = await request(base, '/api/v1/age/declarations', { method: 'POST', key: 'age-review-changed', body: { date_of_birth: '1991-01-01', confirmed_18_plus: true } });
-  assert.equal(changed.body.status, 'AGE_REVIEW');
-  assert.deepEqual(changed.body.reason_codes, ['DATE_OF_BIRTH_CHANGED']);
-  assert.equal(changed.body.enhanced_verification.state, 'REQUIRED');
-  const blocked = await request(base, '/api/v1/characters', { method: 'POST', key: 'age-review-character', body: { name: '不应创建' } });
-  assert.equal(blocked.status, 403);
-  const appeal = await request(base, '/api/v1/age/appeals', { method: 'POST', key: 'age-review-appeal', body: {} });
+  assert.equal(changed.body.status, 'AGE_PASS');
+  assert.deepEqual(changed.body.reason_codes, []);
+  const character = await request(base, '/api/v1/characters', { method: 'POST', key: 'age-review-character', body: { name: '改期后角色' } });
+  assert.equal(character.status, 201);
+  // 无效声明的 REVIEW 与申诉通道保持原状（ DECLARATION_INVALID 仍需人工出口）。
+  await displayAndPass(base, 'dev-bob-token', 'age-review-bob');
+  const devBob = await request(base, '/api/v1/age/declarations', { method: 'POST', token: 'dev-bob-token', key: 'age-review-invalid', body: { date_of_birth: '1990-01-01', confirmed_18_plus: false } });
+  assert.equal(devBob.body.status, 'AGE_REVIEW');
+  assert.deepEqual(devBob.body.reason_codes, ['DECLARATION_INVALID']);
+  const appeal = await request(base, '/api/v1/age/appeals', { method: 'POST', token: 'dev-bob-token', key: 'age-review-appeal', body: {} });
   assert.equal(appeal.status, 202);
   assert.deepEqual(appeal.body.reason_codes, ['APPEAL_REQUESTED']);
 });
@@ -158,8 +165,9 @@ test('既有会话在年龄状态转为复核后，普通消息不会进入审�
     textModerator: async () => { moderatorCalls += 1; throw new Error('年龄复核中的普通消息不应进入审核器'); }
   });
   const { conversation } = await readyConversation(base, 'dev-alice-token', 'age-transition');
+  // readyConversation 已把 alice 声明为成年；用无效声明（未勾确认）触发 REVIEW。
   const changed = await request(base, '/api/v1/age/declarations', {
-    method: 'POST', key: 'age-transition-change', body: { date_of_birth: '1991-01-01', confirmed_18_plus: true }
+    method: 'POST', key: 'age-transition-change', body: { date_of_birth: '1991-01-01', confirmed_18_plus: false }
   });
   assert.equal(changed.body.status, 'AGE_REVIEW');
 

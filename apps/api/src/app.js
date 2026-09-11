@@ -320,10 +320,11 @@ function declareAge(account, body) {
   } else if (ageOn(dob) < 18) {
     account.age_status = 'AGE_DENIED_MINOR';
     account.age_reason_codes = ['DECLARED_MINOR'];
-  } else if (account.declared_date_of_birth && account.declared_date_of_birth !== body.date_of_birth) {
-    account.age_status = 'AGE_REVIEW';
-    account.age_reason_codes = ['DATE_OF_BIRTH_CHANGED'];
   } else {
+    // 自声明的出生日期修改按“修正”处理（2026-09-12 调整）：封测口径没有
+    // 增强核验供应商，改期即锁 AGE_REVIEW 等于无出路死锁，真实用户踩中。
+    // 未成年防线不受影响：自报未成年 DENIED、对话中自报可能未成年仍打回
+    // REVIEW（SELF_REPORTED_MINOR，见 createSafetyResponse）。
     account.age_status = 'AGE_PASS';
     account.age_reason_codes = [];
     account.declared_date_of_birth = body.date_of_birth;

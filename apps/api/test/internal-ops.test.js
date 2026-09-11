@@ -36,14 +36,14 @@ test('年龄人工复核：队列可见→复核放行→用户恢复互动；�
   const base = await start(t);
   await passAge(base, 'ar');
 
-  // 制造 AGE_REVIEW：变更出生日期触发冲突复核。
-  const redeclared = await request(base, '/api/v1/age/declarations', { method: 'POST', key: 'ar-re', body: { date_of_birth: '1991-02-02', confirmed_18_plus: true } });
+  // 制造 AGE_REVIEW：无效声明触发复核（DOB 自改 2026-09-12 起按修正直接通过）。
+  const redeclared = await request(base, '/api/v1/age/declarations', { method: 'POST', key: 'ar-re', body: { date_of_birth: '1991-02-02', confirmed_18_plus: false } });
   assert.equal(redeclared.body.status, 'AGE_REVIEW');
 
   const queue = await internal(base, '/internal/age-reviews');
   assert.equal(queue.status, 200);
-  const entry = queue.body.age_reviews.find((review) => review.reason_codes.includes('DATE_OF_BIRTH_CHANGED'));
-  assert.ok(entry, '复核队列应包含 DOB 冲突账户');
+  const entry = queue.body.age_reviews.find((review) => review.reason_codes.includes('DECLARATION_INVALID'));
+  assert.ok(entry, '复核队列应包含声明无效账户');
 
   // 用户 token 不可访问内部接口。
   const forbidden = await request(base, '/internal/age-reviews');
@@ -64,7 +64,7 @@ test('年龄人工复核：队列可见→复核放行→用户恢复互动；�
 
   // 驳回路径（bob 制造 REVIEW 后驳回）：互动阻断、数据权利保留。
   await passAge(base, 'ar2', 'dev-bob-token');
-  await request(base, '/api/v1/age/declarations', { method: 'POST', token: 'dev-bob-token', key: 'ar2-re', body: { date_of_birth: '1992-03-03', confirmed_18_plus: true } });
+  await request(base, '/api/v1/age/declarations', { method: 'POST', token: 'dev-bob-token', key: 'ar2-re', body: { date_of_birth: '1992-03-03', confirmed_18_plus: false } });
   const bobQueue = await internal(base, '/internal/age-reviews');
   const bobEntry = bobQueue.body.age_reviews.find((review) => review.account_id.includes('bob') || bobQueue.body.age_reviews.at(-1));
   const denied = await internal(base, `/internal/age-reviews/${encodeURIComponent(bobEntry.account_id)}/decisions`, { method: 'POST', key: 'ar-deny', body: { decision: 'DENIED_MINOR', reason: '申诉材料确认未成年' } });

@@ -1556,12 +1556,24 @@ function renderNotices() {
 
 function renderAge() {
   const status = ageStatus();
-  const blocked = status !== "AGE_UNVERIFIED";
-  const detail = status === "AGE_PASS" ? "账号已获得 18+ 服务访问资格。" : status === "AGE_REVIEW" ? "当前处于增强核验等待态，普通互动保持关闭。" : status === "AGE_DENIED_MINOR" ? "未成年人不可使用虚拟伴侣服务；数据权利不因此被阻断。" : "信息只提交给服务端进行确定性年龄判断。";
-  const form = blocked
-    ? (status === "AGE_PASS" ? '<button class="btn btn-primary" data-action="continue-character">创建我的角色 ${prototypeIcon("arrow", 18)}</button>' : '<button class="btn btn-primary" data-action="request-age-appeal">提交年龄复核</button><button class="btn btn-line" data-action="reload-age">刷新服务端状态</button>')
-    : `<form id="age-form"><label class="check-row"><input name="adult_confirmed" type="checkbox" required><span>我确认本人已满 18 周岁，并提交年龄声明供服务端判断。</span></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>提交年龄声明 ${prototypeIcon("arrow", 18)}</button></form>`;
-  return prototypeShell(`<div class="content"><div class="eyebrow">Age assurance</div><h1 id="app-title">年龄保障</h1><p class="lead">先完成基础年龄判断。只有出现账号或行为风险信号时，才会请求更强的核验。</p><section class="verify-card"><h3>${status === "AGE_PASS" ? "核验已通过" : "基础信息"}</h3><p class="page-sub">${detail}</p>${!blocked ? `<label class="field"><span>出生日期</span><input form="age-form" name="birth_date" type="date" required></label>` : ""}<div class="status-row"><span class="status-dot ${status === "AGE_PASS" ? "pass" : ""}"></span>${escapeHtml(status)} · ${escapeHtml((state.age?.reason_codes ?? []).join("、") || "等待服务端结果")}</div></section><div class="rights">${prototypeIcon("lock", 17)}<span>栖语不保存证件原图；增强年龄核验的供应商接入与结果以服务端状态为准。</span></div></div><div class="bottom-action">${form}<div class="note">浏览器不自行判定年龄结果，也不展示原型模拟的核验成功。</div></div>`, "02 / 03");
+  const reasons = state.age?.reason_codes ?? [];
+  const reviewDetail = ({
+    DECLARATION_INVALID: "上一次声明无效（日期不完整或未勾选确认），可直接重新填写提交。",
+    SELF_REPORTED_MINOR: "对话中出现自报未成年的风险信号，已进入增强核验；复核前普通互动保持关闭。",
+    DATE_OF_BIRTH_CHANGED: "出生日期修改触发过复核；现在可以直接修正后重新声明。",
+  })[reasons[0]] ?? "等待服务端复核结论；复核前普通互动保持关闭。";
+  const detail = status === "AGE_PASS" ? "账号已获得 18+ 服务访问资格。" : status === "AGE_REVIEW" ? reviewDetail : status === "AGE_DENIED_MINOR" ? "未成年人不可使用虚拟伴侣服务；数据权利不因此被阻断。" : "信息只提交给服务端进行确定性年龄判断。";
+  const declareForm = `<form id="age-form"><label class="check-row"><input name="adult_confirmed" type="checkbox" required><span>我确认本人已满 18 周岁，并提交年龄声明供服务端判断。</span></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>提交年龄声明 ${prototypeIcon("arrow", 18)}</button></form>`;
+  const appealButtons = '<div class="flow-actions"><button class="btn btn-line" data-action="request-age-appeal">提交年龄复核</button><button class="btn btn-line" data-action="reload-age">刷新服务端状态</button></div>';
+  const form = status === "AGE_PASS"
+    ? `<button class="btn btn-primary" data-action="continue-character">创建我的角色 ${prototypeIcon("arrow", 18)}</button>`
+    : status === "AGE_REVIEW"
+      ? `${declareForm}${appealButtons}`
+      : status === "AGE_DENIED_MINOR"
+        ? appealButtons
+        : declareForm;
+  const showBirthInput = ["AGE_UNVERIFIED", "AGE_REVIEW"].includes(status);
+  return prototypeShell(`<div class="content"><div class="eyebrow">Age assurance</div><h1 id="app-title">年龄保障</h1><p class="lead">先完成基础年龄判断。只有出现账号或行为风险信号时，才会请求更强的核验。</p><section class="verify-card"><h3>${status === "AGE_PASS" ? "核验已通过" : "基础信息"}</h3><p class="page-sub">${detail}</p>${showBirthInput ? `<label class="field"><span>出生日期</span><input form="age-form" name="birth_date" type="date" required></label>` : ""}<div class="status-row"><span class="status-dot ${status === "AGE_PASS" ? "pass" : ""}"></span>${escapeHtml(status)} · ${escapeHtml(reasons.join("、") || "等待服务端结果")}</div></section><div class="rights">${prototypeIcon("lock", 17)}<span>栖语不保存证件原图；增强年龄核验的供应商接入与结果以服务端状态为准。</span></div></div><div class="bottom-action in-flow">${form}<div class="note">浏览器不自行判定年龄结果，也不展示原型模拟的核验成功。</div></div>`, "02 / 03");
 }
 
 function personaFields(persona = {}) {
