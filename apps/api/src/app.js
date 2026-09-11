@@ -998,11 +998,25 @@ function createPersonaDraft(store, account, path, body) {
   if (body?.expected_version !== character.version) throw apiError(409, 'VERSION_CONFLICT', '角色版本冲突');
   const persona = sanitizePersona(body?.persona);
   const changedFields = personaChangedFields(character.persona, persona);
-  if (changedFields.length === 0) throw apiError(400, 'VALIDATION_ERROR', '人格草稿必须包含至少一处变更');
+  if (changedFields.length === 0) throw apiError(400, 'VALIDATION_ERROR', '人格档案必须包含至少一处变更');
   const nextVersion = Math.max(...(character.persona_history ?? []).map((entry) => entry.version), character.version) + 1;
   const draft = personaRelease.createDraft({ version: nextVersion, persona, changedFields, note: requiredNote(body?.note), parentVersion: character.active_persona_version ?? character.version });
-  character.persona_history.push(draft);
-  return created({ persona_version: publicPersonaVersion(draft), character: publicCharacter(character) });
+  if (body?.release_mode === 'draft') {
+    // 运营管道形态：保留 DRAFT，由审核员走评测/影子/灰度/双人审批发布。
+    character.persona_history.push(draft);
+    return created({ persona_version: publicPersonaVersion(draft), character: publicCharacter(character) });
+  }
+  // 封测口径（2026-09-12 产品决定）：本人改自己角色的人格 → 保存即生效，
+  // 改完立刻能按新人格对话与合成语音。运营侧管道与版本历史/回滚不受影响
+  // （见 persona-release-service 头注）。
+  const released = personaRelease.promoteSelfEditStable(draft, { accountId: account.account_id });
+  character.persona_history.push(released);
+  const priorStable = (character.persona_history ?? []).find((item) => item.state === 'STABLE' && item.version !== released.version);
+  if (priorStable) replacePersonaVersion(character, personaRelease.retireStable(priorStable));
+  character.persona = released.persona;
+  character.version = released.version;
+  character.active_persona_version = released.version;
+  return created({ persona_version: publicPersonaVersion(released), character: publicCharacter(character) });
 }
 
 // PRD 3.2.1 用户可见可改的人格档案字段；系统安全边界由服务端持有，不在此列。

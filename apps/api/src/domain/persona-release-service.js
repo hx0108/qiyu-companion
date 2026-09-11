@@ -1,6 +1,10 @@
 'use strict';
 
-// 人格发布是确定性运营流程：模型、前端和普通用户都不能把草稿直接变为稳定版本。
+// 人格发布有两条确定性路径（2026-09-12 起）：
+// 1) 运营管道（面向全部用户的发布）：DRAFT→EVALUATING→SHADOW→CANARY→STABLE，
+//    模型、前端和普通用户都不能把草稿直接推成稳定版本；
+// 2) 用户自助编辑（封测口径，产品决定）：本人保存自己角色的人格 → 立即生效，
+//    只影响自己的角色；历史版本仍全量保留（旧 STABLE 转 RETIRED），运营回滚管道照常可用。
 // 此服务只管理状态及其可验证前置条件；授权、存储和流量路由由调用方负责。
 const PERSONA_VERSION_STATES = Object.freeze(['DRAFT', 'EVALUATING', 'SHADOW', 'CANARY', 'STABLE', 'REJECTED', 'ROLLED_BACK', 'RETIRED']);
 const MAX_CANARY_TRAFFIC_PERCENT = 10;
@@ -10,6 +14,12 @@ function createDraft({ version, persona, changedFields, note, parentVersion, now
     version, persona, changed_fields: [...changedFields], note, parent_version: parentVersion,
     state: 'DRAFT', evaluation: null, created_at: now, updated_at: now
   });
+}
+
+function promoteSelfEditStable(version, { accountId, now = new Date().toISOString() }) {
+  requireState(version, 'DRAFT');
+  requireText(accountId, 'accountId');
+  return { ...version, state: 'STABLE', stable: { reviewer_id: `account:${accountId}`, canary_report_ref: 'self-edit-immediate', promoted_at: now }, updated_at: now };
 }
 
 function recordEvaluation(version, { suiteVersion, criticalPassRate, overallPassRate, reportRef, reviewerId, now = new Date().toISOString() }) {
@@ -71,4 +81,4 @@ function requireState(version, expected) { if (!version || version.state !== exp
 function requireText(value, name) { if (typeof value !== 'string' || !value.trim() || value.trim().length > 256) throw stateError('PERSONA_RELEASE_EVIDENCE_REQUIRED', `${name} 必须是 1-256 位的审计标识`); }
 function stateError(code, message) { const error = new Error(message); error.code = code; return error; }
 
-module.exports = { MAX_CANARY_TRAFFIC_PERCENT, PERSONA_VERSION_STATES, canaryTraffic, createDraft, promoteCanary, promoteStable, recordEvaluation, retireStable, rollback, stateError, startShadow };
+module.exports = { MAX_CANARY_TRAFFIC_PERCENT, PERSONA_VERSION_STATES, canaryTraffic, createDraft, promoteCanary, promoteSelfEditStable, promoteStable, recordEvaluation, retireStable, rollback, stateError, startShadow };

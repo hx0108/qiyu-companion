@@ -588,12 +588,14 @@ async function saveCharacterProfile(form) {
       });
       state.character = unwrap(renamed, "character", null) ?? renamed;
     }
-    const draft = await api(`/characters/${encodeURIComponent(characterId())}/persona-versions`, {
-      method: "POST", idempotent: uuid(), body: { expected_version: state.character.version, persona: personaFromForm(form), note: "角色档案页人格草稿" },
+    const saved = await api(`/characters/${encodeURIComponent(characterId())}/persona-versions`, {
+      method: "POST", idempotent: uuid(), body: { expected_version: state.character.version, persona: personaFromForm(form), note: "角色档案页修改人格" },
     });
-    state.character = unwrap(draft, "character", null) ?? state.character;
-    await openCharacterProfile();
-    setToast(`人格草稿 v${draft.persona_version?.version ?? ""} 已创建，当前稳定人格未改变，等待评测与灰度发布。`);
+    state.character = unwrap(saved, "character", null) ?? state.character;
+    // 改完即生效、即回对话：新人格立刻驱动回复与语音（2026-09-12 产品口径）。
+    state.route = "chat";
+    await refreshWorldState();
+    setToast(`人格 v${saved.persona_version?.version ?? ""} 已生效，直接继续对话吧；语音也会用新人格生成。`);
   } catch (error) {
     setToast(serverMessage(error));
   } finally { setBusy(false); }
@@ -1602,8 +1604,8 @@ function renderCharacterProfile() {
   const character = state.character;
   if (!character) { state.route = "character"; return renderCharacter(); }
   const history = (character.persona_history ?? []).slice().reverse().map((entry) => `<article class="asset"><div><b>版本 ${escapeHtml(entry.version)} · ${escapeHtml(entry.state ?? "STABLE")} · ${escapeHtml(new Date(entry.created_at).toLocaleString())}</b><small>${escapeHtml(entry.note || "无备注")} · 变更：${escapeHtml((entry.changed_fields ?? []).join(", ") || "无")}</small></div></article>`).join("");
-  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button><span class="dev-label">Persona</span></div><div class="eyebrow">Persona continuity</div><h1 id="app-title">角色档案</h1><p class="lead">当前稳定人格版本 ${escapeHtml(character.active_persona_version ?? character.version)}。人格修改会先成为草稿，必须通过评测、影子与灰度后才会生效。</p>
-  <form id="persona-form" class="stack"><label class="field"><span>角色名字</span><input name="character_name" maxlength="80" required value="${escapeHtml(character.name ?? "")}"></label>${personaFields(character.persona ?? {})}<button class="btn btn-primary" ${state.busy ? "disabled" : ""}>创建人格草稿</button></form>
+  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button><span class="dev-label">Persona</span></div><div class="eyebrow">Persona continuity</div><h1 id="app-title">角色档案</h1><p class="lead">当前生效人格版本 ${escapeHtml(character.active_persona_version ?? character.version)}。修改保存后立即生效，可直接继续对话和语音；历史版本全部保留。</p>
+  <form id="persona-form" class="stack"><label class="field"><span>角色名字</span><input name="character_name" maxlength="80" required value="${escapeHtml(character.name ?? "")}"></label>${personaFields(character.persona ?? {})}<button class="btn btn-primary" ${state.busy ? "disabled" : ""}>保存并立即生效</button></form>
   <div class="stack"><b>变更记录</b>${history || '<div class="empty-state">暂无历史版本。</div>'}</div>`);
 }
 

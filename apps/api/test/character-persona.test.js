@@ -118,7 +118,7 @@ test('人格草稿只能经审核员评测、影子、受限灰度后发布，�
   await passAge(base, 'persona-release');
   const created = await request(base, '/api/v1/characters', { method: 'POST', key: 'pr-create', body: { name: '林默', persona: PERSONA } });
   const id = created.body.character.character_id;
-  const draft = await request(base, `/api/v1/characters/${id}/persona-versions`, { method: 'POST', key: 'pr-draft', body: { expected_version: 1, persona: { ...PERSONA, personality: '更轻快，但仍尊重边界' }, note: '准备灰度的新表达' } });
+  const draft = await request(base, `/api/v1/characters/${id}/persona-versions`, { method: 'POST', key: 'pr-draft', body: { expected_version: 1, release_mode: 'draft', persona: { ...PERSONA, personality: '更轻快，但仍尊重边界' }, note: '准备灰度的新表达' } });
   assert.equal(draft.status, 201);
   assert.equal(draft.body.persona_version.state, 'DRAFT');
   assert.equal(draft.body.character.persona.personality, PERSONA.personality);
@@ -155,4 +155,25 @@ test('人格草稿只能经审核员评测、影子、受限灰度后发布，�
   const releases = await request(base, '/internal/persona-releases', { token: reviewer });
   assert.equal(releases.status, 200);
   assert.equal(releases.body.persona_releases[0].active_persona_version, 1);
+});
+
+test('人格档案保存即生效：默认模式立即成为稳定版本，改完可直接对话', async (t) => {
+  const base = await start(t);
+  await passAge(base, 'persona-selfedit');
+  const created = await request(base, '/api/v1/characters', { method: 'POST', key: 'ps-create', body: { name: '林默', persona: PERSONA } });
+  const id = created.body.character.character_id;
+  // 默认模式（用户自助）：不再是 DRAFT 等评测，直接生效——改完就能按新人格对话与合成语音。
+  const saved = await request(base, `/api/v1/characters/${id}/persona-versions`, { method: 'POST', key: 'ps-save', body: { expected_version: 1, persona: { ...PERSONA, expression_style: '更口语更活泼' }, note: '自助修改' } });
+  assert.equal(saved.status, 201);
+  assert.equal(saved.body.persona_version.state, 'STABLE');
+  assert.equal(saved.body.character.persona.expression_style, '更口语更活泼');
+  assert.equal(saved.body.character.active_persona_version, 2);
+  // 版本历史全量保留：v1 退役、v2 生效（运营回滚管道仍有可用目标）。
+  const detail = await request(base, `/api/v1/characters/${id}`);
+  const history = detail.body.character.persona_history.map(({ version, state }) => ({ version, state }));
+  assert.deepEqual(history, [{ version: 1, state: 'RETIRED' }, { version: 2, state: 'STABLE' }]);
+  // 改完立即可对话。
+  const conversation = await request(base, '/api/v1/conversations', { method: 'POST', key: 'ps-conv', body: { character_id: id } });
+  const message = await request(base, `/api/v1/conversations/${conversation.body.conversation.conversation_id}/messages`, { method: 'POST', key: 'ps-msg', body: { content: { text: '换完人格说句话' } } });
+  assert.equal(message.status, 201);
 });
