@@ -1,0 +1,9 @@
+# 行尾统一：仓库内与 git archive 输出一律 LF。
+# 背景：Windows 上 core.autocrlf=true 曾让 git archive 产出的 run-migrations.sh
+# 带 CRLF，服务器 dash 以 `set: Illegal option -` 拒绝执行（2026-09-11 阿里云部署）。
+*.sh text eol=lf
+*.sql text eol=lf
+*.ps1 text eol=crlf
+*.png binary
+*.jpg binary
+*.ipynb binary
