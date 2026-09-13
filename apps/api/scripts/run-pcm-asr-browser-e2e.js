@@ -102,6 +102,9 @@ async function main() {
       const box = await hold.boundingBox();
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
       await page.mouse.down();
+      // 等录音指示浮层出现=采集管线已建立，再计时 1.6 秒（headless 假设备
+      // 冷启动可能慢于松手，先按住等就绪与真人体验一致）。
+      await page.waitForSelector('.recording-indicator', { timeout: 10_000 });
       await page.waitForTimeout(1_600);
       await page.mouse.up();
       // 自动确认链：转写文本直达发送框（fix-v21 口径），并自动切回文字模式。

@@ -1598,11 +1598,10 @@ async function confirmAsrTranscript() {
     });
     state.asrJob = payload?.asr_job ?? state.asrJob;
     state.pendingTranscript = state.asrJob?.transcript?.text ?? text;
-    const deleted = payload?.input_audio_deletion?.physical_cleanup_state === "LOCAL_PRIVATE_OBJECT_DELETED";
-    // 转写要落到文字输入框里，确认后自动回到文字模式。
+    // 转写落到文字输入框、自动回到文字模式即完成；确认 toast 是噪声
+    //（2026-09-14 用户反馈删除），原始音频删除进度在「我的」页可见。
     state.composerVoice = false;
     state.route = "chat";
-    setToast(deleted ? "转写已确认，原始音频已删除；请检查文字后手动发送。" : "转写已确认；原始音频删除仍需服务端处理。请检查文字后手动发送。");
   } catch (error) {
     setToast(serverMessage(error));
   } finally { setBusy(false); }
