@@ -38,13 +38,20 @@ const CALL_TURN_FAILURE_MESSAGES = {
 
 // ---- 开场问候（模板+世界情绪，不调 LLM；走与回合相同的音频事件管线）----
 
+// 问候文案的确定性预览：路由层在 POST 响应里同步给出字幕文本（SSE 内
+// executeGreeting 用同一函数，保证两次计算一致）。
+function previewGreeting(store, call) {
+  const moodRecord = store.worldStates.get(call.character_id);
+  return pickGreeting({ moodCode: moodRecord?.mood_code, seed: seedFromCallId(call.call_id) });
+}
+
 async function executeGreeting(deps, { store, account, call, emit, signal }) {
   requireDeps(deps, ['ownConversation', 'mediaStore']);
   emit('call.turn.accepted', { turn_id: null, call_id: call.call_id, kind: 'greeting' });
   const conversation = deps.ownConversation(store, account.account_id, call.conversation_id);
-  const moodRecord = store.worldStates.get(call.character_id);
-  const greeting = pickGreeting({ moodCode: moodRecord?.mood_code, seed: seedFromCallId(call.call_id) });
+  const greeting = previewGreeting(store, call);
   const assistantMessageId = store.next('msg');
+  const moodRecord = store.worldStates.get(call.character_id);
   const speech = createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId, turnId: null, moodRecord });
   emit('call.turn.text', { turn_id: null, sequence: 1, text: greeting.text });
   try {
@@ -96,12 +103,12 @@ async function executeCallTurn(deps, { store, account, call, turn, emit, signal 
     if (aborted && interruptible) {
       persistPartialReply(deps, store, account, call, turn, ctx);
       const settled = ctx.speech ? await ctx.speech.settle() : { committedSeconds: 0 };
-      settleTurn(store, call, turn, { state: 'INTERRUPTED', interrupted: true, asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date() });
+      settleTurnSafely(store, call, turn, { state: 'INTERRUPTED', interrupted: true, asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date() });
       emit('call.turn.interrupted', { turn_id: turn.turn_id, assistant_message_id: turn.assistant_message_id });
       return;
     }
     const settled = ctx.speech ? await ctx.speech.settle() : { committedSeconds: 0 };
-    settleTurn(store, call, turn, {
+    settleTurnSafely(store, call, turn, {
       state: 'FAILED', failureCode: aborted ? 'CALL_TURN_ABORTED' : (error?.code || 'CALL_TURN_FAILED'),
       asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date()
     });
@@ -288,7 +295,7 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   }
   const usage = usageCommit(modelReply);
   const settled = await ctx.speech.settle();
-  settleTurn(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: now() });
+  settleTurnSafely(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: now() });
   emit('call.turn.completed', {
     turn_id: turn.turn_id, user_message_id: turn.user_message_id, assistant_message_id: assistantMessage.message_id,
     tts_job_id: settled.job?.job_id ?? null, usage: usage ?? null, tts_degraded: Boolean(settled.job?.failure_code)
@@ -308,7 +315,7 @@ async function speakFixedReply(deps, { store, account, call, turn, emit, signal,
   ctx.partialPersisted = true;
   await ctx.speech.speakSentence(truncateForTts(sanitizeTtsText(text)));
   const settled = await ctx.speech.settle();
-  settleTurn(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date() });
+  settleTurnSafely(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date() });
   emit('call.turn.completed', { turn_id: turn.turn_id, user_message_id: turn.user_message_id, assistant_message_id: assistantMessage.message_id, tts_job_id: settled.job?.job_id ?? null, usage: null, tts_degraded: Boolean(settled.job?.failure_code) });
 }
 
@@ -529,9 +536,21 @@ function requireDeps(deps, names) {
   }
 }
 
+// 挂断路由可能先于 SSE produce 终局把回合结成 FAILED(CALL_ENDED)：此处竞态
+// 重入时容忍「已终局」（用量以先落的一方为准），不再向传输层抛协议错。
+function settleTurnSafely(store, call, turn, options) {
+  try {
+    settleTurn(store, call, turn, options);
+  } catch (error) {
+    if (error?.code !== 'CALL_TURN_ALREADY_SETTLED') throw error;
+  }
+}
+
 module.exports = {
   CALL_AUDIO_MIME_TYPE,
   CALL_TURN_FAILURE_MESSAGES,
   executeCallTurn,
-  executeGreeting
+  executeGreeting,
+  previewGreeting,
+  settleTurnSafely
 };

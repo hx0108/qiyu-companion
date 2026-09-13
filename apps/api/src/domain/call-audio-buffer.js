@@ -37,11 +37,19 @@ class CallAudioBufferRegistry {
   processBytesUsed() { return this.processBytes; }
 
   // finalize 之前创建缓冲；重复创建视为协议错（回合创建与缓冲一一对应）。
-  createBuffer(turnId) {
+  // owner.accountId 在创建时绑定：分块上传路由不进账户事务，凭缓冲自身的
+  // 归属做账户隔离（回合创建路由在账户事务内写入）。
+  createBuffer(turnId, { accountId } = {}) {
     requireTurnId(turnId);
     if (this.buffers.has(turnId)) throw new CallAudioBufferError('CALL_AUDIO_BUFFER_EXISTS', '回合音频缓冲已存在');
-    this.buffers.set(turnId, { chunks: [], totalBytes: 0, closed: false, createdAt: this.now(), closedAt: null });
+    this.buffers.set(turnId, { chunks: [], totalBytes: 0, closed: false, createdAt: this.now(), closedAt: null, owner: { accountId: accountId ?? null } });
     return { turn_id: turnId, received_bytes: 0, chunks: 0 };
+  }
+
+  // 缓冲归属查询（无缓冲返回 null，不抛错：路由层决定 404 语义）。
+  ownerFor(turnId) {
+    const buffer = this.buffers.get(turnId);
+    return buffer ? buffer.owner : null;
   }
 
   // 块序号从 0 连续递增（HTTP 逐块上传，乱序/缺块即拒绝，不做重排）。

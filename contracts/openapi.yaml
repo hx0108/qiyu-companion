@@ -656,6 +656,93 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/calls:
+    post:
+      summary: 发起 1:1 实时语音通话（灰度开关 QIYU_VOICE_CALL_ENABLED）
+      description: 回合制可打断通话：受理即同步返回开场问候（模板+世界情绪，不调 LLM）与其一次性 SSE 令牌。受理前校验 VOICE_CALL 权限、ASR 服务可用性与语音额度余量（ASR/TTS 各不足 1 秒即 409）；同账户已有 ACTIVE 通话返回 409。计费复用现有额度池（asr_minutes/tts_minutes/日对话额度），不新建 SKU。用户音频只进服务进程内存、不建 ASR_INPUT_AUDIO 资产、永不落对象存储，转写后即弃。
+      parameters: [ { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/calls/{callId}:
+    get:
+      summary: 查询通话状态与回合列表（断线恢复对账入口）
+      description: 客户端断线或 10 秒无 SSE 事件时以此对账。惰性判定时长上限（15 分钟）与空闲超时（3 分钟）：越限时通话被自动结束并落通话记录卡片，本次响应即返回终态。
+      parameters: [ { name: callId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/calls/{callId}/turns:
+    post:
+      summary: 创建通话回合（开始说话）
+      description: 单通话同时只允许一个未终局回合（409 CALL_TURN_OPEN_EXISTS）。响应携带上行上传约束：自封 WAV（16k PCM16）按 audio-chunks 分块，单回合总字节上限 2,000,000（对齐腾讯一句话识别），建议每块约 64KB。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' }, { name: callId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/calls/{callId}/turns/{turnId}/audio-chunks:
+    post:
+      summary: 边录边传：按序上传回合音频分块
+      description: 块序号从 0 连续递增（乱序/缺块 409 CALL_AUDIO_CHUNK_OUT_OF_ORDER，重试同一序号即可）。仅 UPLOADING 态可收；单回合 2MB/60 块、进程总量 32MB 触顶即 413 硬拒。该路由不进入账户事务：音频只写入进程内缓冲（凭创建时绑定的账户归属做隔离），合规口径同上——仅内存、不落对象存储。
+      parameters:
+        - { name: callId, in: path, required: true, schema: { type: string } }
+        - { name: turnId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [chunk_index, audio_base64]
+              properties:
+                chunk_index: { type: integer, minimum: 0 }
+                audio_base64: { type: string, minLength: 1 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+  /api/v1/calls/{callId}/turns/{turnId}/finalize:
+    post:
+      summary: 结束说话并封账回合音频
+      description: 封账后不再接收分块；响应携带一次性 SSE 令牌（ct_ 前缀、30 秒 TTL、绑定账户与回合）。ASR、输入审核、LLM 流式、逐句输出审核与逐段 TTS 全部发生在 GET 消费 stream_url 的 SSE produce 内——令牌未消费零副作用、零扣费。
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: callId, in: path, required: true, schema: { type: string } }
+        - { name: turnId, in: path, required: true, schema: { type: string } }
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+  /api/v1/call-turn-streams/{streamToken}:
+    get:
+      summary: 一次性 SSE 通话回合流（字幕+逐段音频）
+      description: 事件序列 call.turn.accepted → call.turn.transcript（转写字幕）→ call.turn.text×N（逐句过审文本）→ call.turn.audio×N（{turn_id, sequence, segment_index, format:'mp3', audio_base64, last}；回合首段含 ID3v2.3 AIGC 标识）→ call.turn.completed / call.turn.interrupted / call.turn.failed（code+中文 message）。响应头 x-accel-buffering:no 禁用反代缓冲。打断=客户端 abort 本连接：已过审已播出片段拼接落库为终稿，三本账按实际用量结算。逐句审核口径：片段过审即合成，同回合内同文本不重复 TTS_OUTPUT 复审（与异步 TTS 的滞后合成复审不同）。复用令牌 409，过期 410。
+      parameters: [ { name: streamToken, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '200':
+          description: text/event-stream 事件流
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '410': { $ref: '#/components/responses/Error' }
+  /api/v1/calls/{callId}/end:
+    post:
+      summary: 挂断并结算通话
+      description: 幂等：重复调用返回同一终态。未终局回合按失败结算、进程内音频缓冲立即丢弃；落 provider='call-record' 通话记录卡片消息（时长/回合数/打断次数，消息带 call_session_id）并排一次会话摘要；回合 TTS 任务挂在助手消息上，通话后在聊天页点播命中同源复用、不重复合成。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' }, { name: callId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
   /api/v1/messages/{messageId}/tts-jobs:
     post:
       summary: 为当前账户自己的已审核助手消息创建本地 TTS 任务

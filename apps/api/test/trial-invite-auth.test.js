@@ -28,7 +28,8 @@ test('封闭试用：邀请码首次登录、年龄准入、反馈持久化与�
   const base = await start(t, { store, trialAuthEnabled: true, trialAuth });
 
   const access = await request(base, '/api/v1/trial-access');
-  assert.deepEqual(access.body, { enabled: true, authentication: 'closed-trial-invite', payment: 'disabled', external_age_verification: 'disabled' });
+  // voice_call_enabled：1:1 通话灰度开关随能力发现接口透出（默认关闭）。
+  assert.deepEqual(access.body, { enabled: true, authentication: 'closed-trial-invite', payment: 'disabled', external_age_verification: 'disabled', voice_call_enabled: false });
   const legacyToken = await request(base, '/api/v1/usage/daily', { token: 'dev-alice-token' });
   assert.equal(legacyToken.status, 401);
   // 登录只凭邀请码（2026-09-11 取消初始口令）：错误邀请码必须被拒。

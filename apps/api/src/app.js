@@ -33,6 +33,9 @@ const { scheduleAccountNotifications } = require('./domain/notification-schedule
 const { buildCostReport, parseRateCard } = require('./domain/cost-accounting');
 const reviewerIdentity = require('./domain/reviewer-identity');
 const { inspectContextImage } = require('./domain/context-image-policy');
+const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
+const { CallSessionError, TURN_TERMINAL_STATES, callTurns, createCall, createTurn, endCall, ensureCallWithinLimits, ownCall, ownTurn, publicCall, publicTurn, requireActiveCall, settleTurn, transitionTurn } = require('./domain/call-session');
+const { CALL_AUDIO_MIME_TYPE, executeCallTurn, executeGreeting, previewGreeting, settleTurnSafely } = require('./domain/call-turn-engine');
 
 const TOKENS = new Map([
   ['dev-alice-token', 'acct_dev_alice'],
@@ -41,6 +44,11 @@ const TOKENS = new Map([
 // 一次性 SSE 回放令牌：短 TTL、绑定账户与助手消息，进程级存储（不落库、不跨实例）。
 const STREAM_TOKEN_TTL_MS = 30_000;
 const streamTokens = new Map();
+// 通话回合一次性 SSE 令牌与上行音频缓冲：与 streamTokens 同口径的进程级存储
+// （单实例部署假设），令牌 TTL 30 秒、绑定账户与回合，未消费零副作用。
+const CALL_TURN_STREAM_TOKEN_TTL_MS = 30_000;
+const callTurnTokens = new Map();
+const callAudioRegistry = new CallAudioBufferRegistry();
 const SUBSCRIPTION_CATALOG = Object.freeze({
   currency: 'CNY', auto_renew_default: false, plans: [
     { sku: 'qiyu_public_monthly_v1', label: '公开 V1 月订阅', price_fen: 3900, billing_cycle: 'MONTH', image_quota: 15, tts_minutes: 30, asr_minutes: 15 },
@@ -81,7 +89,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null, voiceCallEnabled = false } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -89,7 +97,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -117,6 +125,11 @@ async function routeWithPersistence(context) {
   // 邀请码封测不能回退到旧的开发 token 或开发支付回调；两种认证模型必须互斥。
   const accountId = (await accountIdForRequest(req, store, resolvedTrialAuth, { allowDevelopmentTokens: !trialAuthEnabled }))
     || (!trialAuthEnabled ? verifiedDevelopmentCallbackAccountId(req, url, body, store) : null);
+  // 通话音频分块只写进程内缓冲（不触任何表）：绕开账户事务，凭缓冲自身的
+  // 归属绑定做账户隔离，避免长时间通话期间每 2 秒一次的块上传排队账户事务。
+  if (accountId && req.method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/turns\/[^/]+\/audio-chunks$/.test(url.pathname)) {
+    return appendVoiceCallAudioChunk(accountId, url.pathname, body);
+  }
   if (accountId && typeof store.withAccountTransaction === 'function') {
     const lockDailyUsage = req.method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(url.pathname);
     return store.withAccountTransaction(accountId, (scopedStore) => route({ ...context, store: scopedStore, trialAuth: resolvedTrialAuth, authenticatedAccountId: accountId }), { lockDailyUsage });
@@ -125,13 +138,13 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender, voiceCallEnabled } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
   const path = url.pathname;
   if (method === 'GET' && path === '/health') return ok({ status: 'ok', mode: 'local-synthetic-development-only' });
-  if (method === 'GET' && path === '/api/v1/trial-access') return ok({ enabled: Boolean(trialAuthEnabled), authentication: trialAuthEnabled ? 'closed-trial-invite' : 'synthetic-development-token-only', payment: 'disabled', external_age_verification: 'disabled' });
+  if (method === 'GET' && path === '/api/v1/trial-access') return ok({ enabled: Boolean(trialAuthEnabled), authentication: trialAuthEnabled ? 'closed-trial-invite' : 'synthetic-development-token-only', payment: 'disabled', external_age_verification: 'disabled', voice_call_enabled: Boolean(voiceCallEnabled) });
   // 渠道回调不带用户 Token：只信 HMAC 验签，且仅开发模拟通道存在。
   if (!trialAuthEnabled && method === 'POST' && path === '/api/v1/callbacks/payments/development-simulated') return developmentPaymentCallback(store, req, body, requestId);
   // 运营内部接口（技术设计 8.10）：独立审核员身份，与用户 Bearer 体系完全分离；
@@ -242,6 +255,25 @@ async function route(context) {
   if (method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(path)) return idempotent(context, account, () => deleteConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/resume$/.test(path)) return idempotent(context, account, () => resumeConversation(store, account, path));
+  // 1:1 通话路由：创建路由受 voiceCallEnabled 灰度（其余路由不设门，存量通话
+  // 在灰度关闭后仍可结束/恢复对账）。回合编排与计费全在每回合 SSE produce 内
+  //（域层 call-turn-engine），路由层只做状态机推进与一次性令牌签发。
+  const callProviders = { asrTranscriber, ttsGenerator, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider, mediaStore };
+  if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/calls$/.test(path)) {
+    if (!voiceCallEnabled) throw apiError(404, 'VOICE_CALL_DISABLED', '通话功能未开放');
+    return idempotent(context, account, () => withCallApiErrors(() => startVoiceCall(store, account, path, callProviders)));
+  }
+  if (method === 'GET' && /^\/api\/v1\/calls\/[^/]+$/.test(path)) return withCallApiErrors(() => getVoiceCall(store, account, path, summaryGenerator));
+  if (method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/turns$/.test(path)) {
+    return idempotent(context, account, () => withCallApiErrors(() => createVoiceCallTurn(store, account, path, summaryGenerator)));
+  }
+  if (method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/turns\/[^/]+\/finalize$/.test(path)) {
+    return idempotent(context, account, () => withCallApiErrors(() => finalizeVoiceCallTurn(store, account, path, summaryGenerator)));
+  }
+  if (method === 'GET' && /^\/api\/v1\/call-turn-streams\/[^/]+$/.test(path)) return getCallTurnStream(store, account, path, requestId, callProviders);
+  if (method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/end$/.test(path)) {
+    return idempotent(context, account, () => withCallApiErrors(() => endVoiceCall(store, account, path, summaryGenerator)));
+  }
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) {
     return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator, embeddingProvider, imageStore));
   }
@@ -1695,7 +1727,9 @@ function sendLiveEventStream(res, result, requestId) {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-store',
       'x-request-id': requestId,
-      connection: 'keep-alive'
+      connection: 'keep-alive',
+      // 云侧反代不得缓冲 SSE（否则逐段音频事件被攒批下发，打断延迟不可控）。
+      'x-accel-buffering': 'no'
     });
     let closed = false;
     res.on('close', () => { closed = true; controller.abort(); });
@@ -1710,6 +1744,219 @@ data: ${JSON.stringify(data)}
       .catch(() => { emit('message.failed', { request_id: requestId, code: 'STREAM_INTERNAL_ERROR', retryable: true }); })
       .finally(() => { if (!closed) res.end(); resolve(); });
   });
+}
+
+// ---- 1:1 通话路由（call_sessions/call_turns 状态机 + 每回合 SSE produce）----
+// 受理/推进只在本文件完成；ASR→审核→LLM→TTS 的回合编排与三本账结算全在
+// call-turn-engine 的 produce 内（令牌未消费零副作用，与真流式同口径）。
+
+// 域层 CallSessionError 只带业务码：这里统一翻译成 HTTP 协议口径。
+const CALL_DOMAIN_ERROR_STATUS = new Map([
+  ['CALL_NOT_FOUND', [404, 'RESOURCE_NOT_FOUND']],
+  ['CALL_TURN_NOT_FOUND', [404, 'RESOURCE_NOT_FOUND']],
+  ['CALL_ALREADY_ACTIVE', [409, 'CALL_ALREADY_ACTIVE']],
+  ['CALL_ALREADY_ENDED', [409, 'CALL_ALREADY_ENDED']],
+  ['CALL_TURN_OPEN_EXISTS', [409, 'CALL_TURN_OPEN_EXISTS']],
+  ['CALL_TURN_STATE_INVALID', [409, 'CALL_TURN_STATE_INVALID']],
+  ['CALL_TURN_ALREADY_SETTLED', [409, 'CALL_TURN_ALREADY_SETTLED']],
+  ['VALIDATION_ERROR', [400, 'VALIDATION_ERROR']]
+]);
+
+async function withCallApiErrors(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof CallSessionError) {
+      const [status, code] = CALL_DOMAIN_ERROR_STATUS.get(error.code) || [409, error.code];
+      throw apiError(status, code, error.message, error.details);
+    }
+    throw error;
+  }
+}
+
+// 回合执行体依赖：provider 注入 + 路由层既有的域工具（engine 不反向依赖 app.js）。
+function callEngineDeps(callProviders, store) {
+  return {
+    ...callProviders,
+    audioRegistry: callAudioRegistry,
+    mediaEntitlementService: store.mediaEntitlementService || new MediaEntitlementService({ store }),
+    buildContextPack,
+    ownConversation,
+    requireOpenConversation,
+    authorize,
+    normalizeUnpromptedSelfIntro: normalizeUnpromptedCharacterSelfIntroduction,
+    normalizePersonaGender,
+    currentWorldState,
+    publicWorldState,
+    estimateAudioSeconds,
+    estimateTtsSeconds,
+    resolvedTtsVoiceProfile
+  };
+}
+
+// 通话回合一次性 SSE 令牌：口径同 mintStreamToken（TTL 30 秒、一次性、绑定
+// 账户），独立 ct_ 命名空间；turnId=null 表示开场问候流。
+function mintCallTurnStreamToken(account, call, turn) {
+  const token = `ct_${randomUUID()}`;
+  const now = Date.now();
+  for (const [key, value] of callTurnTokens) if (value.expiresAt < now) callTurnTokens.delete(key);
+  callTurnTokens.set(token, { accountId: account.account_id, callId: call.call_id, turnId: turn ? turn.turn_id : null, expiresAt: now + CALL_TURN_STREAM_TOKEN_TTL_MS, used: false });
+  return { stream_url: `/api/v1/call-turn-streams/${token}`, stream_token: token, stream_expires_at: new Date(now + CALL_TURN_STREAM_TOKEN_TTL_MS).toISOString(), mode: 'call-turn' };
+}
+
+// 受理前额度预检（秒）：任一必需能力余额不足 1 秒即拒绝，避免用户拨进一个
+// 说不出话的通话；回合执行体在扣费时还会按同一口径二次校验。
+function ensureVoiceCallQuota(store, account, { requireTts }) {
+  const service = store.mediaEntitlementService || new MediaEntitlementService({ store });
+  const capabilities = requireTts ? ['TRANSCRIBE_ASR', 'SYNTHESIZE_TTS'] : ['TRANSCRIBE_ASR'];
+  for (const capability of capabilities) {
+    const balance = service.entitlementBalances(account.account_id).find((item) => item.capability === capability);
+    if ((balance?.available_quantity ?? 0) < 1) {
+      throw apiError(409, 'ENTITLEMENT_QUOTA_EXCEEDED', '语音额度不足，可在订阅方案中了解详情');
+    }
+  }
+}
+
+function startVoiceCall(store, account, path, callProviders) {
+  const conversation = ownConversation(store, account.account_id, path.split('/')[4]);
+  requireOpenConversation(conversation);
+  authorize(account, 'VOICE_CALL', store);
+  // 服务端没有 ASR 能力时不要放行一个"听不见"的通话：受理前直接拒绝。
+  if (typeof callProviders.asrTranscriber !== 'function') {
+    throw apiError(503, 'ASR_PROVIDER_UNAVAILABLE', '语音识别服务暂不可用，请稍后再试');
+  }
+  ensureVoiceCallQuota(store, account, { requireTts: typeof callProviders.ttsGenerator === 'function' });
+  const call = createCall(store, { accountId: account.account_id, conversationId: conversation.conversation_id, characterId: conversation.character_id });
+  const greeting = previewGreeting(store, call);
+  return created({
+    call: publicCall(call),
+    greeting: { text: greeting.text, stream: mintCallTurnStreamToken(account, call, null) }
+  });
+}
+
+function getVoiceCall(store, account, path, summaryGenerator) {
+  const { call, endedNow } = ensureCallWithinLimits(store, ownCall(store, account.account_id, path.split('/')[4]));
+  if (endedNow) settleEndedCallSideEffects(store, account, call, summaryGenerator);
+  return ok({ call: publicCall(call), turns: callTurns(store, call.call_id).map(publicTurn) });
+}
+
+function createVoiceCallTurn(store, account, path, summaryGenerator) {
+  const { call, endedNow } = ensureCallWithinLimits(store, ownCall(store, account.account_id, path.split('/')[4]));
+  if (endedNow) settleEndedCallSideEffects(store, account, call, summaryGenerator);
+  requireActiveCall(call);
+  const turn = createTurn(store, call, {});
+  transitionTurn(store, turn, 'UPLOADING', {});
+  callAudioRegistry.createBuffer(turn.turn_id, { accountId: account.account_id });
+  return created({
+    turn: publicTurn(turn),
+    upload: { mime_type: CALL_AUDIO_MIME_TYPE, max_total_bytes: CALL_AUDIO_MAX_TURN_BYTES, chunk_hint_bytes: 64 * 1024 }
+  });
+}
+
+function finalizeVoiceCallTurn(store, account, path, summaryGenerator) {
+  const { call, endedNow } = ensureCallWithinLimits(store, ownCall(store, account.account_id, path.split('/')[4]));
+  if (endedNow) settleEndedCallSideEffects(store, account, call, summaryGenerator);
+  requireActiveCall(call);
+  const turn = ownTurn(store, call, path.split('/')[6]);
+  // 封账：拼接全部已收分块（此后不再接收上传）；音频留在进程内存等 SSE 消费。
+  const sealed = callAudioRegistry.seal(turn.turn_id);
+  transitionTurn(store, turn, 'FINALIZED', { audio_bytes: sealed.total_bytes, chunk_count: sealed.chunk_count });
+  call.last_activity_at = new Date().toISOString();
+  return accepted({ turn: publicTurn(turn), stream: mintCallTurnStreamToken(account, call, turn) });
+}
+
+// 音频分块受理：已在 routeWithPersistence 分流、不进账户事务（PG 模式读不到
+// 作用域外的行，且 2 秒一块的上传不该排队账户事务）；账户隔离凭创建缓冲时
+// 绑定的归属，块序号与三层上限校验全部在 call-audio-buffer 域层。
+function appendVoiceCallAudioChunk(accountId, path, body) {
+  const turnId = path.split('/')[6];
+  const owner = callAudioRegistry.ownerFor(turnId);
+  if (!owner || owner.accountId !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话回合不存在');
+  const chunkIndex = body?.chunk_index;
+  if (!Number.isInteger(chunkIndex) || chunkIndex < 0) throw apiError(400, 'VALIDATION_ERROR', '音频块序号无效');
+  if (typeof body?.audio_base64 !== 'string' || !body.audio_base64) throw apiError(400, 'VALIDATION_ERROR', '音频块内容不能为空');
+  const bytes = Buffer.from(body.audio_base64, 'base64');
+  if (bytes.length === 0) throw apiError(400, 'VALIDATION_ERROR', '音频块内容不能为空');
+  return ok(callAudioRegistry.appendChunk(turnId, { chunkIndex, bytes }));
+}
+
+function getCallTurnStream(store, account, path, requestId, callProviders) {
+  const token = path.split('/')[4];
+  const entry = callTurnTokens.get(token);
+  if (!entry || entry.accountId !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话流不存在');
+  if (entry.used) throw apiError(409, 'STATE_TRANSITION_INVALID', '通话流令牌已使用，请用通话详情读取终态');
+  if (entry.expiresAt < Date.now()) { callTurnTokens.delete(token); throw apiError(410, 'CONTENT_REVOKED', '通话流令牌已过期'); }
+  const { call, endedNow } = ensureCallWithinLimits(store, ownCall(store, account.account_id, entry.callId));
+  if (endedNow) throw apiError(409, 'CALL_ALREADY_ENDED', '通话已结束');
+  requireActiveCall(call);
+  let turn = null;
+  if (entry.turnId) {
+    turn = ownTurn(store, call, entry.turnId);
+    if (TURN_TERMINAL_STATES.has(turn.state)) {
+      throw apiError(409, 'CALL_TURN_ALREADY_SETTLED', '该回合已结束，请从通话详情读取结果');
+    }
+  }
+  entry.used = true;
+  return {
+    status: 200,
+    sseLive: {
+      requestId,
+      produce: (emit, signal) => {
+        // 与 liveConversationStream 同口径：延迟账户事务里重取作用域对象，
+        // 保证 PG 模式下回合全部读写都在同一个 RLS 事务内完成。
+        const run = (scopedStore) => {
+          const scopedAccount = scopedStore.account(account.account_id) || account;
+          const scopedCall = scopedStore.callSessions.get(call.call_id);
+          if (!scopedCall) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话不存在');
+          const deps = callEngineDeps(callProviders, scopedStore);
+          if (!turn) return executeGreeting(deps, { store: scopedStore, account: scopedAccount, call: scopedCall, emit, signal });
+          const scopedTurn = scopedStore.callTurns.get(turn.turn_id);
+          if (!scopedTurn) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话回合不存在');
+          return executeCallTurn(deps, { store: scopedStore, account: scopedAccount, call: scopedCall, turn: scopedTurn, emit, signal });
+        };
+        return typeof store.runDeferredAccountTransaction === 'function'
+          ? store.runDeferredAccountTransaction(run, { lockDailyUsage: true })
+          : run(store);
+      }
+    }
+  };
+}
+
+function endVoiceCall(store, account, path, summaryGenerator) {
+  const call = ownCall(store, account.account_id, path.split('/')[4]);
+  if (call.state !== 'ACTIVE') return ok({ call: publicCall(call) }); // 幂等：重复挂断直接返回终态
+  // 未终局回合按失败结算（与 SSE produce 的终局竞态由 settleTurnSafely 容忍），
+  // 进程内音频缓冲立即丢弃，不等 TTL。
+  for (const turn of callTurns(store, call.call_id)) {
+    if (!TURN_TERMINAL_STATES.has(turn.state)) {
+      callAudioRegistry.discard(turn.turn_id);
+      settleTurnSafely(store, call, turn, { state: 'FAILED', failureCode: 'CALL_ENDED', now: new Date() });
+    }
+  }
+  endCall(store, call, { reason: 'USER_HANGUP' });
+  settleEndedCallSideEffects(store, account, call, summaryGenerator);
+  return ok({ call: publicCall(call) });
+}
+
+// 通话结束副作用（一次性）：落 provider='call-record' 的记录卡片消息 + 排一次
+// 会话摘要。惰性结算（恢复/挂断路由）与 reaper 兜底都会走到这里，以卡片消息
+// 是否已存在判重，不因调用方不同而重复落卡。
+function settleEndedCallSideEffects(store, account, call, summaryGenerator) {
+  const conversation = store.conversations.get(call.conversation_id);
+  if (!conversation || conversation.status === 'DELETED') return;
+  const alreadyRecorded = [...store.messages.values()].some((message) => message.provider === 'call-record' && message.call_session_id === call.call_id);
+  if (alreadyRecorded) return;
+  const seconds = Math.max(0, Math.round(((call.ended_at ? Date.parse(call.ended_at) : Date.now()) - Date.parse(call.started_at)) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const durationText = minutes > 0 ? `${minutes} 分 ${seconds % 60} 秒` : `${seconds} 秒`;
+  const record = {
+    message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT',
+    text: `通话结束 · 时长 ${durationText} · 共 ${call.turn_count} 轮对话${call.interrupted_turn_count > 0 ? ` · 打断 ${call.interrupted_turn_count} 次` : ''}`,
+    provider: 'call-record', model_version: 'call-record-v1', ai_generated: false,
+    call_session_id: call.call_id, created_at: new Date().toISOString()
+  };
+  store.messages.set(record.message_id, record);
+  if (summaryGenerator) enqueueConversationSummary({ store, account, conversation });
 }
 
 function streamChunks(text, maxLength = 60) {
@@ -1748,7 +1995,7 @@ function publicCharacter(character, { includeHistory = false } = {}) {
 function publicPersonaVersion(entry) { return { version: entry.version, parent_version: entry.parent_version ?? null, state: entry.state || 'STABLE', changed_fields: entry.changed_fields ?? [], note: entry.note ?? '', evaluation: entry.evaluation ? { suite_version: entry.evaluation.suite_version, critical_pass_rate: entry.evaluation.critical_pass_rate, overall_pass_rate: entry.evaluation.overall_pass_rate, report_ref: entry.evaluation.report_ref, result: entry.evaluation.result, evaluated_at: entry.evaluation.evaluated_at } : null, canary: entry.canary ? { traffic_percent: entry.canary.traffic_percent, shadow_report_ref: entry.canary.shadow_report_ref, started_at: entry.canary.started_at } : null, rollback: entry.rollback ? { to_version: entry.rollback.to_version, reason: entry.rollback.reason, rolled_back_at: entry.rollback.rolled_back_at } : null, created_at: entry.created_at, updated_at: entry.updated_at ?? entry.created_at }; }
 
 function publicMessage(message) {
-  return { message_id: message.message_id, conversation_id: message.conversation_id, actor: message.actor, text: message.text, attachments: message.attachments ?? [], provider: message.provider ?? null, model_version: message.model_version ?? null, ai_generated: message.ai_generated, world_state_id: message.world_state_id ?? null, world_state_version: message.world_state_version ?? null, created_at: message.created_at };
+  return { message_id: message.message_id, conversation_id: message.conversation_id, actor: message.actor, text: message.text, attachments: message.attachments ?? [], provider: message.provider ?? null, model_version: message.model_version ?? null, ai_generated: message.ai_generated, world_state_id: message.world_state_id ?? null, world_state_version: message.world_state_version ?? null, call_session_id: message.call_session_id ?? null, created_at: message.created_at };
 }
 
 const FEEDBACK_TYPES = new Set(['OOC', 'MEMORY_ERROR', 'IMAGE_FACE_MISMATCH', 'IMAGE_WARDROBE_ERROR', 'IMAGE_SCENE_CONFLICT', 'UNSAFE_OR_UNCOMFORTABLE', 'PRAISE']);
