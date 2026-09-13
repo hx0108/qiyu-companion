@@ -4,6 +4,8 @@
 // 商品定义后续调大不会自动补发）的账户补差额。2026-09-13 首用：语音输入
 // 上线后试用档 asr 0→10 分钟、tts 5→30 分钟，存量账户需要补授才能使用。
 // 幂等：idempotency_key = source_event:GRANT:capability，重复执行安全。
+// source 固定为 'TRIAL_GRANTED'（表 CHECK 约束的合法枚举），补授批次由
+// source_event_id（如 topup-20260913）区分。
 
 const { Client } = require('pg');
 
@@ -44,7 +46,7 @@ async function topup(client, { accountId, capability, seconds, sourceEvent }) {
     }
     await client.query(
       `INSERT INTO entitlement_ledgers (entitlement_ledger_id, account_id, entitlement_id, capability, action, quantity, idempotency_key, source, source_event_id)
-       VALUES (gen_random_uuid(), $1, $2, $3, 'GRANT', $4, $5, 'TRIAL_TOPUP', $6)`,
+       VALUES (gen_random_uuid(), $1, $2, $3, 'GRANT', $4, $5, 'TRIAL_GRANTED', $6)`,
       [accountId, entitlementId, capability, seconds, idempotencyKey, sourceEvent]
     );
     const balances = await client.query(
