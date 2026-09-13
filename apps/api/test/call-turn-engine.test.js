@@ -132,16 +132,18 @@ test('回合主链路：转写字幕→逐句字幕+音频段（首段带 AIGC �
 
   assert.deepEqual(eventNames(events), [
     'call.turn.accepted', 'call.turn.transcript',
-    'call.turn.text', 'call.turn.audio', 'call.turn.audio',
-    'call.turn.text', 'call.turn.audio', 'call.turn.audio',
+    'call.turn.text', 'call.turn.audio',
+    'call.turn.text', 'call.turn.audio',
     'call.turn.completed'
   ]);
   assert.equal(events.at(-1).data.assistant_message_id, turn.assistant_message_id);
   assert.equal(events.at(-1).data.tts_degraded, false);
+  // 微批：每句的供应商小帧合成一个音频段下发（弱客户端友好）。
   // 首段音频带 ID3v2.3 AIGC 标识，后续段是裸 MP3 帧。
   const audioEvents = events.filter((item) => item.event === 'call.turn.audio');
   assert.equal(Buffer.from(audioEvents[0].data.audio_base64, 'base64').subarray(0, 3).toString(), 'ID3');
   assert.equal(audioEvents[0].data.segment_index, 0);
+  assert.ok(Buffer.from(audioEvents[0].data.audio_base64, 'base64').includes(Buffer.from('mp3:我在呢。')), '批内应含整句合成字节');
   assert.notEqual(Buffer.from(audioEvents[1].data.audio_base64, 'base64').subarray(0, 3).toString(), 'ID3');
 
   assert.equal(turn.state, 'COMPLETED');
@@ -236,7 +238,7 @@ test('INPUT BLOCK：转写被拦截时以固定审核回复朗读收尾，不调
   await executeCallTurn(deps, { store, account: store.account(ACCOUNT_ID), call, turn, emit, signal: null });
 
   assert.equal(llmCalled, false);
-  assert.deepEqual(eventNames(events), ['call.turn.accepted', 'call.turn.transcript', 'call.turn.text', 'call.turn.audio', 'call.turn.audio', 'call.turn.completed']);
+  assert.deepEqual(eventNames(events), ['call.turn.accepted', 'call.turn.transcript', 'call.turn.text', 'call.turn.audio', 'call.turn.completed']);
   assert.equal(events.find((item) => item.event === 'call.turn.text').data.text, '这条内容暂时无法继续处理。你可以调整表达后再试。');
   assert.equal(turn.state, 'COMPLETED');
   const assistantMessage = store.messages.get(turn.assistant_message_id);
@@ -334,7 +336,7 @@ test('开场问候：世界情绪选模板、同一音频事件管线、TTS job 
 
   await executeGreeting(deps, { store, account: store.account(ACCOUNT_ID), call, emit, signal: null });
 
-  assert.deepEqual(eventNames(events), ['call.turn.accepted', 'call.turn.text', 'call.turn.audio', 'call.turn.audio', 'call.turn.completed']);
+  assert.deepEqual(eventNames(events), ['call.turn.accepted', 'call.turn.text', 'call.turn.audio', 'call.turn.completed']);
   const accepted = events[0].data;
   assert.equal(accepted.kind, 'greeting');
   assert.equal(accepted.turn_id, null);

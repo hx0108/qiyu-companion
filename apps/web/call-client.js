@@ -23,6 +23,7 @@ export const CALL_BARGE_IN_THRESHOLD = 0.12; // 播放期更高阈值（防 AEC 
 export const CALL_BARGE_IN_HOLD_MS = 300; // 持续高能量才判打断
 export const CALL_BARGE_IN_COOLDOWN_MS = 800; // 打断后冷却，抑制回声尾
 export const CALL_MAX_UTTERANCE_MS = 50_000; // 单次发言强制断句（服务端 2MB 触顶更早）
+export const CALL_PREBUFFER_MS = 350; // 回合起播抖动预缓冲（吸收网络/解码抖动）
 export const CALL_IDLE_RECONCILE_MS = 10_000; // SSE 无事件对账时限
 
 function concatBytes(chunks) {
@@ -74,8 +75,73 @@ function rmsOf(samples) {
   return Math.sqrt(sum / Math.max(1, samples.length));
 }
 
-// 播放管线：逐段 decodeAudioData（帧不完整时与下一段拼接重试）→ 按
-// AudioContext 时钟精确排程的零间隙队列。
+// ---- MP3 帧解析 ----
+// SSE 分段按 WS 消息切，边界与 MP3 帧不对齐：直接把分段喂 decodeAudioData 会在
+// 帧中间被切开——解码器要么失败（等下一段）要么吞掉尾部半帧（每个切点一次爆音，
+// 弱网下连续出现 = 持续卡顿）。这里按帧头精确切出完整帧，半帧尾巴留给下一段。
+const MP3_BITRATES_V1L3 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+const MP3_BITRATES_V2L3 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0];
+// 采样率按版本×索引：MPEG1 [44100,48000,32000]；MPEG2 [22050,24000,16000]；MPEG2.5 [11025,12000,8000]。
+const MP3_SAMPLE_RATES = { 3: [44_100, 48_000, 32_000], 2: [22_050, 24_000, 16_000], 0: [11_025, 12_000, 8_000] };
+
+function isSyncWord(bytes, offset) {
+  return bytes[offset] === 0xff && (bytes[offset + 1] & 0xe0) === 0xe0
+    && ((bytes[offset + 1] >> 3) & 0x03) !== 1 // 版本保留值（01）无效
+    && ((bytes[offset + 1] >> 1) & 0x03) !== 0 // Layer 保留值（00）无效；Layer III=01 正是 MP3
+    && (bytes[offset + 2] & 0xf0) !== 0xf0 && (bytes[offset + 2] & 0x0c) !== 0x0c; // 码率/采样率索引有效
+}
+
+// 返回 offset 处整帧字节数；头部不完整返回 0（等更多数据），非法返回 -1（跳过 1 字节重新找同步字）。
+function mp3FrameLength(bytes, offset) {
+  if (offset + 3 >= bytes.length) return 0;
+  if (!isSyncWord(bytes, offset)) return -1;
+  const versionBits = (bytes[offset + 1] >> 3) & 0x03; // 0=2.5, 1=保留, 2=MPEG2, 3=MPEG1
+  const bitrateIndex = (bytes[offset + 2] >> 4) & 0x0f;
+  const rateIndex = (bytes[offset + 2] >> 2) & 0x03;
+  const padding = (bytes[offset + 2] >> 1) & 0x01;
+  const bitrate = (versionBits === 3 ? MP3_BITRATES_V1L3 : MP3_BITRATES_V2L3)[bitrateIndex] * 1000;
+  const sampleRate = (MP3_SAMPLE_RATES[versionBits] ?? [])[rateIndex];
+  if (!bitrate || !sampleRate) return -1;
+  const samplesPerFrame = versionBits === 3 ? 1152 : 576;
+  return Math.floor((samplesPerFrame / 8) * bitrate / sampleRate) + padding;
+}
+
+function skipId3(bytes) {
+  if (bytes.length > 10 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    const size = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
+    return Math.min(bytes.length, 10 + size);
+  }
+  return 0;
+}
+
+// 从字节队列中取出「到最后一个完整帧末尾」的全部字节；尾部可能的半帧保留在
+// 队列里等下一段。解不出完整帧时返回 null（调用方继续等）。
+function takeCompleteFrames(queue) {
+  const bytes = queue.length === 1 ? queue[0] : concatBytes(queue);
+  let cursor = skipId3(bytes);
+  let lastCompleteEnd = 0;
+  while (cursor < bytes.length) {
+    const length = mp3FrameLength(bytes, cursor);
+    if (length === 0) break; // 帧头不完整：等更多数据
+    if (length < 0) { cursor += 1; continue; } // 同步字扫描（跳过夹杂物，解码器可再同步）
+    if (cursor + length > bytes.length) break; // 尾帧不完整
+    cursor += length;
+    lastCompleteEnd = cursor;
+  }
+  queue.length = 0;
+  if (lastCompleteEnd <= 0) { queue.push(bytes); return null; } // 全部欠着（含 ID3 头一起等）
+  const complete = bytes.subarray(0, lastCompleteEnd);
+  const rest = bytes.subarray(lastCompleteEnd);
+  if (rest.length) queue.push(rest);
+  return complete;
+}
+
+// 测试缝：MP3 帧切分逻辑被任意错位分段校验（node --import 直跑 ESM 单测）。
+export const _mp3Internals = { mp3FrameLength, skipId3, takeCompleteFrames };
+
+// 播放管线：MP3 帧级解码（切点不再丢半帧）→ 350ms 抖动预缓冲 → 按
+// AudioContext 时钟零间隙排程。gapCount/gapMs 是欠载遥测（排程链跑干 =
+// 用户听到空拍的直接证据），由 window.__qiyuCall 暴露供诊断。
 export class AudioOutPipeline {
   constructor({ onAudibleChange = () => {} } = {}) {
     this.context = null;
@@ -83,8 +149,14 @@ export class AudioOutPipeline {
     this.pendingBytes = [];
     this.sources = [];
     this.nextStart = 0;
+    this.lastScheduledEnd = 0;
+    this.holdDuration = 0;
+    this.prebuffering = false;
     this.stopped = false;
     this.decoding = false;
+    this.gapCount = 0;
+    this.gapMs = 0;
+    this.decodeFailures = 0;
     this.onAudibleChange = onAudibleChange;
   }
 
@@ -94,22 +166,43 @@ export class AudioOutPipeline {
     return this.context;
   }
 
-  get audible() { return this.pending.length > 0 || this.sources.length > 0 || this.decoding; }
+  // 每个回合的音频流开始时调用：先攒够预缓冲再起播（吸收网络抖动）。
+  beginTurn() {
+    this.stopped = false;
+    this.prebuffering = true;
+  }
+
+  // 回合音频流结束（或 completed/failed 终局事件）：放行剩余预缓冲。
+  endTurn() {
+    this.prebuffering = false;
+    this.pump();
+  }
+
+  // 「正在播出」= 已排程到音频硬件的缓冲（预缓冲中的不算：还没出声，
+  // 打断判定不应开启）。
+  get audible() { return this.sources.length > 0; }
 
   async enqueueMp3(bytes) {
     if (this.stopped) return;
     this.pendingBytes.push(bytes);
+    if (this.pendingBytes.reduce((sum, item) => sum + item.length, 0) > 262_144) {
+      // 长时间解不出任何完整帧：数据已坏，丢弃防内存堆积（正常不会发生）。
+      this.pendingBytes = [];
+      this.decodeFailures += 1;
+      return;
+    }
     this.decoding = true;
     try {
-      while (this.pendingBytes.length) {
-        const merged = concatBytes(this.pendingBytes);
+      for (;;) {
+        const batch = takeCompleteFrames(this.pendingBytes);
+        if (!batch) break;
         try {
-          const buffer = await this.ensureContext().decodeAudioData(merged.slice().buffer);
-          this.pendingBytes = [];
+          const buffer = await this.ensureContext().decodeAudioData(batch.slice().buffer);
+          this.holdDuration += buffer.duration;
           this.pending.push(buffer);
-          this.pump();
+          if (!this.prebuffering || this.holdDuration >= CALL_PREBUFFER_MS / 1000) this.pump();
         } catch {
-          break; // 帧不完整：等下一段拼接重试
+          this.decodeFailures += 1; // 整批完整帧仍失败：坏帧丢弃，通话继续
         }
       }
     } finally { this.decoding = false; }
@@ -118,14 +211,24 @@ export class AudioOutPipeline {
   // 零间隙排程：新段从上一段的精确结束时刻起播（硬件时钟），而不是等
   // onended 事件再起播（事件调度天然带毫秒级空拍，累积成句间卡顿）。
   pump() {
-    if (this.stopped || this.pending.length === 0) return;
-    if (this.sources.length === 0) this.nextStart = this.context.currentTime + 0.06;
+    if (this.stopped || this.prebuffering || this.pending.length === 0) return;
+    if (this.sources.length === 0) {
+      // 排程链已跑干：此刻距上次排程结束的缺口就是用户听到的空拍。
+      if (this.lastScheduledEnd && this.context.currentTime > this.lastScheduledEnd + 0.05) {
+        this.gapCount += 1;
+        this.gapMs += Math.round((this.context.currentTime - this.lastScheduledEnd) * 1000);
+      }
+      this.nextStart = this.context.currentTime + 0.06;
+    }
     while (this.pending.length) {
+      const buffer = this.pending.shift();
       const source = this.context.createBufferSource();
-      source.buffer = this.pending.shift();
+      source.buffer = buffer;
       source.connect(this.context.destination);
-      source.start(Math.max(this.nextStart, this.context.currentTime + 0.02));
-      this.nextStart = Math.max(this.nextStart, this.context.currentTime + 0.02) + source.buffer.duration;
+      const startAt = Math.max(this.nextStart, this.context.currentTime + 0.02);
+      source.start(startAt);
+      this.nextStart = startAt + buffer.duration;
+      this.lastScheduledEnd = this.nextStart;
       this.sources.push(source);
       source.onended = () => {
         this.sources = this.sources.filter((item) => item !== source);
@@ -137,9 +240,12 @@ export class AudioOutPipeline {
 
   stopAll() {
     this.stopped = true;
+    this.prebuffering = false;
     this.pending = [];
     this.pendingBytes = [];
+    this.holdDuration = 0;
     this.nextStart = 0;
+    this.lastScheduledEnd = 0;
     for (const source of this.sources) { try { source.stop(); } catch { /* 已停止 */ } }
     this.sources = [];
     this.onAudibleChange(false);
@@ -427,31 +533,35 @@ export class CallSessionClient {
   // ---- 回合 SSE（音频只进播放管线；服务端仍发字幕事件，客户端不展示）----
 
   async playTurnStream(streamUrl, { greeting = false }) {
-    if (this.audioOut) this.audioOut.stopped = false; // 打断后新回合恢复可播
+    if (this.audioOut) this.audioOut.beginTurn(); // 打断后新回合恢复可播；先预缓冲再起播
     this.turnAbort = new AbortController();
     // 服务端返回的 stream_url 以根路径开头（/api/v1/...）：不要重复拼 apiBase。
     const streamPath = String(streamUrl || '').startsWith(`${this.apiBase}/`) || /^https?:\/\//.test(streamUrl)
       ? streamUrl
       : `${this.apiBase}${streamUrl}`;
-    const response = await fetch(streamPath, { headers: this.authHeaders('text/event-stream'), signal: this.turnAbort.signal });
-    if (!response.ok || !response.body) throw Object.assign(new Error(`通话流不可用（HTTP ${response.status}）`), { status: response.status });
-    this.lastEventAt = Date.now();
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      const response = await fetch(streamPath, { headers: this.authHeaders('text/event-stream'), signal: this.turnAbort.signal });
+      if (!response.ok || !response.body) throw Object.assign(new Error(`通话流不可用（HTTP ${response.status}）`), { status: response.status });
       this.lastEventAt = Date.now();
-      buffer += decoder.decode(value, { stream: true });
-      const blocks = buffer.split('\n\n');
-      buffer = blocks.pop() ?? '';
-      for (const block of blocks) {
-        const eventLine = block.split('\n').find((line) => line.startsWith('event: '));
-        const dataLine = block.split('\n').find((line) => line.startsWith('data: '));
-        if (!eventLine || !dataLine) continue;
-        this.handleTurnEvent(eventLine.replace('event: ', ''), JSON.parse(dataLine.replace('data: ', '')), { greeting });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        this.lastEventAt = Date.now();
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() ?? '';
+        for (const block of blocks) {
+          const eventLine = block.split('\n').find((line) => line.startsWith('event: '));
+          const dataLine = block.split('\n').find((line) => line.startsWith('data: '));
+          if (!eventLine || !dataLine) continue;
+          this.handleTurnEvent(eventLine.replace('event: ', ''), JSON.parse(dataLine.replace('data: ', '')), { greeting });
+        }
       }
+    } finally {
+      this.audioOut?.endTurn(); // 放行预缓冲残余（异常/中止路径也要放行，避免状态卡住）
     }
     this.turnAbort = null;
     if (!greeting) this.markReady();

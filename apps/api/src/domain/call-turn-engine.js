@@ -403,28 +403,46 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
     const currentJob = ensureJob();
     const sessionId = `${currentJob.job_id}_${spokenTexts.length + 1}`;
     const startedAt = Date.now();
+    // 微批：供应商按小 WS 帧回调（每秒几十次），逐帧 emit 会在弱客户端上造成
+    // 高频 SSE 事件压力。攒到 ≥2KB 或 120ms 合成一个音频段下发。
+    let batch = [];
+    let batchBytes = 0;
+    let batchTimer = null;
+    const flushBatch = () => {
+      if (batchTimer) { clearTimeout(batchTimer); batchTimer = null; }
+      if (!batch.length) return;
+      const payload = Buffer.concat(batch);
+      batch = [];
+      batchBytes = 0;
+      segmentCount += 1;
+      // AIGC 标识（ID3v2.3）只写回合首段；后续段是裸 MP3 帧，拼接可播。
+      const data = segmentCount === 1 ? tagWithAigcMetadata(payload) : payload;
+      byteLength += data.length;
+      emit('call.turn.audio', {
+        turn_id: turnId, sequence: segmentCount, segment_index: segmentCount - 1,
+        format: 'mp3', audio_base64: data.toString('base64'), last: false
+      });
+    };
     try {
       const aggregate = await synthesizeSpeech(deps, {
         text: ttsText, sessionId, gender: voiceGender,
         emotion: baseEmotion.category, intensity: baseEmotion.intensity, speed: baseEmotion.speed,
         onAudioSegment: (segment) => {
-          segmentCount += 1;
-          // AIGC 标识（ID3v2.3）只写回合首段；后续段是裸 MP3 帧，拼接可播。
-          const payload = segmentCount === 1 ? tagWithAigcMetadata(segment) : segment;
-          byteLength += payload.length;
-          emit('call.turn.audio', {
-            turn_id: turnId, sequence: segmentCount, segment_index: segmentCount - 1,
-            format: 'mp3', audio_base64: payload.toString('base64'), last: false
-          });
+          batch.push(segment);
+          batchBytes += segment.length;
+          if (batchBytes >= 2048) flushBatch();
+          else if (!batchTimer) batchTimer = setTimeout(flushBatch, 120);
         },
         signal
       });
+      flushBatch();
       recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'COMPLETED' });
       spokenTexts.push(ttsText);
       aggregateChunks.push(aggregate.asset.bytes);
       seconds += deps.estimateTtsSeconds(ttsText);
       providerRequestId = aggregate.providerRequestId;
     } catch (error) {
+      flushBatch();
       recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'FAILED' });
       // 中止（打断/挂断）：停止后续句子的合成，队列排空；中止本身经 generateStream
       // 与 signal 检查向上传播，不再从队列抛出。其余失败（含额度不足）降级纯文字。

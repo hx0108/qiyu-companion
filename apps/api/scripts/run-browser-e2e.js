@@ -99,7 +99,9 @@ async function main() {
   try {
     await step('必要告知：全部勾选后入口解锁并提交回执', async () => {
       await page.goto(base, { waitUntil: 'networkidle' });
+      // 应用壳 ES 模块加载在负载下可能慢于 networkidle：显式等待渲染而非一次性计数。
       const checkboxes = page.locator('[data-notice-check]');
+      await checkboxes.first().waitFor({ state: 'visible', timeout: 15_000 });
       assert(await checkboxes.count() > 0, '应渲染系统告知勾选框');
       const submit = page.locator('[data-action="submit-notices"]');
       assert(await submit.isDisabled(), '未勾选时继续按钮应禁用');
@@ -329,6 +331,8 @@ async function main() {
       await page.waitForFunction(() => Boolean(document.querySelector('.rights[data-media-type="TTS"]'))
         || /权益与领取|角色语音/.test(document.body.innerText), null, { timeout: 10_000 });
       // 等待语音生成期间页面必须保持阅读位置，不得跳回最早对话。
+      // 横幅出现后留 300ms 让 toast 清除等重渲染落定，再一次性检查（避免负载下误采）。
+      await page.waitForTimeout(300);
       const nearBottom = await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); return Boolean(el) && el.scrollHeight - el.scrollTop - el.clientHeight < 200; });
       assert(nearBottom, '语音生成等待期间对话不得跳回最早消息');
     });
