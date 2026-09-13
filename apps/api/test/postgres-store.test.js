@@ -9,7 +9,7 @@ const { DEVELOPMENT_DATABASE_ACCOUNT_IDS, PostgresStore } = require('../src/pers
 const { createPersistenceFromEnvironment } = require('../src/persistence/composition');
 const { createApp } = require('../src/app');
 
-function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, loadTtsJob = false } = {}) {
+function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, loadTtsJob = false, loadCallData = false } = {}) {
   const calls = [];
   let queryActive = false;
   const client = {
@@ -56,9 +56,28 @@ function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, lo
             entitlement_id: null, type: 'TTS', state: 'PENDING', attempts: 0, provider: 'tencent-tts', provider_request_id: null,
             provider_job_id: null, moderation_policy_version: null, result_asset_id: null, transcript_text: null, transcript_state: null,
             failure_code: null, provider_error_code: null, world_state_id: null, world_state_version: null, scene_contract: null,
-            voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', authorization_record_id: 'tts-auth',
+            voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', voice_gender: 'female', authorization_record_id: 'tts-auth',
             rights_review_id: 'tts-rights', rights_review_state: 'APPROVED', tts_text: '一句清洗后的台词。', emotion_category: 'happy',
             emotion_intensity: 110, emotion_source: 'world_state_mood', tts_speed: '0.20', created_at: new Date('2026-09-07T00:00:00.000Z')
+          }] };
+        }
+        if (loadCallData && String(sql).includes('FROM call_sessions WHERE')) {
+          return { rows: [{
+            call_id: '00000000-0000-7000-8000-000000000111', account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice,
+            conversation_id: '00000000-0000-7000-8000-0000000000d2', character_id: '00000000-0000-7000-8000-0000000000f2',
+            state: 'ACTIVE', end_reason: null, started_at: new Date('2026-09-13T10:00:00.000Z'), ended_at: null,
+            last_activity_at: new Date('2026-09-13T10:01:00.000Z'), turn_count: 1, interrupted_turn_count: 0,
+            asr_seconds_used: 8, tts_seconds_used: 3
+          }] };
+        }
+        if (loadCallData && String(sql).includes('FROM call_turns WHERE')) {
+          return { rows: [{
+            turn_id: '00000000-0000-7000-8000-000000000112', call_session_id: '00000000-0000-7000-8000-000000000111',
+            account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice, turn_index: 1, state: 'SPEAKING',
+            user_message_id: '00000000-0000-7000-8000-0000000000d1', assistant_message_id: null,
+            asr_job_id: '00000000-0000-7000-8000-000000000113', tts_job_id: null, audio_bytes: 32000, chunk_count: 1,
+            transcript_text: '今天心情怎么样？', interrupted: false, failure_code: null,
+            created_at: new Date('2026-09-13T10:00:30.000Z'), ended_at: null
           }] };
         }
         return { rows: [] };
@@ -312,7 +331,7 @@ test('PostgresStore persists scoped TTS job and private-media metadata without e
   const accountId = store.resolveAccountId('acct_dev_alice');
   await store.withAccountTransaction(accountId, async (scoped) => {
     scoped.mediaJobs.set('00000000-0000-7000-8000-0000000000f1', {
-      job_id: '00000000-0000-7000-8000-0000000000f1', account_id: accountId, character_id: '00000000-0000-7000-8000-0000000000f2', conversation_id: '00000000-0000-7000-8000-0000000000f3', source_message_id: '00000000-0000-7000-8000-0000000000f4', type: 'TTS', state: 'COMPLETED', attempts: 1, provider: 'tencent-tts', provider_request_id: 'tts_req_1', voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', authorization_record_id: 'tencent-service-entitlement-2026', rights_review_id: 'rights-review-voice-001', rights_review_state: 'APPROVED', tts_text: '一句清洗后的台词。', emotion_category: 'happy', emotion_intensity: 110, emotion_source: 'world_state_mood', tts_speed: 0.2, created_at: '2026-09-03T00:00:00.000Z'
+      job_id: '00000000-0000-7000-8000-0000000000f1', account_id: accountId, character_id: '00000000-0000-7000-8000-0000000000f2', conversation_id: '00000000-0000-7000-8000-0000000000f3', source_message_id: '00000000-0000-7000-8000-0000000000f4', type: 'TTS', state: 'COMPLETED', attempts: 1, provider: 'tencent-tts', provider_request_id: 'tts_req_1', voice_id: 'tencent-standard-101001', voice_version: 'provider-catalog-2026-09', voice_gender: 'female', authorization_record_id: 'tencent-service-entitlement-2026', rights_review_id: 'rights-review-voice-001', rights_review_state: 'APPROVED', tts_text: '一句清洗后的台词。', emotion_category: 'happy', emotion_intensity: 110, emotion_source: 'world_state_mood', tts_speed: 0.2, created_at: '2026-09-03T00:00:00.000Z'
     });
     scoped.mediaAssets.set('00000000-0000-7000-8000-0000000000f5', {
       asset_id: '00000000-0000-7000-8000-0000000000f5', account_id: accountId, character_id: '00000000-0000-7000-8000-0000000000f2', job_id: '00000000-0000-7000-8000-0000000000f1', type: 'TTS_AUDIO', state: 'AVAILABLE', media_type: 'AUDIO', mime_type: 'audio/mpeg', byte_length: 42, checksum: 'a'.repeat(64), object_key: 'tts/00000000-0000-7000-8000-0000000000f5.mp3', provider: 'tencent-tts', provider_request_id: 'tts_req_1', ai_generated: true, aigc_mark_version: 'not-implemented-development', created_at: '2026-09-03T00:00:00.000Z'
@@ -322,8 +341,8 @@ test('PostgresStore persists scoped TTS job and private-media metadata without e
   const assetInsert = pool.calls.find((call) => call.sql.startsWith('INSERT INTO media_assets'));
   assert.ok(jobInsert);
   assert.ok(assetInsert);
-  assert.deepEqual(jobInsert.values.slice(23, 28), ['tencent-standard-101001', 'provider-catalog-2026-09', 'tencent-service-entitlement-2026', 'rights-review-voice-001', 'APPROVED']);
-  assert.deepEqual(jobInsert.values.slice(28, 33), ['一句清洗后的台词。', 'happy', 110, 'world_state_mood', 0.2]);
+  assert.deepEqual(jobInsert.values.slice(23, 29), ['tencent-standard-101001', 'provider-catalog-2026-09', 'female', 'tencent-service-entitlement-2026', 'rights-review-voice-001', 'APPROVED']);
+  assert.deepEqual(jobInsert.values.slice(29, 34), ['一句清洗后的台词。', 'happy', 110, 'world_state_mood', 0.2]);
   const assetParameters = [...new Set([...assetInsert.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
   assert.deepEqual(assetParameters, Array.from({ length: 25 }, (_, index) => index + 1));
   assert.equal(assetInsert.values.length, 25);
@@ -338,6 +357,7 @@ test('PostgresStore updates an existing TTS job with contiguous PostgreSQL param
   const accountId = store.resolveAccountId('acct_dev_alice');
   await store.withAccountTransaction(accountId, async (scoped) => {
     const job = scoped.mediaJobs.get('00000000-0000-7000-8000-0000000000f1');
+    assert.equal(job.voice_gender, 'female'); // 重启后重播复用判断依赖该列（061 修复）
     job.state = 'RUNNING';
     job.attempts = 1;
     job.entitlement_id = 'trial-entitlement';
@@ -345,9 +365,101 @@ test('PostgresStore updates an existing TTS job with contiguous PostgreSQL param
   const update = pool.calls.find((call) => call.sql.startsWith('UPDATE media_jobs SET'));
   assert.ok(update);
   const parameters = [...new Set([...update.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
-  assert.deepEqual(parameters, Array.from({ length: 31 }, (_, index) => index + 1));
-  assert.equal(update.values.length, 31);
+  assert.deepEqual(parameters, Array.from({ length: 32 }, (_, index) => index + 1));
+  assert.equal(update.values.length, 32);
   assert.equal(update.values[6], 'trial-entitlement');
+  assert.equal(update.values[23], 'female'); // voice_gender 落进 UPDATE（此前缺失即回放复用失效）
+});
+
+test('PostgresStore loads an in-flight call and its turn for disconnect recovery', async () => {
+  const pool = fakePool({ loadCallData: true });
+  const store = new PostgresStore({ pool });
+  const accountId = store.resolveAccountId('acct_dev_alice');
+  await store.withAccountTransaction(accountId, async (scoped) => {
+    const call = scoped.callSessions.get('00000000-0000-7000-8000-000000000111');
+    assert.equal(call.state, 'ACTIVE');
+    assert.equal(call.started_at, '2026-09-13T10:00:00.000Z');
+    assert.equal(call.turn_count, 1);
+    assert.equal(call.asr_seconds_used, 8);
+    assert.equal(call.tts_seconds_used, 3);
+    const turn = scoped.callTurns.get('00000000-0000-7000-8000-000000000112');
+    // call_session_id 列映射回域字段 call_id；数值列统一从字符串还原为 number。
+    assert.equal(turn.call_id, '00000000-0000-7000-8000-000000000111');
+    assert.equal(turn.state, 'SPEAKING');
+    assert.equal(turn.audio_bytes, 32000);
+    assert.equal(turn.transcript_text, '今天心情怎么样？');
+  });
+});
+
+test('PostgresStore persists call sessions before their messages and settles turns with UPDATE only', async () => {
+  const pool = fakePool();
+  const store = new PostgresStore({ pool });
+  const accountId = store.resolveAccountId('acct_dev_alice');
+  const callId = '00000000-0000-7000-8000-000000000111';
+  const turnId = '00000000-0000-7000-8000-000000000112';
+  await store.withAccountTransaction(accountId, async (scoped) => {
+    scoped.callSessions.set(callId, { call_id: callId, account_id: accountId, conversation_id: '00000000-0000-7000-8000-0000000000d2', character_id: '00000000-0000-7000-8000-0000000000f2', state: 'ACTIVE', end_reason: null, started_at: '2026-09-13T10:00:00.000Z', ended_at: null, last_activity_at: '2026-09-13T10:00:00.000Z', turn_count: 1, interrupted_turn_count: 0, asr_seconds_used: 0, tts_seconds_used: 0 });
+    scoped.callTurns.set(turnId, { turn_id: turnId, call_id: callId, account_id: accountId, turn_index: 1, state: 'CREATED', user_message_id: null, assistant_message_id: null, asr_job_id: null, tts_job_id: null, audio_bytes: 0, chunk_count: 0, transcript_text: null, interrupted: false, failure_code: null, created_at: '2026-09-13T10:00:30.000Z', ended_at: null });
+    scoped.messages.set('00000000-0000-7000-8000-0000000000d3', { message_id: '00000000-0000-7000-8000-0000000000d3', conversation_id: '00000000-0000-7000-8000-0000000000d2', actor: 'USER', text: '通话转写', provider: 'tencent-asr', created_at: '2026-09-13T10:00:31.000Z', call_session_id: callId });
+  });
+  const callInsert = pool.calls.find((call) => call.sql.startsWith('INSERT INTO call_sessions'));
+  const turnInsert = pool.calls.find((call) => call.sql.startsWith('INSERT INTO call_turns'));
+  const messageInsert = pool.calls.find((call) => call.sql.startsWith('INSERT INTO messages'));
+  assert.ok(callInsert && turnInsert && messageInsert);
+  // 外键依赖：messages.call_session_id 需要 call_sessions 行先落库。
+  assert.ok(pool.calls.indexOf(callInsert) < pool.calls.indexOf(messageInsert));
+  assert.equal(messageInsert.values[12], callId); // 通话消息回填 call_session_id
+  assert.deepEqual(turnInsert.values.slice(0, 5), [turnId, callId, accountId, 1, 'CREATED']);
+
+  // 已存在行的终局结算只走 UPDATE（回合推进/挂断不重复 INSERT）。
+  const pool2 = fakePool({ loadCallData: true });
+  const store2 = new PostgresStore({ pool: pool2 });
+  await store2.withAccountTransaction(accountId, async (scoped) => {
+    const call = scoped.callSessions.get(callId);
+    call.state = 'ENDED';
+    call.end_reason = 'USER_HANGUP';
+    call.ended_at = '2026-09-13T10:05:00.000Z';
+    const turn = scoped.callTurns.get(turnId);
+    turn.state = 'COMPLETED';
+    turn.transcript_text = '今天心情怎么样？';
+    turn.ended_at = '2026-09-13T10:00:35.000Z';
+  });
+  const callUpdate = pool2.calls.find((call) => call.sql.startsWith('UPDATE call_sessions'));
+  const turnUpdate = pool2.calls.find((call) => call.sql.startsWith('UPDATE call_turns'));
+  assert.ok(callUpdate && turnUpdate);
+  assert.deepEqual(callUpdate.values.slice(0, 4), [callId, accountId, 'ENDED', 'USER_HANGUP']);
+  assert.equal(turnUpdate.values[2], 'COMPLETED');
+  assert.equal(pool2.calls.some((call) => call.sql.startsWith('INSERT INTO call_sessions')), false);
+  assert.equal(pool2.calls.some((call) => call.sql.startsWith('INSERT INTO call_turns')), false);
+});
+
+test('call sessions migration is audit-metrics only, enforces one ACTIVE call per account, and stays account-scoped', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/059_call_sessions.sql'), 'utf8');
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS call_sessions/);
+  assert.match(migration, /state IN \('ACTIVE', 'ENDED'\)/);
+  assert.match(migration, /call_sessions_one_active_per_account_idx[\s\S]*WHERE state = 'ACTIVE'/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+  assert.match(migration, /GRANT SELECT, INSERT, UPDATE ON call_sessions TO qiyu_app/);
+  assert.doesNotMatch(migration, /DELETE ON call_sessions TO qiyu_app/);
+  assert.doesNotMatch(migration, /content_ciphertext|audio_base64|pcm/i); // 仅审计计量，无正文无音频
+});
+
+test('call turns migration keeps the seven-state machine, weak message/job references, and tags call messages', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/060_call_turns.sql'), 'utf8');
+  assert.match(migration, /state IN \('CREATED', 'UPLOADING', 'FINALIZED', 'TRANSCRIBING', 'THINKING', 'SPEAKING', 'COMPLETED', 'INTERRUPTED', 'FAILED'\)/);
+  assert.match(migration, /UNIQUE \(call_session_id, turn_index\)/);
+  // 消息/媒体 job 有物理删除路径（保留期、账户注销），回合审计行长期保留：弱引用不加外键。
+  assert.doesNotMatch(migration, /user_message_id uuid REFERENCES/);
+  assert.doesNotMatch(migration, /asr_job_id uuid REFERENCES/);
+  assert.match(migration, /ALTER TABLE messages ADD COLUMN IF NOT EXISTS call_session_id uuid REFERENCES call_sessions/);
+  assert.match(migration, /FORCE ROW LEVEL SECURITY/);
+});
+
+test('voice gender migration restores TTS replay-reuse matching after PostgreSQL restarts', () => {
+  const migration = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/061_media_jobs_voice_gender.sql'), 'utf8');
+  assert.match(migration, /ALTER TABLE media_jobs ADD COLUMN IF NOT EXISTS voice_gender text/);
+  // 历史行保持 NULL：性别未知时不复用、保守重合成，与修复前的运行时行为一致。
+  assert.doesNotMatch(migration, /UPDATE media_jobs/);
 });
 
 test('PostgresStore persists image-job continuation state and confirmed private reference metadata', async () => {
