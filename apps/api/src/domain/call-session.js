@@ -120,6 +120,9 @@ function createTurn(store, call, { now = new Date() }) {
   const turn = {
     turn_id: store.next('callturn'),
     call_id: call.call_id,
+    // PG 持久化必需：call_turns 的 RLS WITH CHECK 以 account_id 判行归属，
+    // 缺省会在落库时被拒（内存模式无感，单测夹具须沿用此字段）。
+    account_id: call.account_id,
     turn_index: call.turn_count + 1,
     state: 'CREATED',
     user_message_id: null,

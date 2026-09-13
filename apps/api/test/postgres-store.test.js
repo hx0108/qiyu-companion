@@ -462,6 +462,15 @@ test('voice gender migration restores TTS replay-reuse matching after PostgreSQL
   assert.doesNotMatch(migration, /UPDATE media_jobs/);
 });
 
+test('voice gender check constraint is lifted: unspecified-gender voices are legal domain values', () => {
+  // 061 的 (female, male) CHECK 挡住了 normalizePersonaGender 的第三分支
+  // 'unspecified'：中性音色角色的 TTS 行被拒、整笔延迟事务回滚。取值由应用层
+  // 枚举保证，数据库侧不设 CHECK（062 移除）。
+  const fix = readFileSync(path.resolve(__dirname, '../../../infra/postgres/migrations/062_media_jobs_voice_gender_unspecified.sql'), 'utf8');
+  assert.match(fix, /DROP CONSTRAINT IF EXISTS media_jobs_voice_gender_check/);
+  assert.doesNotMatch(fix, /ADD CONSTRAINT|CHECK \(voice_gender/);
+});
+
 test('PostgresStore persists image-job continuation state and confirmed private reference metadata', async () => {
   const pool = fakePool();
   const store = new PostgresStore({ pool });

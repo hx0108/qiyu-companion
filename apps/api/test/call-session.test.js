@@ -72,6 +72,13 @@ test('归属校验：他人通话与不存在通话一律 CALL_NOT_FOUND，不�
   assert.throws(() => ownTurn(store, { ...call, call_id: 'call_999999' }, turn.turn_id), (error) => error.code === 'CALL_TURN_NOT_FOUND');
 });
 
+test('回合必须携带账户归属：PG 持久化的 RLS WITH CHECK 以 account_id 判行，缺失即落库被拒', () => {
+  const store = new DevelopmentStore();
+  const call = createCall(store, { accountId: 'acct_dev_alice', conversationId: 'conv_000001', characterId: 'chr_000001', now: NOW });
+  const turn = createTurn(store, call, { now: NOW });
+  assert.equal(turn.account_id, 'acct_dev_alice');
+});
+
 test('回合生命周期：同通话同时只有一个未终局回合；终局后可开新回合', () => {
   const store = new DevelopmentStore();
   const call = startedCall(store);
