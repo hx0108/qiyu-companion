@@ -1,0 +1,7 @@
+{
+  "acceptance": "passed",
+  "model_provider": "qwen",
+  "private_image_bytes": 856,
+  "deleted_reference_http_status": 409,
+  "deleted_reference_error_code": "CONTEXT_IMAGE_NOT_AVAILABLE"
+}

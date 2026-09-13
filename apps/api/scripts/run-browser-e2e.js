@@ -35,11 +35,11 @@ async function main() {
   const store = new DevelopmentStore();
   const replyGenerator = realQwen ? createQwenReplyGenerator(process.env) : null;
   if (realQwen && !replyGenerator) throw new Error('QIYU_E2E_REAL_QWEN=1 requires QIYU_LLM_PROVIDER=qwen and QWEN_API_KEY.');
-  const providerRuntime = realTencentMedia ? createTencentMediaRuntime(process.env, store) : {};
+  const providerRuntime = realTencentMedia ? createTencentMediaRuntime(process.env, store) : createMockContextImageRuntime();
   const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true });
+  const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
   const page = await browser.newPage();
   const consoleErrors = [];
   const expectedFailures = [];
@@ -126,6 +126,43 @@ async function main() {
         await page.waitForFunction(() => document.body.innerText.includes('开发 Mock 已收到'), null, { timeout: 15_000 });
       }
     });
+
+    if (!realTencentMedia) {
+      await step('按住说话：长按录音、浏览器转 WAV、转写确认后只回填不发送', async () => {
+        await page.context().grantPermissions(['microphone'], { origin: base });
+        const beforeMessages = store.messages.size;
+        const button = page.locator('[data-action="hold-asr"]');
+        const box = await button.boundingBox(); assert(box, '按住说话按钮应可见');
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
+        await page.waitForSelector('[data-action="hold-asr"][data-recording="true"]', { timeout: 10_000 });
+        await page.waitForTimeout(700); await page.mouse.up();
+        await page.waitForTimeout(4_000);
+        assert(await page.locator('#asr-edit').count() > 0, `长按录音后应显示转写编辑框；当前界面：${(await page.locator('body').innerText()).replace(/\s+/g, ' ').slice(-500)}`);
+        assert((await page.locator('#asr-edit').inputValue()).includes('浏览器录音'), 'Mock ASR 应返回待确认文字');
+        assert(store.messages.size === beforeMessages, '转写未经确认和发送时不得创建聊天消息');
+        await page.locator('[data-action="confirm-asr"]').click();
+        await page.waitForSelector('#message-form [name="message"]', { timeout: 10_000 });
+        assert((await page.locator('#message-form [name="message"]').inputValue()).includes('浏览器录音'), '确认转写后应只回填输入框');
+        assert(store.messages.size === beforeMessages, '确认转写仍不得自动发送');
+        await page.locator('#message-form [name="message"]').fill('');
+      });
+    }
+
+    if (!realTencentMedia) {
+      await step('聊天图片：私密上传、前审、消息气泡展示与删除立即失效', async () => {
+        await page.locator('#context-image-file').setInputFiles({ name: 'qiyu-context.png', mimeType: 'image/png', buffer: createControlledPng() });
+        await page.waitForFunction(() => document.body.innerText.includes('图片状态：AVAILABLE'), null, { timeout: 15_000 });
+        await page.locator('#message-form [name="message"]').fill('只描述你能确定的画面。');
+        await page.locator('#message-form .send').click();
+        await page.waitForFunction(() => document.querySelectorAll('article.message.me .context-image-thumb').length > 0, null, { timeout: 15_000 });
+        const asset = [...store.mediaAssets.values()].find((item) => item.type === 'USER_CONTEXT_IMAGE');
+        assert(asset?.state === 'AVAILABLE' && asset.message_id, '已审核图片应绑定用户消息');
+        await page.locator(`[data-action="delete-context-image"][data-asset-id="${asset.asset_id}"]`).click();
+        await page.waitForFunction(() => document.body.innerText.includes('图片附件 · 已删除'), null, { timeout: 15_000 });
+        assert(store.mediaAssets.get(asset.asset_id)?.state === 'DELETED', '删除后资产应立即不可用于模型上下文');
+        assert(!providerRuntime.objects.has(asset.object_key), '私有 Mock 对象应已删除');
+      });
+    }
 
     if (!realQwen) {
       await step('记忆拒绝撤销：不记住后 30 秒内可由服务端恢复候选', async () => {
@@ -297,8 +334,8 @@ function renderReport(steps, consoleErrors, serverErrors, passed, realQwen, real
     '# 浏览器全链路 E2E 回归报告',
     '',
     `- 运行时间：${new Date().toISOString()}`,
-    `- 环境：内存开发 Store + ${realQwen ? '真实 Qwen 回复' : 'Mock 回复'}${realTencentMedia ? ' + 真实腾讯 TTS/ASR/IMS/混元/COS' : ''}；系统 Edge 无头（channel: msedge，不下载 Chromium）。`,
-    `- 覆盖：必要告知 → 年龄声明 → 角色创建 → 对话 SSE 回放 → ${realTencentMedia ? '真实 TTS → 真实 ASR → 真实受控图片' : 'TTS 未启用降级'} → 时间线 → 数据中心保留期切换 → 安全中心/通知入口 → 日夜主题。`,
+    `- 环境：内存开发 Store + ${realQwen ? '真实 Qwen 回复' : 'Mock 回复'}${realTencentMedia ? ' + 真实腾讯 TTS/ASR/IMS/混元/COS' : ' + Mock 图片审核/私有对象库'}；系统 Edge 无头（channel: msedge，不下载 Chromium）。`,
+    `- 覆盖：必要告知 → 年龄声明 → 角色创建 → 对话 SSE 回放 → ${realTencentMedia ? '真实 TTS → 真实 ASR → 真实受控图片' : '聊天图片上传/气泡/删除 → TTS 未启用降级'} → 时间线 → 数据中心保留期切换 → 安全中心/通知入口 → 日夜主题。`,
     realTencentMedia ? '- 边界：媒体由同一浏览器会话触发并使用受控资产；账户/权益仍为内存开发态，支付、第三方年龄核验和生产删除不在本链路。' : realQwen ? '- 边界：本轮仅把浏览器聊天替换为真实 Qwen；TTS/ASR/图片仍须由各自腾讯验收脚本覆盖，支付、增强年龄核验和生产删除不在本链路。' : '- 边界：该脚本仍是内存开发 Store + Mock；外部供应商、支付、增强年龄核验和生产删除不在本链路。',
     '',
     '| 步骤 | 结论 | 说明 |',
@@ -307,6 +344,19 @@ function renderReport(steps, consoleErrors, serverErrors, passed, realQwen, real
   for (const step of steps) lines.push(`| ${step.name} | ${step.status} | ${step.detail || '—'} |`);
   lines.push('', `浏览器控制台错误（排除 TTS 预期降级与资源加载噪声）：${consoleErrors.length} 条`, `服务端 5xx（排除 TTS 预期 503）：${serverErrors.length} 条${serverErrors.length ? '：' + serverErrors.join('、') : ''}`, '', passed ? '浏览器 E2E 门禁通过。' : '浏览器 E2E 门禁失败。');
   return lines.join('\n');
+}
+
+function createMockContextImageRuntime() {
+  const objects = new Map();
+  const imageStore = {
+    async putImage({ assetId, bytes, mimeType }) { const objectKey = `qiyu/images/${assetId}.png`; objects.set(objectKey, Buffer.from(bytes)); return { objectKey, checksum: `mock-${assetId}`, byteLength: bytes.length, mimeType }; },
+    async createModerationUrl(objectKey) { return `https://qiyu-1250000000.cos.ap-guangzhou.myqcloud.com/${objectKey}?q-signature=mock`; },
+    async readImage(objectKey) { return objects.get(objectKey); },
+    async deleteAsset(objectKey) { objects.delete(objectKey); }
+  };
+  const imageModerator = async () => ({ decision: 'PASS', providerRequestId: 'mock-context-image-review', policyVersion: 'mock-context-image-v1' });
+  const asrTranscriber = async ({ mimeType }) => { assert(mimeType === 'audio/wav', '浏览器录音应先协商并转码为 WAV'); return { text: '这是一段浏览器录音。', providerRequestId: 'mock-browser-asr' }; };
+  return { objects, imageStore, appOptions: { imageStore, imageModerator, asrTranscriber } };
 }
 
 function reviewerHeaders() {

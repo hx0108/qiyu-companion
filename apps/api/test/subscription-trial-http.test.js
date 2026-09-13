@@ -45,8 +45,10 @@ test('7 天完整体验：年龄准入后一次性发放，绝不创建支付订
   const balances = await request(base, '/api/v1/entitlements');
   const byCapability = Object.fromEntries(balances.body.entitlements.map((item) => [item.capability, item]));
   assert.equal(byCapability.IMAGE_GENERATION.granted_quantity, 3);
-  assert.equal(byCapability.SYNTHESIZE_TTS.granted_quantity, 5 * 60);
-  assert.equal(byCapability.TRANSCRIBE_ASR.granted_quantity, 0);
+  // 2026-09-13 调整：语音输入上线后试用档必须含 ASR 分钟数（此前 0 分钟导致
+  // 一按“按住说话”即 ENTITLEMENT_QUOTA_EXCEEDED）；TTS 5 分钟实测一天耗尽。
+  assert.equal(byCapability.SYNTHESIZE_TTS.granted_quantity, 30 * 60);
+  assert.equal(byCapability.TRANSCRIBE_ASR.granted_quantity, 10 * 60);
 
   store.subscriptions.set(started.body.subscription.subscription_id, { ...started.body.subscription, period_end: new Date(Date.now() + 12 * 3600000).toISOString() });
   const ending = await request(base, '/api/v1/subscriptions/current');

@@ -1,4 +1,5 @@
 import { clearEncryptedSession, loadEncryptedSession, saveEncryptedSession } from './encrypted-session.js';
+import { MAX_RECORDING_MS, MIN_HOLD_MS, recordingBlobToWav, selectRecordingMimeType, shouldCancelHold } from './media-input.js';
 
 const API_BASE = "/api/v1";
 const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
@@ -38,7 +39,12 @@ const state = {
   asrJob: null,
   asrEdit: "",
   asrRecording: null,
+  asrHold: null,
   pendingTranscript: "",
+  contextImageAsset: null,
+  contextImagePreviewUrl: null,
+  imageUrls: new Map(),
+  deletedImageIds: new Set(),
   subscriptionCatalog: null,
   audioUrls: new Map(),
   referenceImageFile: null,
@@ -171,6 +177,94 @@ async function apiImage(path) {
   return URL.createObjectURL(await response.blob());
 }
 
+async function hydrateContextImages() {
+  const ids = [...new Set(state.messages.flatMap((message) => (message.attachments ?? []).map((item) => item.asset_id)))];
+  let changed = false;
+  for (const id of ids) {
+    if (state.imageUrls.has(id)) continue;
+    try {
+      state.imageUrls.set(id, await apiImage(`/media-assets/${encodeURIComponent(id)}/content`));
+      changed = true;
+    } catch {
+      state.deletedImageIds.add(id);
+      changed = true;
+    }
+  }
+  if (changed) render();
+}
+
+const CONTEXT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+// 手机拍照普遍 3-5MB，直接按原样上传会被拒也拖慢弱网。先在本地降采样为
+// 最长边 1600px 的 JPEG（通常 <400KB）再走私有上传链路；降采样失败时回退
+// 原文件，由服务端上限兜底（2026-09-13 修复“聊天图片传不了”）。
+async function downscaleContextImage(file) {
+  // 三档递进（1600px@0.85 → 1600px@0.7 → 1280px@0.7）：普通照片一档即达标，
+  // 噪声图/高频截图这类难压缩内容继续压，最终仍超 1MB 就交给服务端 8MB 兜底。
+  const attempts = [[1600, 0.85], [1600, 0.7], [1280, 0.7]];
+  try {
+    const bitmap = await createImageBitmap(file);
+    let best = null;
+    for (const [maxEdge, quality] of attempts) {
+      const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, width, height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+      if (!blob) continue;
+      if (blob.size >= file.size) break;
+      best = new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+      if (blob.size < 1024 * 1024) break;
+    }
+    bitmap.close();
+    return best ?? file;
+  } catch { return file; }
+}
+
+async function uploadContextImage(file) {
+  if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size === 0 || file.size > CONTEXT_IMAGE_MAX_BYTES) {
+    setToast("请选择不超过 10MB 的 JPEG、PNG 或 WebP 静态图片。"); return;
+  }
+  setBusy(true);
+  try {
+    const prepared = await downscaleContextImage(file);
+    await ensureConversation();
+    const bytes = new Uint8Array(await prepared.arrayBuffer()); let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    const payload = await api(`/conversations/${encodeURIComponent(conversationId())}/context-images`, { method: "POST", idempotent: uuid(), body: { mime_type: prepared.type, image_base64: btoa(binary), user_confirms_upload_rights: true } });
+    state.contextImageAsset = payload.media_asset;
+    if (state.contextImagePreviewUrl) URL.revokeObjectURL(state.contextImagePreviewUrl);
+    state.contextImagePreviewUrl = payload.media_asset?.state === "AVAILABLE" ? URL.createObjectURL(prepared) : null;
+    setToast(payload.media_asset?.state === "AVAILABLE" ? "图片已私密上传并通过审核，可随消息发送。" : `图片未通过发送门禁：${payload.media_asset?.state ?? "FAILED"}`);
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
+async function removePendingContextImage() {
+  const assetId = state.contextImageAsset?.asset_id;
+  if (!assetId) return;
+  setBusy(true);
+  try { await api(`/media-assets/${encodeURIComponent(assetId)}`, { method: "DELETE", idempotent: uuid() }); }
+  catch (error) { setToast(serverMessage(error)); }
+  finally {
+    if (state.contextImagePreviewUrl) URL.revokeObjectURL(state.contextImagePreviewUrl);
+    state.contextImagePreviewUrl = null; state.contextImageAsset = null; setBusy(false);
+  }
+}
+
+async function deleteAttachedContextImage(assetId) {
+  if (!assetId) return;
+  setBusy(true);
+  try {
+    await api(`/media-assets/${encodeURIComponent(assetId)}`, { method: "DELETE", idempotent: uuid() });
+    const url = state.imageUrls.get(assetId); if (url) URL.revokeObjectURL(url);
+    state.imageUrls.delete(assetId); state.deletedImageIds.add(assetId);
+    setToast("图片已立即从模型可用上下文撤销，并提交私有对象删除。");
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
 function unwrap(payload, singular, plural) {
   if (plural && Array.isArray(payload?.[plural])) return payload[plural];
   if (singular && payload?.[singular] !== undefined) return payload[singular];
@@ -299,6 +393,7 @@ async function restoreSession() {
   if (conversationId()) {
     const history = await api(`/conversations/${encodeURIComponent(conversationId())}/messages?limit=50`);
     state.messages = unwrap(history, "messages", "messages") ?? [];
+    hydrateContextImages().catch(() => {});
     await refreshMemoryAndAssets();
   }
   await refreshTrialFeedback();
@@ -638,17 +733,20 @@ async function consumeSseStream(url, onChunk) {
 async function sendMessage(form) {
   const input = form.elements.message;
   const content = input.value.trim();
-  if (!content) return;
+  const imageAsset = state.contextImageAsset?.state === "AVAILABLE" ? state.contextImageAsset : null;
+  if (!content && !imageAsset) return;
   setBusy(true);
   try {
     await ensureConversation();
     // stream:true：服务端配置了流式生成器时返回 202+一次性令牌，SSE 为真流式
     // （逐句审核后下发）；未配置时服务端回退 201 同步合同，走同一渲染路径。
     const payload = await api(`/conversations/${encodeURIComponent(conversationId())}/messages`, {
-      method: "POST", idempotent: uuid(), body: { content: { text: content }, stream: true },
+      method: "POST", idempotent: uuid(), body: { content: { text: content }, attachments: imageAsset ? [{ asset_id: imageAsset.asset_id, purpose: "CONTEXT_IMAGE" }] : [], stream: true },
     });
     input.value = "";
     state.pendingTranscript = "";
+    if (imageAsset && state.contextImagePreviewUrl) state.imageUrls.set(imageAsset.asset_id, state.contextImagePreviewUrl);
+    state.contextImageAsset = null; state.contextImagePreviewUrl = null;
     if (payload?.user_message) state.messages.push(payload.user_message);
     const assistant = payload?.assistant_message;
     const live = payload?.status === "ACCEPTED" && payload?.stream?.mode === "live";
@@ -1408,7 +1506,7 @@ async function createAsrJob() {
     state.asrJob = payload?.asr_job ?? payload;
     if (state.asrJob?.state === "COMPLETED" && state.asrJob?.transcript?.state === "PENDING_CONFIRMATION") {
       state.asrEdit = state.asrJob.transcript.text;
-      state.route = "asr-confirm";
+      state.route = "chat";
     }
   } catch (error) {
     setToast(serverMessage(error));
@@ -1449,14 +1547,13 @@ async function deleteFailedAsrInput() {
 }
 
 function recordingMimeType() {
-  if (!globalThis.MediaRecorder) return null;
-  return ["audio/ogg;codecs=opus", "audio/ogg"].find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
+  return selectRecordingMimeType();
 }
 
 async function startAsrRecording() {
   const mimeType = recordingMimeType();
   if (!mimeType || !navigator.mediaDevices?.getUserMedia) {
-    setToast("当前浏览器不能录制腾讯短语音兼容格式；请导入 WAV、MP3、M4A、AAC 或 OGG 文件。");
+    setToast("当前浏览器不支持录音；请导入 WAV、MP3、M4A、AAC 或 OGG 文件。");
     return;
   }
   try {
@@ -1464,20 +1561,37 @@ async function startAsrRecording() {
     const chunks = [];
     const recorder = new MediaRecorder(stream, { mimeType });
     recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
-    recorder.addEventListener("stop", () => {
+    const startedAt = Date.now();
+    const timeout = setTimeout(() => stopAsrRecording(false, true), MAX_RECORDING_MS);
+    recorder.addEventListener("stop", async () => {
+      clearTimeout(timeout);
       stream.getTracks().forEach((track) => track.stop());
       state.asrRecording = null;
-      setAsrFile(new File([new Blob(chunks, { type: "audio/ogg" })], `qiyu-${Date.now()}.ogg`, { type: "audio/ogg" }));
+      const hold = state.asrHold;
+      state.asrHold = null;
+      if (hold?.cancelled) { render(); setToast("已取消录音，浏览器未上传原始音频。"); return; }
+      if (Date.now() - startedAt < MIN_HOLD_MS || chunks.reduce((sum, chunk) => sum + chunk.size, 0) === 0) { render(); setToast("录音太短或为空，请按住后再说话。"); return; }
+      try {
+        const wav = await recordingBlobToWav(new Blob(chunks, { type: mimeType }));
+        setAsrFile(new File([wav], `qiyu-${Date.now()}.wav`, { type: "audio/wav" }));
+        await createAsrJob();
+      } catch (error) { render(); setToast(error?.message === "AUDIO_TOO_LONG" ? "录音超过 60 秒，未上传。" : "无法解码这段录音，请重试或导入音频。"); }
     }, { once: true });
     state.asrRecording = recorder;
-    recorder.start();
+    recorder.start(250);
+    if (state.asrHold?.released) queueMicrotask(() => stopAsrRecording(state.asrHold?.cancelled));
     render();
   } catch {
+    state.asrHold = null;
     setToast("浏览器未授予麦克风权限；你也可以导入一段短音频。");
   }
 }
 
-function stopAsrRecording() { if (state.asrRecording?.state === "recording") state.asrRecording.stop(); }
+function stopAsrRecording(cancelled = false, timedOut = false) {
+  if (state.asrHold) state.asrHold.cancelled = cancelled;
+  if (state.asrRecording?.state === "recording") state.asrRecording.stop();
+  if (timedOut) setToast("已达到 60 秒上限，正在转写。");
+}
 
 async function resolveCandidate(kind) {
   const candidate = state.selectedCandidate;
@@ -1617,9 +1731,15 @@ function messageMarkup(message) {
   const audio = !isUser && id ? state.audioUrls.get(id) : null;
   // 参考对话视觉：括号动作描写转斜体弱化；先转义再包裹，不引入用户可控 HTML。
   const bubbleHtml = (escapeHtml(content) || "…").replace(/([（(][^（）()]*[）)])/g, '<em class="action">$1</em>');
-  const voiceControl = !isUser && id ? `<button type="button" class="voice-trigger" data-action="${audio ? "toggle-message-audio" : "synthesize-message-audio"}" data-message-id="${escapeHtml(id)}" aria-label="${audio ? "播放角色语音" : "生成并播放角色语音"}" title="${audio ? "播放角色语音" : "生成并播放角色语音"}" ${state.busy ? "disabled" : ""}><span class="voice-trigger-visual"><img src="/assets/player-play-filled.svg" alt="" aria-hidden="true"></span></button>` : "";
-  const voicePlayback = !isUser && audio ? `<div class="voice-message"><audio class="voice-audio" preload="metadata" src="${escapeHtml(audio.url)}"></audio><span class="aigc">AI 生成语音</span><button class="voice-delete" data-action="delete-message-audio" data-message-id="${escapeHtml(id)}">删除语音</button></div>` : "";
-  return `<article class="message ${isUser ? "me" : "ai"}">${voiceControl}<div class="bubble">${bubbleHtml}</div>${voicePlayback}</article>`;
+  const voiceControl = !isUser && id ? `<button type="button" class="voice-trigger" data-action="${audio ? "toggle-message-audio" : "synthesize-message-audio"}" data-message-id="${escapeHtml(id)}" aria-label="${audio ? "播放角色语音" : "生成并播放角色语音"}" ${state.busy ? "disabled" : ""}><span class="voice-trigger-visual"><img src="/assets/player-play-filled.svg" alt="" aria-hidden="true"></span></button>` : "";
+  const voicePlayback = !isUser && audio ? `<audio class="voice-audio" preload="metadata" src="${escapeHtml(audio.url)}"></audio>` : "";
+  const voiceRow = voiceControl ? `<div class="voice-control-row">${voiceControl}${voicePlayback}</div>` : "";
+  const attachments = (message.attachments ?? []).map((attachment) => {
+    const url = state.imageUrls.get(attachment.asset_id);
+    if (state.deletedImageIds.has(attachment.asset_id)) return `<div class="context-image-status">图片附件 · 已删除</div>`;
+    return url ? `<div><img class="context-image-thumb" src="${escapeHtml(url)}" alt="用户上传并审核通过的聊天图片">${isUser ? `<button type="button" class="voice-delete" data-action="delete-context-image" data-asset-id="${escapeHtml(attachment.asset_id)}">删除图片</button>` : ""}</div>` : `<div class="context-image-status">图片附件 · 私密加载中</div>`;
+  }).join("");
+  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${bubbleHtml}</div>${voiceRow}</div></article>`;
 }
 
 async function openWorldState() {
@@ -1673,7 +1793,9 @@ function renderChat() {
   const worldText = world ? `${world.mood_code ?? "平静"} · ${world.location_code ?? "未设定"}` : "此刻由你决定";
   const memoryBanner = candidate ? `<button class="memory-banner" data-action="open-candidate" data-candidate-id="${escapeHtml(candidateId(candidate))}"><span>${prototypeIcon("archive", 18)}</span><span><b>1 条候选记忆等待你确认</b><small>不会自动写入长期记忆</small></span><span class="chev">${prototypeIcon("chev", 16)}</span></button>` : "";
   const paused = state.userPaused ? `<button class="memory-banner" data-action="resume-interaction"><span>${prototypeIcon("shield", 18)}</span><span><b>普通互动已暂停</b><small>由你恢复前，不会继续生成角色回复</small></span></button>` : "";
-  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap"><div class="composer"><button type="button" class="icon-btn" data-action="open-asr" aria-label="语音转文字">${prototypeIcon("mic", 19)}</button><input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}><button type="button" class="icon-btn" data-action="open-image" aria-label="受控情境图">${prototypeIcon("image", 19)}</button><button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button></div></form>${prototypeNav("chat")}</section>`;
+  const asrPanel = state.asrJob?.state === "COMPLETED" ? `<div class="inline-media-panel"><label>检查转写后再发送<textarea id="asr-edit" maxlength="4000">${escapeHtml(state.asrEdit)}</textarea></label><button type="button" class="btn btn-primary" data-action="confirm-asr">确认到输入框</button></div>` : state.asrJob?.state === "FAILED" ? `<div class="inline-media-panel error">转写失败：${escapeHtml(state.asrJob.failure_code ?? "UNKNOWN")}<button type="button" class="btn btn-line" data-action="delete-failed-asr-input">删除原音频</button></div>` : "";
+  const imagePanel = state.contextImageAsset ? `<div class="inline-media-panel"><span>图片状态：${escapeHtml(state.contextImageAsset.state)}</span>${state.contextImagePreviewUrl ? `<img class="context-image-preview" src="${escapeHtml(state.contextImagePreviewUrl)}" alt="待发送图片">` : ""}<button type="button" class="btn btn-line" data-action="remove-context-image">删除图片</button></div>` : "";
+  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}<div class="composer"><button type="button" class="icon-btn hold-to-talk" data-action="hold-asr" aria-label="按住说话">${prototypeIcon("mic", 19)}</button><input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}><label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button></div><small class="hold-hint">按住说话 · 上滑取消</small></form>${prototypeNav("chat")}</section>`;
 }
 
 function renderSubscription() {
@@ -1875,6 +1997,11 @@ function render() {
   const undoMemory = state.lastRejectedCandidate ? `<div class="toast" role="status">已选择“不记住” <button class="btn btn-line" data-action="undo-memory-reject">撤销</button></div>` : "";
   app.innerHTML = view + renderContinuousReminder() + undoMemory + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
   if (state.route === "chat") {
+    const holdButton = app.querySelector('[data-action="hold-asr"]');
+    if (holdButton && state.asrRecording?.state === "recording") {
+      holdButton.classList.add("recording");
+      holdButton.dataset.recording = "true";
+    }
     const note = app.querySelector(".system-note");
     const latestAssistant = [...state.messages].reverse().find((item) => (item.actor ?? item.role) === "ASSISTANT");
     if (note) note.insertAdjacentHTML("beforeend", `${state.worldState ? ` <button class="btn btn-line" data-action="open-world-state" ${state.busy ? "disabled" : ""}>查看当前情境</button>` : ""}${latestAssistant ? ` <button class="btn btn-line" data-action="report-latest-assistant-message" ${state.busy ? "disabled" : ""}>反馈最近回复</button>` : ""}`);
@@ -1893,7 +2020,28 @@ document.addEventListener("change", (event) => {
   }
   if (event.target?.id === "asr-file") setAsrFile(event.target.files?.[0]);
   if (event.target?.id === "reference-image-file") setReferenceImageFile(event.target.files?.[0]);
+  if (event.target?.id === "context-image-file") uploadContextImage(event.target.files?.[0]);
 });
+
+document.addEventListener("pointerdown", (event) => {
+  const button = event.target.closest('[data-action="hold-asr"]');
+  if (!button || state.busy || state.asrRecording) return;
+  event.preventDefault();
+  state.asrHold = { pointerId: event.pointerId, startY: event.clientY, cancelled: false };
+  button.classList.add("recording");
+  startAsrRecording();
+});
+document.addEventListener("pointermove", (event) => {
+  if (!state.asrHold || state.asrHold.pointerId !== event.pointerId) return;
+  state.asrHold.cancelled = shouldCancelHold(state.asrHold.startY, event.clientY);
+  document.querySelector('[data-action="hold-asr"]')?.classList.toggle("cancel", state.asrHold.cancelled);
+});
+document.addEventListener("pointerup", (event) => {
+  if (!state.asrHold || state.asrHold.pointerId !== event.pointerId) return;
+  state.asrHold.released = true;
+  stopAsrRecording(state.asrHold.cancelled);
+});
+document.addEventListener("pointercancel", () => { if (state.asrHold) stopAsrRecording(true); });
 
 document.addEventListener("input", (event) => {
   if (event.target?.id === "candidate-edit") state.confirmEdit = event.target.value;
@@ -1986,6 +2134,8 @@ document.addEventListener("click", (event) => {
   if (action === "delete-failed-asr-input") deleteFailedAsrInput();
   if (action === "start-asr-recording") startAsrRecording();
   if (action === "stop-asr-recording") stopAsrRecording();
+  if (action === "remove-context-image") removePendingContextImage();
+  if (action === "delete-context-image") deleteAttachedContextImage(button.dataset.assetId);
   if (action === "refresh-image-job") refreshImageJob();
   if (action === "replace-reference-image") { state.referenceImageFile = null; state.referenceImageAsset = null; state.referenceRightsReview = null; state.imageJob = null; clearGeneratedImage(); state.route = "image-reference"; render(); }
   if (action === "delete-generated-image") deleteGeneratedImage();

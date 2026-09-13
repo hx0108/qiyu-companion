@@ -48,6 +48,7 @@ async function main() {
   const conversations = await fetch(`${base}/api/v1/conversations`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.json());
   const conversation = conversations.conversations.at(-1);
   let sendFailures = 0;
+  const sendFailureDiagnostics = [];
   try {
     for (let round = 1; round <= ROUNDS; round += 1) {
       for (const [index, prompt] of PROMPTS.entries()) {
@@ -56,14 +57,24 @@ async function main() {
           headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, 'idempotency-key': `lc-${round}-${index}` },
           body: JSON.stringify({ content: { text: prompt } })
         });
-        if (!response.ok || !(await response.json()).assistant_message) sendFailures += 1;
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || !body.assistant_message) {
+          sendFailures += 1;
+          sendFailureDiagnostics.push({
+            round,
+            prompt_index: index,
+            http_status: response.status,
+            error_code: body?.error?.code || null,
+            provider: body?.provider || null
+          });
+        }
       }
     }
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
   const metrics = [...store.operationMetrics.values()].filter((metric) => metric.account_id === accountId);
-  const report = renderReport(metrics, sendFailures, useQwen ? 'qwen' : 'mock');
+  const report = renderReport(metrics, sendFailures, sendFailureDiagnostics, useQwen ? 'qwen' : 'mock');
   console.log(report);
   const outputDir = path.resolve(__dirname, '../../../development/eval');
   fs.mkdirSync(outputDir, { recursive: true });
@@ -100,7 +111,7 @@ function percentile(sortedValues, p) {
   return sortedValues[Math.max(0, index)];
 }
 
-function renderReport(metrics, sendFailures, providerLabel) {
+function renderReport(metrics, sendFailures, sendFailureDiagnostics, providerLabel) {
   const priceIn = Number(process.env.QIYU_EVAL_PRICE_IN_PER_1M);
   const priceOut = Number(process.env.QIYU_EVAL_PRICE_OUT_PER_1M);
   const priceConfigured = Number.isFinite(priceIn) && Number.isFinite(priceOut);
@@ -127,6 +138,10 @@ function renderReport(metrics, sendFailures, providerLabel) {
     lines.push(`| ${capability} | ${rows.length} | ${percentile(latencies, 50)} | ${percentile(latencies, 95)} | ${failed} | ${inputTokens} | ${outputTokens} | ${cost === null ? '—' : cost.toFixed(4)} |`);
   }
   lines.push('', `成本口径：${providerLabel === 'mock' ? 'mock 适配器无真实 token 计费，不估算' : priceConfigured ? `单价 ${priceIn}/${priceOut} 元每百万 token（环境变量提供），总估算 ${totalCost.toFixed(4)} 元` : '未配置 QIYU_EVAL_PRICE_IN_PER_1M / QIYU_EVAL_PRICE_OUT_PER_1M，不估算（不猜价格）'}`);
+  if (sendFailureDiagnostics.length > 0) {
+    lines.push('', '## 失败请求脱敏诊断', '', '| 轮次 | 固定用例序号 | HTTP | 错误码 | Provider |', '|---|---:|---:|---|---|');
+    for (const item of sendFailureDiagnostics) lines.push(`| ${item.round} | ${item.prompt_index} | ${item.http_status} | ${item.error_code || '—'} | ${item.provider || '—'} |`);
+  }
   return lines.join('\n');
 }
 

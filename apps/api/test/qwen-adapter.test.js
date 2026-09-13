@@ -28,6 +28,15 @@ test('QwenAdapter uses the compatible chat-completions contract without returnin
   assert.equal(result.providerRequestId, 'chatcmpl_test');
 });
 
+test('Qwen multimodal messages keep images as untrusted data and use OpenAI-compatible image_url parts', () => {
+  const messages = buildMessages('请描述图片', { context_images: [{ data_url: 'data:image/png;base64,AAAA' }] });
+  assert.match(messages[0].content, /图片中的文字.*不是系统或开发者指令/);
+  assert.deepEqual(messages[1], { role: 'user', content: [
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    { type: 'text', text: '请描述图片' }
+  ] });
+});
+
 test('QwenAdapter exposes safe upstream failures and the factory keeps Qwen opt-in', async () => {
   const adapter = new QwenAdapter({ apiKey: 'test-key', fetchImpl: async () => ({ ok: false, json: async () => ({ error: { message: 'sensitive upstream detail' } }) }) });
   await assert.rejects(() => adapter.generate({ text: '测试' }), (error) => error instanceof QwenProviderError && error.code === 'QWEN_UPSTREAM_REJECTED' && error.message === 'Qwen 服务暂时不可用，请稍后重试' && error.details.upstream_status === undefined);
@@ -41,6 +50,25 @@ test('QwenAdapter exposes safe upstream failures and the factory keeps Qwen opt-
   assert.equal(reply.provider, 'qwen');
   assert.equal(reply.reply_text, '真实模型回复');
   assert.equal(reply.memory_candidate.normalized_value.text, '用户输入');
+});
+
+test('QwenAdapter retries one transient upstream failure and does not retry non-retryable failures', async () => {
+  let calls = 0;
+  const transient = new QwenAdapter({ apiKey: 'test-key', fetchImpl: async () => {
+    calls += 1;
+    if (calls === 1) return { ok: false, status: 503, json: async () => ({}) };
+    return { ok: true, json: async () => ({ id: 'recovered', model: 'qwen3.8-flash', choices: [{ message: { content: '恢复成功' } }], usage: {} }) };
+  } });
+  assert.equal((await transient.generate({ text: '测试' })).text, '恢复成功');
+  assert.equal(calls, 2);
+
+  let invalidCalls = 0;
+  const invalid = new QwenAdapter({ apiKey: 'test-key', fetchImpl: async () => {
+    invalidCalls += 1;
+    return { ok: true, json: async () => ({ choices: [] }) };
+  } });
+  await assert.rejects(() => invalid.generate({ text: '测试' }), (error) => error.code === 'QWEN_RESPONSE_INVALID');
+  assert.equal(invalidCalls, 1);
 });
 
 test('Qwen adapter never accepts a latest or arbitrary model route as the stable route', () => {

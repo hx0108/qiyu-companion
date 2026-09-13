@@ -32,6 +32,7 @@ const { DEVELOPMENT_EMBEDDING_MODEL_VERSION, cosineSimilarity, deterministicEmbe
 const { scheduleAccountNotifications } = require('./domain/notification-scheduler');
 const { buildCostReport, parseRateCard } = require('./domain/cost-accounting');
 const reviewerIdentity = require('./domain/reviewer-identity');
+const { inspectContextImage } = require('./domain/context-image-policy');
 
 const TOKENS = new Map([
   ['dev-alice-token', 'acct_dev_alice'],
@@ -47,7 +48,9 @@ const SUBSCRIPTION_CATALOG = Object.freeze({
   ], policy: 'development-simulated-checkout-only; real Alipay/WeChat payment is disabled' });
 const TRIAL_PRODUCT = Object.freeze({
   sku: 'qiyu_full_experience_trial_7d_v1', label: '7 天完整体验档', duration_days: 7,
-  image_quota: 3, tts_minutes: 5, asr_minutes: 0
+  // asr 0→10 / tts 5→30（2026-09-13）：语音输入已随封测上线，0 分钟导致试用
+  // 用户一按“按住说话”就 ENTITLEMENT_QUOTA_EXCEEDED；TTS 5 分钟实测一天用完。
+  image_quota: 3, tts_minutes: 30, asr_minutes: 10
 });
 const TRIAL_DISCLOSURE_VERSION = 'trial_full_experience_7d_v1';
 const DEVELOPMENT_TRIAL_CHANNEL = 'DEVELOPMENT_TRIAL';
@@ -64,6 +67,7 @@ const STATIC_FILES = new Map([
   ['/favicon.svg', { file: path.resolve(__dirname, '../../web/favicon.svg'), type: 'image/svg+xml' }],
   ['/app.js', { file: path.resolve(__dirname, '../../web/app.js'), type: 'text/javascript; charset=utf-8' }],
   ['/encrypted-session.js', { file: path.resolve(__dirname, '../../web/encrypted-session.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/media-input.js', { file: path.resolve(__dirname, '../../web/media-input.js'), type: 'text/javascript; charset=utf-8' }],
   ['/manifest.webmanifest', { file: path.resolve(__dirname, '../../web/manifest.webmanifest'), type: 'application/manifest+json; charset=utf-8' }],
   ['/service-worker.js', { file: path.resolve(__dirname, '../../web/service-worker.js'), type: 'text/javascript; charset=utf-8' }],
   ['/styles.css', { file: path.resolve(__dirname, '../../web/styles.css'), type: 'text/css; charset=utf-8' }],
@@ -237,7 +241,10 @@ async function route(context) {
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/resume$/.test(path)) return idempotent(context, account, () => resumeConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) {
-    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator, embeddingProvider));
+    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator, embeddingProvider, imageStore));
+  }
+  if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/context-images$/.test(path)) {
+    return idempotent(context, account, () => createContextImage(store, account, path, body, imageModerator, imageStore));
   }
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/asr-jobs$/.test(path)) {
     return idempotent(context, account, () => createAsrJob(store, account, path, body, asrTranscriber, mediaStore, imageEntitlementService));
@@ -1228,9 +1235,12 @@ function deleteConversation(store, account, path) {
   return ok({ conversation: { conversation_id: conversation.conversation_id, status: conversation.status, deleted_at: deletedAt }, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob) });
 }
 
-async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null, embeddingProvider = null) {
+async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null, embeddingProvider = null, imageStore = null) {
   const conversationId = path.split('/')[4];
-  const text = requiredText(body?.content?.text, 'content.text');
+  const attachmentIds = requestedContextImageIds(body?.attachments);
+  const suppliedText = typeof body?.content?.text === 'string' ? body.content.text.trim() : '';
+  if (!suppliedText && attachmentIds.length === 0) throw apiError(400, 'VALIDATION_ERROR', 'content.text 或图片附件至少提供一项');
+  const text = suppliedText || '请看看我分享的这张图片。';
   // 注销/封禁是硬阻断，优先于资源解析与固定安全响应（与 access-policy 的 ACCOUNT_NOT_OPEN 同源）。
   if (account.account_status !== 'OPEN') throw apiError(403, 'ACCOUNT_NOT_OPEN', '账户当前不可进行伴侣互动');
   const conversation = ownConversation(store, account.account_id, conversationId);
@@ -1252,10 +1262,11 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     // 叠加供应商误判（普通问句被认成 Ad Review）会让用户完全无法对话。
     if (moderation.decision === 'BLOCK') return createModerationResponse(store, account, conversation, text, moderation);
   }
+  const contextImages = await resolveContextImages(store, account, conversation, attachmentIds, imageStore);
   // 技术设计 8.4/7.5：请求 stream:true 且配置了流式生成器时走 202 ACCEPTED——
   // 模型调用、额度预留与终稿持久化全部发生在一次性 SSE 令牌的消费请求中，
   // 未消费的令牌不产生任何模型调用或额度副作用。
-  if (body?.stream === true && streamingReplyGenerator && typeof streamingReplyGenerator.generateStream === 'function') {
+  if (attachmentIds.length === 0 && body?.stream === true && streamingReplyGenerator && typeof streamingReplyGenerator.generateStream === 'function') {
     return acceptStreamingMessage(store, account, conversation, text);
   }
   let reservation;
@@ -1267,6 +1278,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
   }
   try {
     const contextPack = await buildContextPack(store, account, conversation, text, embeddingProvider);
+    contextPack.context_images = contextImages;
     const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
       await replyGenerator(text, contextPack),
       text,
@@ -1295,7 +1307,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     }
     const createdAt = new Date().toISOString();
     const retentionExpiresAt = plusDays(account.raw_interaction_retention_days || 90);
-    const userMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'USER', text, provider: null, ai_generated: false, created_at: createdAt, retention_expires_at: retentionExpiresAt };
+    const userMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'USER', text: suppliedText, attachments: attachmentIds.map((asset_id) => ({ asset_id, purpose: 'CONTEXT_IMAGE' })), provider: null, ai_generated: false, created_at: createdAt, retention_expires_at: retentionExpiresAt };
     // The state used to generate this response belongs to the response itself,
     // not to whatever state the character may have when TTS is requested later.
     const assistantMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT', text: modelReply.reply_text, provider: modelReply.provider, model_version: modelReply.model_version, ai_generated: modelReply.ai_generated !== false, world_state_id: contextPack.world_state.world_state_id, world_state_version: contextPack.world_state.state_version, created_at: createdAt, retention_expires_at: retentionExpiresAt };
@@ -1307,6 +1319,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
       conflicts_with: detectAssetConflicts(store, account.account_id, conversation.character_id, modelReply.memory_candidate.display_text)
     } : null;
     store.messages.set(userMessage.message_id, userMessage);
+    for (const assetId of attachmentIds) store.mediaAssets.get(assetId).message_id = userMessage.message_id;
     store.messages.set(assistantMessage.message_id, assistantMessage);
     if (candidate) store.candidates.set(candidate.candidate_id, candidate);
     // The user-facing transaction only records a deterministic task. The
@@ -1709,7 +1722,7 @@ function publicCharacter(character, { includeHistory = false } = {}) {
 function publicPersonaVersion(entry) { return { version: entry.version, parent_version: entry.parent_version ?? null, state: entry.state || 'STABLE', changed_fields: entry.changed_fields ?? [], note: entry.note ?? '', evaluation: entry.evaluation ? { suite_version: entry.evaluation.suite_version, critical_pass_rate: entry.evaluation.critical_pass_rate, overall_pass_rate: entry.evaluation.overall_pass_rate, report_ref: entry.evaluation.report_ref, result: entry.evaluation.result, evaluated_at: entry.evaluation.evaluated_at } : null, canary: entry.canary ? { traffic_percent: entry.canary.traffic_percent, shadow_report_ref: entry.canary.shadow_report_ref, started_at: entry.canary.started_at } : null, rollback: entry.rollback ? { to_version: entry.rollback.to_version, reason: entry.rollback.reason, rolled_back_at: entry.rollback.rolled_back_at } : null, created_at: entry.created_at, updated_at: entry.updated_at ?? entry.created_at }; }
 
 function publicMessage(message) {
-  return { message_id: message.message_id, conversation_id: message.conversation_id, actor: message.actor, text: message.text, provider: message.provider ?? null, model_version: message.model_version ?? null, ai_generated: message.ai_generated, world_state_id: message.world_state_id ?? null, world_state_version: message.world_state_version ?? null, created_at: message.created_at };
+  return { message_id: message.message_id, conversation_id: message.conversation_id, actor: message.actor, text: message.text, attachments: message.attachments ?? [], provider: message.provider ?? null, model_version: message.model_version ?? null, ai_generated: message.ai_generated, world_state_id: message.world_state_id ?? null, world_state_version: message.world_state_version ?? null, created_at: message.created_at };
 }
 
 const FEEDBACK_TYPES = new Set(['OOC', 'MEMORY_ERROR', 'IMAGE_FACE_MISMATCH', 'IMAGE_WARDROBE_ERROR', 'IMAGE_SCENE_CONFLICT', 'UNSAFE_OR_UNCOMFORTABLE']);
@@ -2083,6 +2096,71 @@ async function createReferenceImage(store, account, path, body, imageModerator, 
   }
 }
 
+async function createContextImage(store, account, path, body, imageModerator, imageStore) {
+  authorize(account, 'SEND_MESSAGE', store);
+  requireImagePipeline(imageModerator, imageStore);
+  const conversation = ownConversation(store, account.account_id, path.split('/')[4]);
+  requireOpenConversation(conversation);
+  if (body?.user_confirms_upload_rights !== true) throw apiError(400, 'VALIDATION_ERROR', '必须确认拥有或已获图片使用授权');
+  const mimeType = requiredImageMimeType(body?.mime_type);
+  const inspected = inspectContextImage(decodeImage(body?.image_base64, 8 * 1024 * 1024), mimeType);
+  const asset = {
+    asset_id: store.next('med'), account_id: account.account_id, character_id: conversation.character_id,
+    conversation_id: conversation.conversation_id, message_id: null, job_id: null,
+    type: 'USER_CONTEXT_IMAGE', state: 'PENDING_MODERATION', confirmation_state: 'USER_CONFIRMED',
+    media_type: 'IMAGE', mime_type: inspected.mimeType, width: inspected.width, height: inspected.height,
+    metadata_stripped: inspected.metadataStripped, byte_length: null, checksum: null, object_key: null,
+    provider: 'user-upload-private-cos', provider_request_id: null, rights_review_id: null,
+    ai_generated: false, aigc_mark_version: 'not-applicable-user-input', created_at: new Date().toISOString(), deleted_at: null
+  };
+  store.mediaAssets.set(asset.asset_id, asset);
+  try {
+    const persisted = await imageStore.putImage({ assetId: asset.asset_id, bytes: inspected.bytes, mimeType: inspected.mimeType });
+    Object.assign(asset, { object_key: persisted.objectKey, checksum: persisted.checksum, byte_length: persisted.byteLength });
+    const moderation = await moderateImageWithMetric(store, account, imageModerator, { fileUrl: await imageStore.createModerationUrl(asset.object_key), dataId: `context-${asset.asset_id}` });
+    asset.provider_request_id = moderation.providerRequestId;
+    asset.moderation_policy_version = moderation.policyVersion;
+    if (moderation.decision === 'PASS') asset.state = 'AVAILABLE';
+    else {
+      asset.state = moderation.decision === 'BLOCK' ? 'BLOCKED' : 'REVIEW_REQUIRED';
+      await imageStore.deleteAsset(asset.object_key);
+      asset.object_key = null;
+    }
+    return created({ media_asset: publicMediaAsset(asset), moderation: publicModeration(moderation) });
+  } catch (error) {
+    asset.state = 'FAILED'; asset.failure_code = error.code || 'CONTEXT_IMAGE_PROCESSING_FAILED';
+    if (asset.object_key) await safeDeleteImage(imageStore, asset.object_key);
+    throw error;
+  }
+}
+
+function requestedContextImageIds(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 4) throw apiError(400, 'VALIDATION_ERROR', 'attachments 必须是不超过 4 项的数组');
+  const ids = value.map((entry) => {
+    if (!entry || entry.purpose !== 'CONTEXT_IMAGE' || typeof entry.asset_id !== 'string' || !entry.asset_id) throw apiError(400, 'VALIDATION_ERROR', '图片附件合同无效');
+    return entry.asset_id;
+  });
+  if (new Set(ids).size !== ids.length) throw apiError(400, 'VALIDATION_ERROR', '图片附件不能重复');
+  return ids;
+}
+
+async function resolveContextImages(store, account, conversation, assetIds, imageStore) {
+  if (assetIds.length === 0) return [];
+  if (!imageStore || typeof imageStore.readImage !== 'function') throw apiError(503, 'CONTEXT_IMAGE_STORAGE_UNAVAILABLE', '图片私有存储不可用');
+  const images = [];
+  for (const assetId of assetIds) {
+    const asset = store.mediaAssets.get(assetId);
+    // Deliberately return the same denial for cross-account/cross-conversation IDs.
+    if (!asset || asset.account_id !== account.account_id || asset.conversation_id !== conversation.conversation_id || asset.type !== 'USER_CONTEXT_IMAGE') throw apiError(403, 'CONTEXT_IMAGE_REFERENCE_FORBIDDEN', '图片附件不属于当前账户和会话');
+    if (asset.state !== 'AVAILABLE' || !asset.object_key) throw apiError(409, 'CONTEXT_IMAGE_NOT_AVAILABLE', '图片尚未审核通过或已删除');
+    if (asset.message_id) throw apiError(409, 'CONTEXT_IMAGE_ALREADY_ATTACHED', '图片已用于一条消息');
+    const bytes = await imageStore.readImage(asset.object_key);
+    images.push({ asset_id: asset.asset_id, mime_type: asset.mime_type, data_url: `data:${asset.mime_type};base64,${bytes.toString('base64')}` });
+  }
+  return images;
+}
+
 function listReferenceImages(store, account, path) {
   const character = ownCharacter(store, account.account_id, path.split('/')[4]);
   const mediaAssets = [...store.mediaAssets.values()]
@@ -2177,6 +2255,10 @@ async function getMediaAssetContent(store, account, path, mediaStore, imageStore
     if (asset.type === 'TTS_AUDIO' && asset.mime_type === 'audio/mpeg') {
       const raw = await mediaStore.readTtsAudio(asset.object_key);
       return { status: 200, binary: tagWithAigcMetadata(raw), contentType: 'audio/mpeg', filename: `${asset.asset_id}.mp3`, aigcLabel: AIGC_MARK_VERSION_AUDIO };
+    }
+    if (asset.type === 'USER_CONTEXT_IMAGE' && ['image/jpeg', 'image/png', 'image/webp'].includes(asset.mime_type) && imageStore && typeof imageStore.readImage === 'function') {
+      const raw = await imageStore.readImage(asset.object_key);
+      return { status: 200, binary: raw, contentType: asset.mime_type, filename: `${asset.asset_id}.${asset.mime_type.split('/')[1]}` };
     }
     if (asset.type === 'SCENE_IMAGE' && ['image/jpeg', 'image/png', 'image/webp'].includes(asset.mime_type) && imageStore && typeof imageStore.readImage === 'function') {
       const raw = await imageStore.readImage(asset.object_key);
@@ -3045,7 +3127,7 @@ function dailyUsageApiError(error) {
   return apiError(502, error.code, '普通对话用量结算失败，请稍后重试');
 }
 function publicModeration(moderation) { return { decision: moderation.decision, provider_request_id: moderation.providerRequestId, policy_version: moderation.policyVersion }; }
-function publicMediaAsset(asset) { return { asset_id: asset.asset_id, type: asset.type, state: asset.state, confirmation_state: asset.confirmation_state || null, rights_review_id: asset.rights_review_id || null, media_type: asset.media_type, mime_type: asset.mime_type, byte_length: asset.byte_length, checksum: asset.checksum, ai_generated: asset.ai_generated, aigc_mark_version: asset.aigc_mark_version, created_at: asset.created_at }; }
+function publicMediaAsset(asset) { return { asset_id: asset.asset_id, type: asset.type, state: asset.state, confirmation_state: asset.confirmation_state || null, rights_review_id: asset.rights_review_id || null, conversation_id: asset.conversation_id || null, message_id: asset.message_id || null, media_type: asset.media_type, mime_type: asset.mime_type, byte_length: asset.byte_length, checksum: asset.checksum, width: asset.width || null, height: asset.height || null, metadata_stripped: asset.metadata_stripped ?? null, moderation: asset.moderation_policy_version ? { policy_version: asset.moderation_policy_version, provider_request_id: asset.provider_request_id } : null, ai_generated: asset.ai_generated, aigc_mark_version: asset.aigc_mark_version, created_at: asset.created_at }; }
 function publicReferenceImage(store, asset) {
   const review = asset.rights_review_id ? store.contentRightsReviews.get(asset.rights_review_id) : null;
   return { ...publicMediaAsset(asset), content_rights_review: review ? publicContentRightsReview(review) : null };
@@ -3061,10 +3143,9 @@ function decodeAsrAudio(value) {
   if (bytes.length === 0 || bytes.length > MAX_ASR_AUDIO_BYTES || bytes.toString('base64') !== value) throw apiError(400, 'VALIDATION_ERROR', 'audio_base64 无效或超过开发限制');
   return bytes;
 }
-function decodeImage(value) {
-  const maxImageBytes = 2 * 1024 * 1024;
+function decodeImage(value, maxImageBytes = 2 * 1024 * 1024) {
   if (typeof value !== 'string' || value.length === 0 || value.length > Math.ceil(maxImageBytes * 4 / 3) + 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
-    throw apiError(400, 'VALIDATION_ERROR', 'image_base64 无效或超过开发限制');
+    throw apiError(400, 'VALIDATION_ERROR', 'image_base64 无效或超过大小限制');
   }
   const bytes = Buffer.from(value, 'base64');
   if (bytes.length === 0 || bytes.length > maxImageBytes || bytes.toString('base64') !== value) throw apiError(400, 'VALIDATION_ERROR', 'image_base64 无效或超过开发限制');

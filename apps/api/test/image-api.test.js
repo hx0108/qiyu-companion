@@ -134,6 +134,44 @@ test('启用权益服务时，图片只在成功交付后扣额，提交失败�
   assert.ok(calls.includes(`release:${failed.body.image_job.job_id}`));
 });
 
+test('聊天图片仅在审核通过且属于同一账户会话时进入模型上下文，删除后立即失效', async (t) => {
+  const objects = new Map(); let observedContext;
+  const imageStore = {
+    async putImage({ assetId, bytes }) { const objectKey = `qiyu/images/${assetId}.png`; objects.set(objectKey, Buffer.from(bytes)); return { objectKey, checksum: 'sha', byteLength: bytes.length, mimeType: 'image/png' }; },
+    async createModerationUrl(key) { return `https://private.test/${key}?signed=1`; },
+    async readImage(key) { return objects.get(key); },
+    async deleteAsset(key) { objects.delete(key); }
+  };
+  const replyGenerator = async (text, context) => { observedContext = context; return { provider: 'mock-vision', model_version: 'v1', reply_text: '我看到了图片。', ai_generated: true, memory_candidate: null }; };
+  const base = await start(t, { imageStore, imageModerator: async () => ({ decision: 'PASS', providerRequestId: 'ims-1', policyVersion: 'v1' }), replyGenerator });
+  const character = await readyCharacter(base, 'context-image');
+  const conversation = await request(base, '/api/v1/conversations', { method: 'POST', key: 'context-conversation', body: { character_id: character.character_id } });
+  const uploaded = await request(base, `/api/v1/conversations/${conversation.body.conversation.conversation_id}/context-images`, { method: 'POST', key: 'context-upload', body: { mime_type: 'image/png', image_base64: validTinyPng().toString('base64'), user_confirms_upload_rights: true } });
+  assert.equal(uploaded.status, 201); assert.equal(uploaded.body.media_asset.type, 'USER_CONTEXT_IMAGE'); assert.equal(uploaded.body.media_asset.state, 'AVAILABLE');
+  const sent = await request(base, `/api/v1/conversations/${conversation.body.conversation.conversation_id}/messages`, { method: 'POST', key: 'context-send', body: { content: { text: '这是什么？' }, attachments: [{ asset_id: uploaded.body.media_asset.asset_id, purpose: 'CONTEXT_IMAGE' }] } });
+  assert.equal(sent.status, 201); assert.equal(sent.body.user_message.attachments[0].asset_id, uploaded.body.media_asset.asset_id);
+  assert.equal(observedContext.context_images.length, 1); assert.match(observedContext.context_images[0].data_url, /^data:image\/png;base64,/);
+  assert.equal(sent.body.memory_candidate, null);
+  const otherConversation = await request(base, '/api/v1/conversations', { method: 'POST', key: 'other-context-conversation', body: { character_id: character.character_id } });
+  const crossConversation = await request(base, `/api/v1/conversations/${otherConversation.body.conversation.conversation_id}/messages`, { method: 'POST', key: 'context-cross-conversation', body: { content: { text: '越权引用' }, attachments: [{ asset_id: uploaded.body.media_asset.asset_id, purpose: 'CONTEXT_IMAGE' }] } });
+  assert.equal(crossConversation.status, 403); assert.equal(crossConversation.body.error.code, 'CONTEXT_IMAGE_REFERENCE_FORBIDDEN');
+  const bobCharacter = await readyCharacter(base, 'context-bob', 'dev-bob-token');
+  const bobConversation = await request(base, '/api/v1/conversations', { method: 'POST', token: 'dev-bob-token', key: 'context-bob-conversation', body: { character_id: bobCharacter.character_id } });
+  const crossAccount = await request(base, `/api/v1/conversations/${bobConversation.body.conversation.conversation_id}/messages`, { method: 'POST', token: 'dev-bob-token', key: 'context-cross-account', body: { content: { text: '越权引用' }, attachments: [{ asset_id: uploaded.body.media_asset.asset_id, purpose: 'CONTEXT_IMAGE' }] } });
+  assert.equal(crossAccount.status, 403); assert.equal(crossAccount.body.error.code, 'CONTEXT_IMAGE_REFERENCE_FORBIDDEN');
+  const deleted = await request(base, `/api/v1/media-assets/${uploaded.body.media_asset.asset_id}`, { method: 'DELETE', key: 'context-delete' });
+  assert.equal(deleted.status, 200);
+  const unavailable = await fetch(`${base}/api/v1/media-assets/${uploaded.body.media_asset.asset_id}/content`, { headers: { authorization: 'Bearer dev-alice-token' } });
+  assert.equal(unavailable.status, 404);
+});
+
+function validTinyPng() {
+  const signature = Buffer.from([137,80,78,71,13,10,26,10]);
+  const chunk = (type, data) => { const out = Buffer.alloc(12 + data.length); out.writeUInt32BE(data.length, 0); out.write(type, 4, 4, 'ascii'); data.copy(out, 8); return out; };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(2, 0); ihdr.writeUInt32BE(2, 4); ihdr[8] = 8; ihdr[9] = 2;
+  return Buffer.concat([signature, chunk('IHDR', ihdr), chunk('IEND', Buffer.alloc(0))]);
+}
+
 async function start(t, options) {
   const server = createApp(options);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -147,11 +185,11 @@ async function request(base, path, { method = 'GET', token = 'dev-alice-token', 
   const response = await fetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: response.status, body: await response.json() };
 }
-async function readyCharacter(base, prefix = 'image') {
-  const notices = await request(base, '/api/v1/required-notices');
-  await request(base, `/api/v1/required-notices/${notices.body.notices[0].notice_id}/displayed`, { method: 'POST', key: `${prefix}-notice`, body: { notice_version: notices.body.notices[0].notice_version } });
-  await request(base, '/api/v1/age/declarations', { method: 'POST', key: `${prefix}-age`, body: { date_of_birth: '1990-01-01', confirmed_18_plus: true } });
-  const response = await request(base, '/api/v1/characters', { method: 'POST', key: `${prefix}-character`, body: { name: '阿栖' } });
+async function readyCharacter(base, prefix = 'image', token = 'dev-alice-token') {
+  const notices = await request(base, '/api/v1/required-notices', { token });
+  await request(base, `/api/v1/required-notices/${notices.body.notices[0].notice_id}/displayed`, { method: 'POST', token, key: `${prefix}-notice`, body: { notice_version: notices.body.notices[0].notice_version } });
+  await request(base, '/api/v1/age/declarations', { method: 'POST', token, key: `${prefix}-age`, body: { date_of_birth: '1990-01-01', confirmed_18_plus: true } });
+  const response = await request(base, '/api/v1/characters', { method: 'POST', token, key: `${prefix}-character`, body: { name: '阿栖' } });
   assert.equal(response.status, 201);
   return response.body.character;
 }

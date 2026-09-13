@@ -8,7 +8,8 @@ WORKDIR /app
 
 # 先装依赖以利用层缓存（cos SDK + pg）。
 COPY apps/api/package.json apps/api/package-lock.json* ./apps/api/
-RUN cd apps/api && npm ci --omit=dev || npm install --omit=dev
+ARG NPM_REGISTRY=https://registry.npmjs.org/
+RUN cd apps/api && npm config set registry "$NPM_REGISTRY" && (npm ci --omit=dev || npm install --omit=dev)
 
 # 应用代码与静态资产。
 COPY apps/api ./apps/api

@@ -1,0 +1,9 @@
+{
+  "acceptance": "passed",
+  "provider": "qwen",
+  "model_version": "qwen3.8-flash",
+  "input": "controlled_metadata_free_png",
+  "image_bytes": 856,
+  "response_characters": 43,
+  "usage_present": true
+}

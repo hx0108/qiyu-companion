@@ -1,36 +1,37 @@
-# Design QA — 对话消息语音入口
+# Design QA — AI 回复框与微型语音播放按钮
 
-- Source visual truth: `C:\Users\ASUS\AppData\Local\Temp\codex-clipboard-f0a8d995-d2d4-48c8-a7e4-3a1d269a19d1.jpg`
-- Source pixels: 1084 × 1505
-- Verified preview: `http://127.0.0.1:3000/?ui=voice-v4`, Codex in-app Browser tab 4 capture on 2026-09-10
-- Actual trial entry: `http://127.0.0.1:3101/`
-- State: day-theme chat with one user message and one assistant Mock reply; generated-audio state is covered by API regression and client logic, while the temporary preview has no TTS provider
-- Comparison scope: assistant-message voice affordance only. Background art, message-card palette, typography and composer remain in 栖语's existing design system.
+- Source visual truth: `C:\Users\ASUS\.codex\generated_images\01a093ec-b35b-7062-875d-4f73db4469ff\exec-31d1fc5e-249d-49ca-8681-11ea1f37a0f7.png`
+- Implementation: `http://127.0.0.1:3000/`
+- Implementation screenshot: Codex in-app Browser current-turn capture（未持久化到磁盘）。
+- Viewport: 栖语现有 393 × 852 CSS px 移动端界面；浏览器画布完整显示设备内容。
+- State: 日间主题、单行 AI Mock 回复、语音尚未生成。
 
-## Visual comparison evidence
+## Findings
 
-The source establishes a compact, dark play affordance associated with an assistant reply. Following the user's corrective screenshot, the implementation moves the visible pill to the assistant bubble's lower-right edge and reduces it to 34 × 26 CSS px. A transparent 44 × 44 CSS px hit target preserves touch accessibility without increasing the visible weight.
+- 无剩余 P0/P1/P2 问题。
+- 字体与排版：保留项目原有中文衬线正文、暖白正文和灰紫动作描写层级；本次没有修改字体或行高。
+- 间距与布局：播放控件改为绝对定位，不参与文档流；40 × 24 px 可见胶囊嵌在右下角，44 × 44 px 透明点击热区保留可用性。
+- 色彩与材质：回复框继续使用 `#1d1e20` 哑光近黑；按钮仅使用低对比炭灰层次，与回复框连续。
+- 图标与资产：继续复用项目现有 `player-play-filled.svg`，显示尺寸缩至 10 × 10 px；未使用文字、时长或波形。
+- 文案与内容：回复文案、动作描写规则和语音无障碍名称保持不变。
 
-The source uses a white filled play symbol on charcoal. The implementation uses standalone Material Icons play and pause assets in white on the existing `--qy-plum` token, with a night-mode plum variant. No visible “生成角色语音” label remains; the accessible name changes between generate-and-play, play and pause states.
+## Focused comparison evidence
 
-## Interaction verification
+- 选定稿采用右侧边缘半嵌结构，按钮与最后一行并列，不新增底部一行。
+- 最终浏览器画面中，回复气泡保持单行高度；文字完整显示，播放按钮位于同一行最右侧。
+- 58 × 42 px 的局部暗色承托贴合 40 × 24 px 胶囊，没有形成大面积独立底栏。
+- 点击播放入口会进入现有语音额度流程；返回对话后组件位置与尺寸保持稳定。
 
-- First click creates the TTS job, downloads the private media Blob, re-renders the message, and requests playback.
-- After media exists, the same control toggles play/pause and swaps the icon.
-- If browser autoplay policy rejects playback after the asynchronous provider request, the generated audio remains available and the interface explicitly asks the user to click the same button once more.
-- Starting one assistant message pauses any other playing assistant audio.
-- The temporary 3000 preview correctly reaches the controlled no-TTS failure path; the actual 3101 Docker entry serves the updated autoplay and toggle code.
-- API regression: 27/27 tests passed, including TTS persistence, private media delivery, failure gating and static asset allowlisting.
-- Real provider probe passed: Tencent TTS returned a non-empty 13,824-byte audio payload, and Tencent ASR transcribed it successfully.
-- The separate full closed-trial probe was blocked before TTS by `QWEN_NETWORK_ERROR`; this is an upstream Qwen reachability issue rather than an audio generation or playback-code failure.
+## Comparison history
 
-## Findings and iteration history
+- P1 — 旧版 96 × 60 px 控件作为块级子元素占据回复框底部一整行。已改为右下角绝对定位，脱离文本排版。
+- P1 — 首轮绝对定位让按钮覆盖了回复文字。已把 AI 消息最大宽度调整为 100%，并为含播放控件的回复框增加 60 px 右侧安全区；复核后文字与按钮不再重叠。
+- P2 — 旧版可见胶囊 64 × 36 px、承托区 108 × 72 px，视觉过重。已缩为 40 × 24 px 可见胶囊和 58 × 42 px 局部承托，同时保留 44 × 44 px 点击热区。
 
-- Initial pass: 48 × 38 visible pill at the upper-left; rejected by user as too large and incorrectly positioned.
-- Corrective pass: 34 × 26 visible pill at lower-right with 44 × 44 hit target; verified in the in-app Browser.
-- Stale browser shell cache initially retained the first pass. Versioned asset URLs plus a network-first `qiyu-shell-v3` service worker now make UI updates visible after reload while preserving offline fallback.
-- Playback incident follow-up: the UI had received a live SSE assistant ID and text, but PostgreSQL had already committed and released the request-scoped connection before the stream producer wrote its terminal message. The SSE producer now opens a fresh account transaction and flushes the final assistant message before completion, so TTS can resolve the same message ID.
-- Existing orphaned client-only replies are removed by reloading server history; if TTS encounters one, the client now synchronizes history instead of leaving an unusable play button.
-- No actionable P0, P1 or P2 difference remains within the requested component scope.
+## Verification
+
+- `node --test test\\voice-reply-ui.test.js`: 4/4 passed.
+- 本地浏览器：AI 回复文字完整、播放按钮无可见标签/时长、按钮不独占底部行。
+- 交互：播放入口可触发现有语音额度流程，返回对话后布局稳定。
 
 final result: passed

@@ -325,8 +325,9 @@ test('PostgresStore persists scoped TTS job and private-media metadata without e
   assert.deepEqual(jobInsert.values.slice(23, 28), ['tencent-standard-101001', 'provider-catalog-2026-09', 'tencent-service-entitlement-2026', 'rights-review-voice-001', 'APPROVED']);
   assert.deepEqual(jobInsert.values.slice(28, 33), ['一句清洗后的台词。', 'happy', 110, 'world_state_mood', 0.2]);
   const assetParameters = [...new Set([...assetInsert.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1])))].sort((a, b) => a - b);
-  assert.deepEqual(assetParameters, Array.from({ length: 20 }, (_, index) => index + 1));
-  assert.equal(assetInsert.values.length, 20);
+  assert.deepEqual(assetParameters, Array.from({ length: 25 }, (_, index) => index + 1));
+  assert.equal(assetInsert.values.length, 25);
+  assert.deepEqual(assetInsert.values.slice(20), [null, null, null, null, null]);
   assert.equal(assetInsert.values.includes('https://'), false);
   assert.equal(assetInsert.values.includes('tts/00000000-0000-7000-8000-0000000000f5.mp3'), true);
 });

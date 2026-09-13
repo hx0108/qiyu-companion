@@ -475,8 +475,8 @@ paths:
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
     post:
-      summary: 创建文字回复与候选记忆
-      description: 默认返回 provider=mock；本地开发显式启用 Qwen 时返回 provider=qwen 和服务端记录的 model_version。模型调用会收到上下文包（当前角色、最近20条对话、Top-20 已确认关系资产）。固定安全策略或 INPUT 文本审核可在模型调用前返回 provider=safety-policy/content-moderation-policy、memory_candidate=null 并进入受控安全模式；模型终稿还必须通过 OUTPUT 文本审核后才可持久化、创建候选记忆和进入 SSE 回放。OUTPUT 未通过时仅返回固定审核说明，不暴露或保存原始模型回复，并释放该轮普通对话额度。以上均不代表生产安全审核。
+      summary: 创建文字或已审核图片消息与回复
+      description: attachments 仅接受当前账户、当前会话中 state=AVAILABLE 的 USER_CONTEXT_IMAGE；图片未审核、已删除、跨账户或跨会话时不会调用视觉模型。图片及 OCR 内容是不可信用户数据，不能覆盖人格、安全、权限和记忆规则；含图片的回复不自动创建候选记忆。
       parameters:
         - $ref: '#/components/parameters/ConversationId'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -490,14 +490,47 @@ paths:
               properties:
                 content:
                   type: object
-                  required: [text]
-                  properties: { text: { type: string, minLength: 1, maxLength: 4000 } }
+                  properties: { text: { type: string, maxLength: 4000 } }
+                attachments:
+                  type: array
+                  maxItems: 4
+                  items:
+                    type: object
+                    required: [asset_id, purpose]
+                    properties:
+                      asset_id: { type: string }
+                      purpose: { type: string, enum: [CONTEXT_IMAGE] }
+                    additionalProperties: false
       responses:
         '201': { $ref: '#/components/responses/JsonResponse' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
         '428': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/context-images:
+    post:
+      summary: 私密上传并审核聊天上下文图片
+      description: 只接受不超过2MB的静态 JPEG/PNG/WebP；校验真实文件签名、尺寸、动画与元数据。含 EXIF/XMP（包括 GPS）的图片拒绝入库。只有审核 PASS 才进入 AVAILABLE。
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mime_type, image_base64, user_confirms_upload_rights]
+              properties:
+                mime_type: { type: string, enum: [image/jpeg, image/png, image/webp] }
+                image_base64: { type: string }
+                user_confirms_upload_rights: { type: boolean, enum: [true] }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
   /api/v1/conversations/{conversationId}:
     delete:
       summary: 删除当前账户的一段会话及其派生关系数据
