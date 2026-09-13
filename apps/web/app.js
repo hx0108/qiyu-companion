@@ -1945,7 +1945,7 @@ function renderCall() {
   const call = state.call;
   if (!call) { state.route = "chat"; return renderChat(); }
   const characterName = state.character?.name ?? "当前角色";
-  return `<section class="screen qiyu-prototype call-screen ${state.theme === "night" ? "night" : "paper"}" aria-label="语音通话"><header class="call-top"><span class="wordmark">语音通话</span><span id="call-timer" class="call-timer">00:00</span></header><div class="call-stage"><div class="call-avatar"><img src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><span id="call-pulse" class="call-pulse" aria-hidden="true"></span></div><h2>${escapeHtml(characterName)}</h2><p class="call-status" id="call-status">${escapeHtml(CALL_PHASE_STATUS[call.phase ?? "ringing"] ?? call.status ?? "正在接通…")}</p><p class="call-subtitle" id="call-subtitle"></p></div><div class="call-controls"><button type="button" class="call-key speak" data-action="call-speak"><span class="call-key-icon">${prototypeIcon("mic", 26)}</span><span class="call-key-label" id="call-speak-label">点击说话</span></button><button type="button" class="call-key hangup" data-action="call-hangup"><span class="call-key-icon">${prototypeIcon("phone", 26)}</span><span class="call-key-label">挂断</span></button></div><p class="call-quota" id="call-quota">${escapeHtml(call.quotaText ?? "")}</p></section>`;
+  return `<section class="screen qiyu-prototype call-screen ${state.theme === "night" ? "night" : "paper"}" aria-label="语音通话"><header class="call-top"><span class="wordmark">语音通话</span><span id="call-timer" class="call-timer">00:00</span></header><div class="call-stage"><div class="call-avatar"><img src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><span id="call-pulse" class="call-pulse" aria-hidden="true"></span></div><h2>${escapeHtml(characterName)}</h2><p class="call-status" id="call-status">${escapeHtml(CALL_PHASE_STATUS[call.phase ?? "ringing"] ?? call.status ?? "正在接通…")}</p><p class="call-subtitle" id="call-subtitle">${escapeHtml(call.subtitle ?? "")}</p></div><div class="call-controls"><button type="button" class="call-key speak" data-action="call-speak"><span class="call-key-icon">${prototypeIcon("mic", 26)}</span><span class="call-key-label" id="call-speak-label">点击说话</span></button><button type="button" class="call-key hangup" data-action="call-hangup"><span class="call-key-icon">${prototypeIcon("phone", 26)}</span><span class="call-key-label">挂断</span></button></div><p class="call-quota" id="call-quota">${escapeHtml(call.quotaText ?? "")}</p></section>`;
 }
 
 function updateCallHud() {
@@ -1970,18 +1970,25 @@ function startCallTimer() {
   }, 1_000);
 }
 
+// 字幕写入 state.call 再同步 DOM：通话期间任何 toast/重渲染都会重建骨架，
+// 只改 DOM 的内容会被清掉（必须随 renderCall 一起还原）。
+function setCallSubtitle(text) {
+  if (state.call) state.call.subtitle = text;
+  const el = document.getElementById("call-subtitle");
+  if (el) el.textContent = text;
+}
+
 function handleCallEvent(event) {
-  const subtitle = document.getElementById("call-subtitle");
   if (event.type === "started") {
     state.call = { ...state.call, callId: event.call.call_id, startedAt: Date.parse(event.call.started_at), phase: "greeting" };
-    if (subtitle && event.greetingText) subtitle.textContent = `${state.character?.name ?? "TA"}：${event.greetingText}`;
+    if (event.greetingText) setCallSubtitle(`${state.character?.name ?? "TA"}：${event.greetingText}`);
     startCallTimer();
   } else if (event.type === "transcript") {
-    if (subtitle) subtitle.textContent = `你：${event.text}`;
+    setCallSubtitle(`你：${event.text}`);
   } else if (event.type === "subtitle") {
-    if (subtitle) subtitle.textContent = `${state.character?.name ?? "TA"}：${event.text}`;
+    setCallSubtitle(`${state.character?.name ?? "TA"}：${event.text}`);
   } else if (event.type === "turn-failed") {
-    if (subtitle) subtitle.textContent = TURN_FAILURE_LABELS[event.code] ?? event.message ?? "本回合没有完成，请再试一次";
+    setCallSubtitle(TURN_FAILURE_LABELS[event.code] ?? event.message ?? "本回合没有完成，请再试一次");
   }
   if (["phase", "turn", "turn-done", "turn-finalized", "interrupted", "barge-in", "reconciled"].includes(event.type)) updateCallHud();
 }

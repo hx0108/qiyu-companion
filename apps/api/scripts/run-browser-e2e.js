@@ -36,7 +36,7 @@ async function main() {
   const replyGenerator = realQwen ? createQwenReplyGenerator(process.env) : null;
   if (realQwen && !replyGenerator) throw new Error('QIYU_E2E_REAL_QWEN=1 requires QIYU_LLM_PROVIDER=qwen and QWEN_API_KEY.');
   const providerRuntime = realTencentMedia ? createTencentMediaRuntime(process.env, store) : createMockContextImageRuntime();
-  const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions });
+  const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
@@ -169,6 +169,71 @@ async function main() {
         await page.waitForFunction(() => document.body.innerText.includes('图片附件 · 已删除'), null, { timeout: 15_000 });
         assert(store.mediaAssets.get(asset.asset_id)?.state === 'DELETED', '删除后资产应立即不可用于模型上下文');
         assert(!providerRuntime.objects.has(asset.object_key), '私有 Mock 对象应已删除');
+      });
+    }
+
+    if (!realTencentMedia) {
+      await step('语音通话：发起→问候字幕→点击说话边录边传→转写与回复→挂断→通话记录卡片', async () => {
+        // 通话受理前有语音额度预检：先开通 7 天完整体验（ASR 10 分钟 / TTS 30 分钟）。
+        const trialResponse = await fetch(`${base}/api/v1/subscription-trials`, {
+          method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': 'e2e-call-trial' }, body: '{}'
+        });
+        assert(trialResponse.ok, `通话前试用开通失败：HTTP ${trialResponse.status}`);
+        // 播放中打断依赖真实 TTS 音频（引擎级打断/打断账本由 call-turn-engine 单测覆盖）。
+        const asrAssetsBefore = [...store.mediaAssets.values()].filter((item) => item.type === 'ASR_INPUT_AUDIO').length;
+        const beforeUsage = [...store.dailyChatUsage.values()].reduce((sum, item) => sum + item.chat_rounds, 0);
+        const beforeCalls = store.callSessions.size;
+        // 字幕是逐事件瞬时替换的，DOM 轮询会错过中间态：在页面内克隆 SSE 响应体，
+        // 挂断后对线上事件断言（Playwright 的 response.text() 对长流可能拿不到全量）。
+        await page.evaluate(() => {
+          window.__sseTexts = [];
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = async (...args) => {
+            const response = await originalFetch(...args);
+            const url = typeof args[0] === 'string' ? args[0] : args[0]?.url ?? '';
+            if (url.includes('/call-turn-streams/')) {
+              response.clone().text().then((text) => window.__sseTexts.push(text)).catch(() => {});
+            }
+            return response;
+          };
+        });
+        await page.locator('[data-action="start-call"]').click();
+        await page.waitForSelector('.call-screen', { timeout: 15_000 });
+        await page.waitForFunction(() => document.getElementById('call-subtitle')?.textContent?.includes('：'), null, { timeout: 15_000 });
+        // 假麦克风是持续音源（不会静音断句）：点按开始 → 攒满 2 秒分块 → 再次点按结束。
+        await page.locator('[data-action="call-speak"]').click();
+        await page.waitForFunction(() => document.getElementById('call-speak-label')?.textContent === '结束这句', null, { timeout: 15_000 });
+        await page.waitForTimeout(2_300);
+        await page.locator('[data-action="call-speak"]').click();
+        // 回合回到「点击说话」= 终局事件已到；事件明细随后按 SSE 响应体断言。
+        await page.waitForFunction(() => document.getElementById('call-speak-label')?.textContent === '点击说话', null, { timeout: 20_000 });
+        await page.locator('[data-action="call-hangup"]').click();
+        await page.waitForSelector('.call-record-card', { timeout: 15_000 });
+        const card = await page.locator('.call-record-card').last().innerText();
+        assert(card.includes('通话结束'), `通话记录卡片应含结束摘要：${card}`);
+        // 线上事件：问候与回合都走同一管线（accepted/transcript/text/completed）。
+        const sseText = await page.evaluate(() => window.__sseTexts.join('\n'));
+        assert(sseText.includes('call.turn.accepted'), 'SSE 应有 accepted 事件');
+        assert(sseText.includes('"kind":"greeting"'), '问候流应标记 kind=greeting');
+        assert(sseText.includes('call.turn.transcript') && sseText.includes('这是一段浏览器录音。'), 'SSE 应有转写字幕事件');
+        assert(sseText.includes('call.turn.text'), 'SSE 应有回复字幕事件');
+        assert(sseText.includes('call.turn.completed'), 'SSE 应有 completed 终局事件');
+        // 服务端事实：ENDED 终态、回合 COMPLETED、无新增 ASR_INPUT_AUDIO 资产、额度按实际结算。
+        assert(store.callSessions.size === beforeCalls + 1, '应恰好新增一场通话');
+        const call = [...store.callSessions.values()].at(-1);
+        assert(call.state === 'ENDED' && call.end_reason === 'USER_HANGUP', `通话应 ENDED/USER_HANGUP：${call.state}/${call.end_reason}`);
+        const turns = [...store.callTurns.values()].filter((turn) => turn.call_id === call.call_id);
+        assert(turns.length === 1 && turns[0].state === 'COMPLETED', `回合应 COMPLETED：${turns.map((turn) => turn.state).join(',')}`);
+        assert(turns[0].audio_bytes > 0 && turns[0].chunk_count >= 1, '边录边传的音频应有字节与分块落账');
+        const asrAssetsAfter = [...store.mediaAssets.values()].filter((item) => item.type === 'ASR_INPUT_AUDIO').length;
+        assert(asrAssetsAfter === asrAssetsBefore, `通话用户音频不得建 ASR_INPUT_AUDIO 资产（仅内存口径）：${asrAssetsBefore}→${asrAssetsAfter}`);
+        assert(call.asr_seconds_used >= 1, `ASR 秒数应按实际结算：${call.asr_seconds_used}`);
+        const afterUsage = [...store.dailyChatUsage.values()].reduce((sum, item) => sum + item.chat_rounds, 0);
+        assert(afterUsage === beforeUsage + 1, `日对话额度应 +1：${beforeUsage}→${afterUsage}`);
+        // 挂断后聊天流应以 USER 转写消息 + 通话消息延续（call_session_id 标记）。
+        const callMessages = [...store.messages.values()].filter((message) => message.call_session_id === call.call_id);
+        assert(callMessages.some((message) => message.actor === 'USER' && message.text === '这是一段浏览器录音。'), '转写应以 USER 消息落库并带通话标记');
+        assert(callMessages.some((message) => message.actor === 'ASSISTANT' && message.text.includes('开发 Mock 已收到')), '回复应落库并带通话标记');
       });
     }
 
