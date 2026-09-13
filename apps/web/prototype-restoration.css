@@ -108,8 +108,29 @@
 .qiyu-prototype .composer-wrap { position: absolute; z-index: 5; right: 0; bottom: calc(63px + env(safe-area-inset-bottom)); left: 0; padding: 10px 14px 12px; background: linear-gradient(180deg, transparent, var(--qy-paper) 30%); }
 .qiyu-prototype .composer { height: 56px; display: flex; gap: 0; align-items: center; padding: 6px 6px 6px 8px; border: 1px solid var(--qy-line); border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 14px 30px rgba(66,41,54,.13); }
 .qiyu-prototype .composer input { min-width: 0; min-height: 0; flex: 1; padding: 0 10px; border: 0; border-radius: 0; color: var(--qy-ink); background: transparent; outline: 0; font-size: 13px; }
-.qiyu-prototype .hold-to-talk { touch-action: none; user-select: none; }.qiyu-prototype .hold-to-talk.recording { color: #a33; background: #f6d8df; }.qiyu-prototype .hold-to-talk.cancel { color: #fff; background: #9c3349; }
-.qiyu-prototype .hold-hint { display: block; margin-top: 4px; text-align: center; color: var(--qy-muted); font-size: 9px; }
+/* 微信式按住说话：语音模式下输入框整条替换为胶囊按钮，文字态由 ::after 随
+   recording/cancel 类切换（按住=松开 结束，上滑取消区=红底 松开 取消）。 */
+.qiyu-prototype .hold-pill { touch-action: none; user-select: none; min-width: 0; flex: 1; height: 42px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 999px; color: var(--qy-ink); background: rgba(91,54,83,.08); font: 600 14px/1 var(--qy-font-serif); letter-spacing: .08em; transition: background .15s ease; }
+.qiyu-prototype .hold-pill::after { content: "按住 说话"; }
+.qiyu-prototype .hold-pill.recording { background: rgba(91,54,83,.18); }
+.qiyu-prototype .hold-pill.recording::after { content: "松开 结束"; }
+.qiyu-prototype .hold-pill.recording.cancel { color: #fff; background: var(--qy-danger); }
+.qiyu-prototype .hold-pill.recording.cancel::after { content: "松开 取消"; }
+.qiyu-prototype.night .hold-pill { color: #fff; background: rgba(255,255,255,.1); }.qiyu-prototype.night .hold-pill.recording { background: rgba(255,255,255,.2); }
+/* 按住时的居中录音指示卡：麦克风 + 声波动画 + 上滑取消提示，进取消区转红。 */
+.qiyu-prototype .recording-indicator { position: absolute; left: 50%; bottom: calc(100% - 6px); z-index: 6; display: flex; flex-direction: column; align-items: center; gap: 10px; transform: translateX(-50%); }
+.qiyu-prototype .recording-indicator .recording-box { width: 104px; height: 104px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; border-radius: 26px; color: #fff; background: rgba(29,30,32,.92); box-shadow: 0 16px 40px rgba(24,16,22,.28); }
+.qiyu-prototype .recording-indicator .recording-wave { display: flex; gap: 3px; align-items: center; height: 14px; }
+.qiyu-prototype .recording-indicator .recording-wave i { width: 3px; border-radius: 2px; background: var(--qy-rose); animation: qy-hold-wave 1s ease-in-out infinite; }
+.qiyu-prototype .recording-indicator .recording-wave i:nth-child(1), .qiyu-prototype .recording-indicator .recording-wave i:nth-child(5) { height: 6px; animation-delay: .12s; }
+.qiyu-prototype .recording-indicator .recording-wave i:nth-child(2), .qiyu-prototype .recording-indicator .recording-wave i:nth-child(4) { height: 11px; animation-delay: .06s; }
+.qiyu-prototype .recording-indicator .recording-wave i:nth-child(3) { height: 14px; }
+@keyframes qy-hold-wave { 0%, 100% { transform: scaleY(.55); } 50% { transform: scaleY(1.35); } }
+.qiyu-prototype .recording-indicator .recording-hint { padding: 7px 14px; border-radius: 999px; color: #fff; background: rgba(25,17,23,.78); font-size: 10px; letter-spacing: .04em; }
+.qiyu-prototype .recording-indicator .hint-cancel { display: none; }
+.qiyu-prototype .recording-indicator.cancel .recording-box { background: rgba(156,51,73,.94); }
+.qiyu-prototype .recording-indicator.cancel .hint-slide { display: none; }
+.qiyu-prototype .recording-indicator.cancel .hint-cancel { display: inline; }
 .qiyu-prototype .context-image-picker { display: grid; place-items: center; cursor: pointer; }
 .qiyu-prototype .inline-media-panel { display: flex; align-items: center; gap: 8px; margin: 0 4px 8px; padding: 8px 10px; border: 1px solid var(--qy-line); border-radius: 14px; background: rgba(255,255,255,.96); font-size: 11px; }.qiyu-prototype .inline-media-panel label { flex: 1; }.qiyu-prototype .inline-media-panel textarea { width: 100%; min-height: 48px; }.qiyu-prototype .inline-media-panel.error { color: #8a2738; }
 .qiyu-prototype .context-image-preview,.qiyu-prototype .context-image-thumb { display: block; max-width: 180px; max-height: 180px; object-fit: cover; border-radius: 12px; }.qiyu-prototype .context-image-preview { width: 52px; height: 52px; }.qiyu-prototype .context-image-status { margin-bottom: 6px; color: var(--qy-muted); font-size: 10px; }

@@ -131,6 +131,8 @@ async function main() {
       await step('按住说话：长按录音、浏览器转 WAV、转写确认后只回填不发送', async () => {
         await page.context().grantPermissions(['microphone'], { origin: base });
         const beforeMessages = store.messages.size;
+        // 微信式输入区：按住说话胶囊只在语音模式下出现，先切换再长按。
+        await page.locator('[data-action="enter-voice-mode"]').click();
         const button = page.locator('[data-action="hold-asr"]');
         const box = await button.boundingBox(); assert(box, '按住说话按钮应可见');
         await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();

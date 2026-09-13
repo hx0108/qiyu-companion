@@ -41,6 +41,7 @@ const state = {
   asrEdit: "",
   asrRecording: null,
   asrHold: null,
+  composerVoice: false,
   pendingTranscript: "",
   contextImageAsset: null,
   contextImagePreviewUrl: null,
@@ -237,6 +238,8 @@ async function uploadContextImage(file) {
     state.contextImageAsset = payload.media_asset;
     if (state.contextImagePreviewUrl) URL.revokeObjectURL(state.contextImagePreviewUrl);
     state.contextImagePreviewUrl = payload.media_asset?.state === "AVAILABLE" ? URL.createObjectURL(prepared) : null;
+    // 图片要随消息发送，而语音模式没有发送键；上传成功即回到文字模式。
+    state.composerVoice = false;
     setToast(payload.media_asset?.state === "AVAILABLE" ? "图片已私密上传并通过审核，可随消息发送。" : `图片未通过发送门禁：${payload.media_asset?.state ?? "FAILED"}`);
   } catch (error) { setToast(serverMessage(error)); }
   finally { setBusy(false); }
@@ -737,6 +740,7 @@ async function consumeSseStream(url, onChunk) {
 
 async function sendMessage(form) {
   const input = form.elements.message;
+  if (!input) return;
   const content = input.value.trim();
   const imageAsset = state.contextImageAsset?.state === "AVAILABLE" ? state.contextImageAsset : null;
   if (!content && !imageAsset) return;
@@ -1530,6 +1534,8 @@ async function confirmAsrTranscript() {
     state.asrJob = payload?.asr_job ?? state.asrJob;
     state.pendingTranscript = state.asrJob?.transcript?.text ?? text;
     const deleted = payload?.input_audio_deletion?.physical_cleanup_state === "LOCAL_PRIVATE_OBJECT_DELETED";
+    // 转写要落到文字输入框里，确认后自动回到文字模式。
+    state.composerVoice = false;
     state.route = "chat";
     setToast(deleted ? "转写已确认，原始音频已删除；请检查文字后手动发送。" : "转写已确认；原始音频删除仍需服务端处理。请检查文字后手动发送。");
   } catch (error) {
@@ -1803,7 +1809,20 @@ function renderChat() {
   const paused = state.userPaused ? `<button class="memory-banner" data-action="resume-interaction"><span>${prototypeIcon("shield", 18)}</span><span><b>普通互动已暂停</b><small>由你恢复前，不会继续生成角色回复</small></span></button>` : "";
   const asrPanel = state.asrJob?.state === "COMPLETED" ? `<div class="inline-media-panel"><label>检查转写后再发送<textarea id="asr-edit" maxlength="4000">${escapeHtml(state.asrEdit)}</textarea></label><button type="button" class="btn btn-primary" data-action="confirm-asr">确认到输入框</button></div>` : state.asrJob?.state === "FAILED" ? `<div class="inline-media-panel error">转写失败：${escapeHtml(state.asrJob.failure_code ?? "UNKNOWN")}<button type="button" class="btn btn-line" data-action="delete-failed-asr-input">删除原音频</button></div>` : "";
   const imagePanel = state.contextImageAsset ? `<div class="inline-media-panel"><span>图片状态：${escapeHtml(state.contextImageAsset.state)}</span>${state.contextImagePreviewUrl ? `<img class="context-image-preview" src="${escapeHtml(state.contextImagePreviewUrl)}" alt="待发送图片">` : ""}<button type="button" class="btn btn-line" data-action="remove-context-image">删除图片</button></div>` : "";
-  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}<div class="composer"><button type="button" class="icon-btn hold-to-talk" data-action="hold-asr" aria-label="按住说话">${prototypeIcon("mic", 19)}</button><input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}><label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label><button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button></div><small class="hold-hint">按住说话 · 上滑取消</small></form>${prototypeNav("chat")}</section>`;
+  // 微信式语音输入：左侧麦克风/键盘切换；语音模式下整条输入框换成「按住 说话」
+  // 胶囊（文字态由 CSS ::after 随 recording/cancel 类切换），按住时上方浮出
+  // 录音指示卡，上滑进取消区变红。转写确认或图片上传成功后自动切回文字模式。
+  const voiceMode = state.composerVoice;
+  const recording = state.asrRecording?.state === "recording";
+  const recordingIndicator = recording ? `<div class="recording-indicator" role="status"><div class="recording-box">${prototypeIcon("mic", 30)}<span class="recording-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span></div><div class="recording-hint"><span class="hint-slide">手指上滑，取消发送</span><span class="hint-cancel">松开手指，取消发送</span></div></div>` : "";
+  const inputToggle = voiceMode
+    ? `<button type="button" class="icon-btn" data-action="exit-voice-mode" aria-label="切换到键盘输入">${prototypeIcon("keyboard", 20)}</button>`
+    : `<button type="button" class="icon-btn" data-action="enter-voice-mode" aria-label="切换到语音输入">${prototypeIcon("mic", 20)}</button>`;
+  const inputArea = voiceMode
+    ? `<button type="button" class="hold-pill" data-action="hold-asr" aria-label="按住说话，手指上滑取消"></button>`
+    : `<input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}>`;
+  const sendButton = voiceMode ? "" : `<button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button>`;
+  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</section>`;
 }
 
 function renderSubscription() {
@@ -1946,6 +1965,7 @@ const PROTOTYPE_ICON_PATHS = Object.freeze({
   check: '<path d="M5 12l4 4L19 6"/>', moon: '<path d="M20 15.5A8.5 8.5 0 118.5 4 7 7 0 0020 15.5z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3M9 21h6"/>',
+  keyboard: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M12 10h.01M17 10h.01M7 14h.01M17 14h.01M10 14h4"/>',
   image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 15l-4-4L5 20"/>',
   send: '<path d="M22 2L9 15M22 2l-7 20-6-7-7-3 20-10z"/>', chat: '<path d="M4 5h16v12H8l-4 4V5z"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>', heart: '<path d="M20.8 5.8a5.5 5.5 0 00-7.8 0L12 6.8l-1-1a5.5 5.5 0 00-7.8 7.8L12 22l8.8-8.4a5.5 5.5 0 000-7.8z"/>',
@@ -2043,6 +2063,7 @@ document.addEventListener("pointermove", (event) => {
   if (!state.asrHold || state.asrHold.pointerId !== event.pointerId) return;
   state.asrHold.cancelled = shouldCancelHold(state.asrHold.startY, event.clientY);
   document.querySelector('[data-action="hold-asr"]')?.classList.toggle("cancel", state.asrHold.cancelled);
+  document.querySelector(".recording-indicator")?.classList.toggle("cancel", state.asrHold.cancelled);
 });
 document.addEventListener("pointerup", (event) => {
   if (!state.asrHold || state.asrHold.pointerId !== event.pointerId) return;
@@ -2133,6 +2154,8 @@ document.addEventListener("click", (event) => {
   if (action === "dismiss-reminder") { state.continuousReminder = null; render(); }
   if (action === "back-chat") { state.route = "chat"; render(); }
   if (action === "open-asr") { state.route = "asr"; render(); }
+  if (action === "enter-voice-mode") { state.composerVoice = true; render(); }
+  if (action === "exit-voice-mode") { state.composerVoice = false; render(); }
   if (action === "open-image") { state.route = referenceImageUsable() ? "image-scene" : "image-reference"; render(); }
   if (action === "refresh-reference-rights") refreshReferenceRightsReview();
   if (action === "appeal-reference-rights") appealReferenceRightsReview();
