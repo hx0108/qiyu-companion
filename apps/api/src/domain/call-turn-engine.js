@@ -97,20 +97,23 @@ async function executeCallTurn(deps, { store, account, call, turn, emit, signal 
     const aborted = signal?.aborted || error?.code === 'TENCENT_TTS_STREAM_ABORTED';
     usageRelease();
     await closeAsrJob(deps, store, ctx, aborted ? 'CALL_TURN_ABORTED' : (error?.code || 'ASR_TRANSCRIPTION_FAILED'));
+    // 通话审计只计实际扣费口径：ASR job 未完成时预留已全额返还（closeAsrJob），
+    // call_sessions 的 asr_seconds_used 不得再计入（否则审计虚高、与账本不符）。
+    const asrSecondsForAudit = ctx.asrJob?.state === 'COMPLETED' ? ctx.asrSeconds : 0;
     // 打断语义只在 THINKING/SPEAKING 成立（状态机约束）；更早阶段的中止按
     // 失败结算，failure_code 如实标注 CALL_TURN_ABORTED。
     const interruptible = turn.state === 'THINKING' || turn.state === 'SPEAKING';
     if (aborted && interruptible) {
       persistPartialReply(deps, store, account, call, turn, ctx);
       const settled = ctx.speech ? await ctx.speech.settle() : { committedSeconds: 0 };
-      settleTurnSafely(store, call, turn, { state: 'INTERRUPTED', interrupted: true, asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date() });
+      settleTurnSafely(store, call, turn, { state: 'INTERRUPTED', interrupted: true, asrSeconds: asrSecondsForAudit, ttsSeconds: settled.committedSeconds, now: new Date() });
       emit('call.turn.interrupted', { turn_id: turn.turn_id, assistant_message_id: turn.assistant_message_id });
       return;
     }
     const settled = ctx.speech ? await ctx.speech.settle() : { committedSeconds: 0 };
     settleTurnSafely(store, call, turn, {
       state: 'FAILED', failureCode: aborted ? 'CALL_TURN_ABORTED' : (error?.code || 'CALL_TURN_FAILED'),
-      asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date()
+      asrSeconds: asrSecondsForAudit, ttsSeconds: settled.committedSeconds, now: new Date()
     });
     emit('call.turn.failed', {
       turn_id: turn.turn_id, code: aborted ? 'CALL_TURN_ABORTED' : (error?.code || 'CALL_TURN_FAILED'),

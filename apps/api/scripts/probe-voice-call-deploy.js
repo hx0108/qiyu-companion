@@ -127,13 +127,15 @@ async function consumeSse(url, token, onEvent) {
   const finalized = await api(`/calls/${callId}/turns/${turnId}/finalize`, { method: 'POST', token, key: `probe-fin-${uuid()}` });
   if (finalized.status !== 202) throw new Error(`封账 ${finalized.status} ${JSON.stringify(finalized.payload)}`);
 
-  let firstEventMs = null; let transcriptMs = null; let firstAudioMs = null; let completedMs = null; let transcriptText = '';
+  let firstEventMs = null; let transcriptMs = null; let firstAudioMs = null; let completedMs = null; let transcriptText = ''; let failedEvent = null;
   const turnHeaders = await consumeSse(finalized.payload.stream.stream_url, token, (event, data, ms) => {
     if (firstEventMs === null) firstEventMs = ms;
     if (event === 'call.turn.transcript') { transcriptMs = ms; transcriptText = data.text; }
     if (event === 'call.turn.audio' && firstAudioMs === null) firstAudioMs = ms;
     if (event === 'call.turn.completed') completedMs = ms;
+    if (event === 'call.turn.failed' || event === 'call.turn.interrupted' || event === 'message.failed') failedEvent = { event, data, ms };
   });
+  if (failedEvent) log(`回合异常终局：${JSON.stringify(failedEvent)}`);
   log(`回合时延：首事件 ${firstEventMs}ms / 转写 ${transcriptMs}ms（「${transcriptText}」）/ 首音频 ${firstAudioMs}ms / 完成 ${completedMs}ms`);
   log(`回合流响应头 x-accel-buffering=${turnHeaders['x-accel-buffering'] ?? '缺失'}`);
 
@@ -148,7 +150,7 @@ async function consumeSse(url, token, onEvent) {
   log(`通话来源消息数：${(messages.payload.messages ?? []).filter((message) => message.call_session_id === callId).length}`);
 
   // 数据权利：探针账户注销（不留测试数据）
-  const deletion = await api('/account/deletion', { method: 'POST', token, key: `probe-del-${uuid()}` });
-  log(`探针账户注销：${deletion.status}（${deletion.payload.deletion_job?.state ?? 'n/a'}，24h 内物理清理）`);
+  const deletion = await api('/account-deletions', { method: 'POST', token, key: `probe-del-${uuid()}`, body: { confirm_text: '注销' } });
+  log(`探针账户注销：${deletion.status}（${deletion.payload.deletion_job?.state ?? JSON.stringify(deletion.payload).slice(0, 120)}，24h 内物理清理）`);
   console.log('\nPROBE_RESULT=' + JSON.stringify({ callId, firstEventMs, transcriptMs, firstAudioMs, completedMs, asrSeconds: end.payload.call?.asr_seconds_used, ttsSeconds: end.payload.call?.tts_seconds_used }));
 })().catch((error) => { console.error('PROBE FAILED:', error.message); process.exit(1); });

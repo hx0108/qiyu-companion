@@ -298,6 +298,31 @@ test('额度不足：ASR 预留即失败，回合 FAILED 并透出中文原因�
   assert.equal(asrJobs[0].input_asset_id, null);
 });
 
+test('ASR 识别失败：预留全额返还，通话审计不虚增 asr_seconds_used（与账本口径一致）', async () => {
+  const store = fixtureStore();
+  const service = entitlementServiceFor(store);
+  const deps = buildDeps({
+    mediaEntitlementService: service,
+    asrTranscriber: async () => ({ text: '', providerRequestId: 'asr_req_empty' }) // 供应商返回空文本
+  });
+  const { call, turn } = finalizedTurn(store, deps);
+  const { events, emit } = collect();
+
+  await executeCallTurn(deps, { store, account: store.account(ACCOUNT_ID), call, turn, emit, signal: null });
+
+  const failed = events.at(-1);
+  assert.equal(failed.event, 'call.turn.failed');
+  assert.equal(failed.data.code, 'ASR_TRANSCRIPTION_FAILED');
+  assert.match(failed.data.message, /没有听清/);
+  assert.equal(turn.state, 'FAILED');
+  assert.equal(turn.failure_code, 'ASR_TRANSCRIPTION_FAILED');
+  // 预留已返还：账面余额回到满额。
+  const asrBalance = service.entitlementBalances(ACCOUNT_ID).find((item) => item.capability === 'TRANSCRIBE_ASR');
+  assert.equal(asrBalance.available_quantity, 15 * 60);
+  // 审计不虚增：识别失败不产生用户可被计费的秒数。
+  assert.equal(call.asr_seconds_used, 0);
+});
+
 // ---- 开场问候 ----
 
 test('开场问候：世界情绪选模板、同一音频事件管线、TTS job 挂问候消息可回放', async () => {
