@@ -98,6 +98,9 @@
 .qiyu-prototype .ai .bubble .action { color: #a89fb0; font-style: italic; }
 .qiyu-prototype .me .bubble { color: #4a3620; background: #f6d998; border-bottom-right-radius: 6px; box-shadow: 0 10px 26px rgba(24,16,22,.12); }
 .qiyu-prototype .voice-control-row { position: absolute; z-index: 2; right: 2px; bottom: 2px; isolation: isolate; min-height: 44px; width: 52px; display: flex; align-items: center; justify-content: flex-end; margin: 0; padding: 0; border-radius: 999px; background: transparent; }
+/* 高光沉淀（方向二）：最新 AI 回复左下角的轻量点赞，沉淀为行为模式候选。 */
+.qiyu-prototype .praise-btn { position: absolute; z-index: 2; left: 8px; bottom: 10px; width: 30px; height: 30px; min-width: 30px; display: grid; place-items: center; border: 0; border-radius: 50%; color: #8d8395; background: transparent; transition: transform .12s ease, color .12s ease; }
+.qiyu-prototype .praise-btn:active { color: #f6d998; transform: scale(1.2); }.qiyu-prototype .praise-btn:disabled { opacity: .5; }
 .qiyu-prototype .voice-control-row::before { content: ""; position: absolute; z-index: 0; right: -3px; bottom: -2px; width: 58px; height: 42px; border-radius: 28px 0 18px 28px; background: rgba(7,8,9,.68); box-shadow: inset 8px 7px 12px rgba(0,0,0,.32),-6px -5px 14px rgba(0,0,0,.12); pointer-events: none; }
 .qiyu-prototype .voice-trigger { position: relative; z-index: 1; width: 44px; height: 44px; min-width: 44px; display: grid; place-items: center; margin: 0; padding: 0; border: 0; border-radius: 999px; color: #fff; background: transparent; }
 .qiyu-prototype .voice-trigger-visual { width: 40px; height: 24px; display: grid; place-items: center; border-radius: 999px; background: linear-gradient(180deg,#343538 0%,#292a2d 100%); border: 1px solid rgba(255,255,255,.045); box-shadow: 0 3px 7px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.06); transition: background .16s ease,border-color .16s ease,transform .12s ease; }

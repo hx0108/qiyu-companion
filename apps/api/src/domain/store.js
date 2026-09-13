@@ -32,6 +32,7 @@ class DevelopmentStore {
     this.proactiveMessages = new Map();
     this.worldStates = new Map();
     this.worldStateEvents = new Map();
+    this.userPreferences = new Map();
     this.messageFeedback = new Map();
     this.trialFeedback = new Map();
     this.notifications = new Map();

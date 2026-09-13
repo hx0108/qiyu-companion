@@ -58,6 +58,7 @@ const state = {
   synthesizingMessageId: null,
   ttsAutoPrefetch: false,
   prefetchingIds: new Set(),
+  preferences: null,
   ocImport: null,
   ocRightsReview: null,
   noticeChecks: new Set(),
@@ -677,10 +678,47 @@ async function openCharacterProfile() {
   try {
     const payload = await api(`/characters/${encodeURIComponent(characterId())}`);
     state.character = unwrap(payload, "character", null) ?? payload;
+    try {
+      const preferences = await api(`/characters/${encodeURIComponent(characterId())}/preferences`);
+      state.preferences = preferences.preferences ?? null;
+    } catch { state.preferences = null; }
     state.route = "character-profile";
   } catch (error) {
     setToast(serverMessage(error));
   } finally { setBusy(false); }
+}
+
+async function savePreferences(form) {
+  setBusy(true);
+  try {
+    const payload = await api(`/characters/${encodeURIComponent(characterId())}/preferences`, {
+      method: "PUT", idempotent: uuid(),
+      body: { preferences: {
+        address_terms: {
+          character_to_user: form.elements.pref_character_to_user.value.trim() || null,
+          user_to_character: form.elements.pref_user_to_character.value.trim() || null,
+        },
+        taboos: form.elements.pref_taboos.value.split("\n").map((line) => line.trim()).filter(Boolean),
+        schedule: { sleep_at: form.elements.pref_sleep_at.value || null, wake_at: form.elements.pref_wake_at.value || null },
+        style: { reply_length: form.elements.pref_reply_length.value || null, emoji_enabled: form.elements.pref_emoji.checked },
+      } },
+    });
+    state.preferences = payload.preferences ?? null;
+    setToast("偏好已保存，从下一轮对话开始生效。");
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
+}
+
+// 高光沉淀（方向二）：点赞最新回复 → 服务端提炼行为模式候选 → 记忆横幅确认。
+async function praiseMessage(messageIdValue) {
+  if (!messageIdValue) return;
+  setBusy(true);
+  try {
+    const payload = await api(`/messages/${encodeURIComponent(messageIdValue)}/feedback`, { method: "POST", idempotent: uuid(), body: { type: "PRAISE", severity: "LOW" } });
+    await refreshMemoryAndAssets();
+    setToast(payload.skill_candidate ? "已把这句回应沉淀为待确认的行为模式，可在上方横幅里确认。" : "已记录你的认可。");
+  } catch (error) { setToast(serverMessage(error)); }
+  finally { setBusy(false); }
 }
 
 async function saveCharacterProfile(form) {
@@ -1755,16 +1793,25 @@ function renderOcImport() {
   return screen(`<div class="topline"><button class="btn btn-line" data-action="back-character">返回创建角色</button></div><h1 id="app-title">先隔离审核，<br>再写入角色。</h1><p class="lead">OC 原文只用于受控字段候选提取和权利审核，不会自动公开、训练模型或覆盖系统安全规则。</p>${reviewCard}<form id="oc-import-form" class="stack"><label class="field"><span>OC 设定</span><textarea name="oc_source_text" maxlength="8000" rows="10" required placeholder="可填写：世界观：…\n性格：…\n表达风格：…"></textarea><small class="muted">最多 8000 字。请勿粘贴真人、未获授权 IP 或其他人的私密内容。</small></label><label class="check-row"><input name="oc_rights_confirmed" type="checkbox" required><span>我确认上述内容为原创或已获授权，并理解提交后会先进入审核而非自动生效。</span></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>隔离提交并申请审核</button></form>`);
 }
 
+// 结构化偏好档案（沉淀方向一）：确定性规则，每轮 100% 注入提示词。
+function preferencesForm(prefs) {
+  const terms = prefs?.address_terms ?? {};
+  const schedule = prefs?.schedule ?? {};
+  const style = prefs?.style ?? {};
+  return `<form id="preferences-form" class="stack"><b>TA 眼中的我（确定性偏好）</b><p class="page-sub">这些规则每轮对话 100% 生效，不依赖记忆召回。</p><div class="button-row"><label class="field"><span>TA 怎么称呼你</span><input name="pref_character_to_user" maxlength="20" value="${escapeHtml(terms.character_to_user ?? "")}" placeholder="例如：小映"></label><label class="field"><span>你怎么称呼 TA</span><input name="pref_user_to_character" maxlength="20" value="${escapeHtml(terms.user_to_character ?? "")}" placeholder="例如：阿默"></label></div><label class="field"><span>雷区（每行一条，TA 绝不主动提起）</span><textarea name="pref_taboos" rows="2" maxlength="200" placeholder="例如：不要提前任">${escapeHtml((prefs?.taboos ?? []).join("\n"))}</textarea></label><div class="button-row"><label class="field"><span>通常入睡</span><input name="pref_sleep_at" type="time" value="${escapeHtml(schedule.sleep_at ?? "")}"></label><label class="field"><span>通常起床</span><input name="pref_wake_at" type="time" value="${escapeHtml(schedule.wake_at ?? "")}"></label><label class="field"><span>回复长度</span><select name="pref_reply_length"><option value="">默认</option><option value="short" ${style.reply_length === "short" ? "selected" : ""}>简短</option><option value="balanced" ${style.reply_length === "balanced" ? "selected" : ""}>适中</option></select></label></div><label class="check-row"><input name="pref_emoji" type="checkbox" ${style.emoji_enabled === false ? "" : "checked"}><span>允许使用表情符号</span></label><button class="btn btn-line" ${state.busy ? "disabled" : ""}>保存偏好</button></form>`;
+}
+
 function renderCharacterProfile() {
   const character = state.character;
   if (!character) { state.route = "character"; return renderCharacter(); }
   const history = (character.persona_history ?? []).slice().reverse().map((entry) => `<article class="asset"><div><b>版本 ${escapeHtml(entry.version)} · ${entry.state === "STABLE" ? "已生效" : escapeHtml(entry.state ?? "历史版本")} · ${escapeHtml(new Date(entry.created_at).toLocaleString())}</b><small>${escapeHtml(entry.note || "无备注")} · 变更：${escapeHtml((entry.changed_fields ?? []).join(", ") || "无")}</small></div></article>`).join("");
   return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button></div><h1 id="app-title">角色档案</h1><p class="lead">当前生效人格版本 ${escapeHtml(character.active_persona_version ?? character.version)}。修改保存后立即生效，可直接继续对话和语音；历史版本全部保留。</p>
   <form id="persona-form" class="stack"><label class="field"><span>角色名字</span><input name="character_name" maxlength="80" required value="${escapeHtml(character.name ?? "")}"></label>${personaFields(character.persona ?? {})}<button class="btn btn-primary" ${state.busy ? "disabled" : ""}>保存并立即生效</button></form>
+  ${preferencesForm(state.preferences)}
   <div class="stack"><b>变更记录</b>${history || '<div class="empty-state">暂无历史版本。</div>'}</div>`);
 }
 
-function messageMarkup(message) {
+function messageMarkup(message, latestAssistantId = null) {
   const actor = message.actor ?? message.role ?? "assistant";
   const isUser = actor === "user" || actor === "USER";
   const content = message.content ?? message.text ?? message.display_text ?? "";
@@ -1781,7 +1828,8 @@ function messageMarkup(message) {
     if (state.deletedImageIds.has(attachment.asset_id)) return `<div class="context-image-status">图片附件 · 已删除</div>`;
     return url ? `<div><img class="context-image-thumb" src="${escapeHtml(url)}" alt="用户上传并审核通过的聊天图片">${isUser ? `<button type="button" class="voice-delete" data-action="delete-context-image" data-asset-id="${escapeHtml(attachment.asset_id)}">删除图片</button>` : ""}</div>` : `<div class="context-image-status">图片附件 · 私密加载中</div>`;
   }).join("");
-  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${bubbleHtml}</div>${voiceRow}</div></article>`;
+  const praiseButton = !isUser && id && id === latestAssistantId ? `<button type="button" class="praise-btn" data-action="praise-message" data-message-id="${escapeHtml(id)}" aria-label="这句回应很好，沉淀为行为模式" title="这句回应很好，沉淀为行为模式" ${state.busy ? "disabled" : ""}>${prototypeIcon("spark", 14)}</button>` : "";
+  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${bubbleHtml}</div>${praiseButton}${voiceRow}</div></article>`;
 }
 
 async function openWorldState() {
@@ -1852,7 +1900,8 @@ function renderChat() {
     ? `<button type="button" class="hold-pill" data-action="hold-asr" aria-label="按住说话，手指上滑取消"></button>`
     : `<input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}>`;
   const sendButton = voiceMode ? "" : `<button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button>`;
-  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map(messageMarkup).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</section>`;
+  const latestAssistantId = messageId([...state.messages].reverse().find((item) => (item.actor ?? item.role) === "ASSISTANT") ?? {});
+  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map((message) => messageMarkup(message, latestAssistantId)).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</section>`;
 }
 
 function renderSubscription() {
@@ -1916,7 +1965,7 @@ function renderCandidate() {
   const conflicts = candidate.conflicts_with ?? [];
   const conflictMarkup = conflicts.length > 0 ? `<div class="rights">${prototypeIcon("shield", 17)}<span>与已有关系资产可能冲突。确认不会自动覆盖旧内容，请在时间线中单独修订。</span></div>` : "";
   const characterName = state.character?.name ?? "当前角色";
-  return `<section class="screen qiyu-prototype app-screen paper"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · 关系记忆</small></div></div><button class="icon-btn soft" data-action="back-chat" aria-label="关闭记忆确认">${prototypeIcon("x", 20)}</button></header><div class="chat-scroll"><div class="date-rule">关系资产需由你确认</div><div class="scene-state"><span class="glyph">${prototypeIcon("archive", 16)}</span><span><b>候选记忆等待确认</b><small>不会自动写入长期关系资产</small></span></div></div><div class="sheet-layer"><section class="sheet" role="dialog" aria-modal="true" aria-label="关系记忆确认"><div class="grabber"></div><div class="sheet-head"><div><span class="aigc">服务端候选</span><h3>关系记忆</h3><p>候选内容不会自动成为长期事实</p></div><button class="close" data-action="back-chat" aria-label="关闭">${prototypeIcon("x", 18)}</button></div><blockquote class="memory-quote">${escapeHtml(text)}</blockquote>${conflictMarkup}<label class="field"><span>修改后确认（可选）</span><textarea id="candidate-edit">${escapeHtml(state.confirmEdit || text)}</textarea></label><div class="sheet-actions"><button class="btn btn-line" data-action="reject-candidate" ${state.busy ? "disabled" : ""}>不记住</button><button class="btn btn-secondary" data-action="confirm-edited-candidate" ${state.busy ? "disabled" : ""}>修改措辞</button><button class="btn btn-primary wide" data-action="confirm-candidate" ${state.busy ? "disabled" : ""}>确认记住 ${prototypeIcon("check", 18)}</button></div><p class="note">确认、修改或拒绝的最终状态均以 API 返回为准。</p></section></div></section>`;
+  return `<section class="screen qiyu-prototype app-screen paper"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · 关系记忆</small></div></div><button class="icon-btn soft" data-action="back-chat" aria-label="关闭记忆确认">${prototypeIcon("x", 20)}</button></header><div class="chat-scroll"><div class="date-rule">关系资产需由你确认</div><div class="scene-state"><span class="glyph">${prototypeIcon("archive", 16)}</span><span><b>候选记忆等待确认</b><small>不会自动写入长期关系资产</small></span></div></div><div class="sheet-layer"><section class="sheet" role="dialog" aria-modal="true" aria-label="关系记忆确认"><div class="grabber"></div><div class="sheet-head"><div><span class="aigc">${escapeHtml({ SKILL: "行为沉淀", development_note: "记忆候选", PREFERENCE: "偏好" }[candidate.type] ?? "服务端候选")}</span><h3>关系记忆</h3><p>候选内容不会自动成为长期事实</p></div><button class="close" data-action="back-chat" aria-label="关闭">${prototypeIcon("x", 18)}</button></div><blockquote class="memory-quote">${escapeHtml(text)}</blockquote>${conflictMarkup}<label class="field"><span>修改后确认（可选）</span><textarea id="candidate-edit">${escapeHtml(state.confirmEdit || text)}</textarea></label><div class="sheet-actions"><button class="btn btn-line" data-action="reject-candidate" ${state.busy ? "disabled" : ""}>不记住</button><button class="btn btn-secondary" data-action="confirm-edited-candidate" ${state.busy ? "disabled" : ""}>修改措辞</button><button class="btn btn-primary wide" data-action="confirm-candidate" ${state.busy ? "disabled" : ""}>确认记住 ${prototypeIcon("check", 18)}</button></div><p class="note">确认、修改或拒绝的最终状态均以 API 返回为准。</p></section></div></section>`;
 }
 
 function deletionMarkup() {
@@ -2154,6 +2203,7 @@ document.addEventListener("submit", (event) => {
   if (event.target.id === "character-form") { event.preventDefault(); createCharacter(event.target); }
   if (event.target.id === "oc-import-form") { event.preventDefault(); submitOcImport(event.target); }
   if (event.target.id === "persona-form") { event.preventDefault(); saveCharacterProfile(event.target); }
+  if (event.target.id === "preferences-form") { event.preventDefault(); savePreferences(event.target); }
   if (event.target.id === "world-state-form") { event.preventDefault(); saveWorldState(event.target); }
   if (event.target.id === "message-form") { event.preventDefault(); sendMessage(event.target); }
   if (event.target.id === "reference-image-form") { event.preventDefault(); uploadReferenceImage(event.target); }
@@ -2213,6 +2263,7 @@ document.addEventListener("click", (event) => {
   if (action === "back-data") openDataCenter();
   if (action === "refresh-last-complaint") refreshLastComplaint();
   if (action === "report-latest-assistant-message") reportLatestAssistantMessage();
+  if (action === "praise-message") praiseMessage(button.dataset.messageId);
   if (action === "purchase-plan") purchasePlan(button.dataset.sku, button.dataset.autorenew === "true");
   if (action === "start-trial") startTrial();
   if (action === "cancel-renewal") cancelRenewal();

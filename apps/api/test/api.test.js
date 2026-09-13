@@ -788,3 +788,95 @@ test('ASR 供应商调用失败会保留失败任务并追加无正文失败指�
   const metrics = await request(base, '/api/v1/development/operation-metrics');
   assert.deepEqual(metrics.body.metrics.map(({ capability, provider, outcome }) => ({ capability, provider, outcome })), [{ capability: 'ASR', provider: 'tencent-asr', outcome: 'FAILED' }]);
 });
+
+test('偏好档案：保存回读、校验拒绝、并在回复上下文确定性注入', async (t) => {
+  let capturedContext = null;
+  const base = await start(t, {
+    replyGenerator: async (text, context) => {
+      capturedContext = context;
+      return { provider: 'mock', model_version: 'mock-v1', reply_text: '好', ai_generated: true };
+    }
+  });
+  const { character, conversation } = await readyConversation(base, 'dev-alice-token', 'prefs');
+  const path = `/api/v1/characters/${character.character_id}/preferences`;
+  const empty = await request(base, path, { key: 'prefs-get-empty' });
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.body.preferences.taboos, []);
+  const saved = await request(base, path, {
+    method: 'PUT', key: 'prefs-put', body: { preferences: {
+      address_terms: { character_to_user: '小满', user_to_character: '阿澈' },
+      taboos: ['不要提前任'],
+      schedule: { sleep_at: '23:30', wake_at: '07:30' },
+      style: { reply_length: 'short', emoji_enabled: false }
+    } }
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.preferences.version, 1);
+  const invalid = await request(base, path, { method: 'PUT', key: 'prefs-put-bad', body: { preferences: { taboos: ['不提前任', '  '] } } });
+  assert.equal(invalid.status, 400);
+  const message = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'prefs-msg', body: { content: { text: '晚安' } } });
+  assert.equal(message.status, 201);
+  assert.equal(capturedContext.user_preferences.address_terms.character_to_user, '小满');
+  assert.deepEqual(capturedContext.user_preferences.taboos, ['不要提前任']);
+  assert.equal(capturedContext.user_preferences.schedule.sleep_at, '23:30');
+});
+
+test('高光沉淀：PRAISE 产出行为模式候选且同消息幂等，确认后写入 persona 新版本并受上限约束', async (t) => {
+  const base = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'mock', model_version: 'mock-v1', reply_text: text, ai_generated: true }),
+    skillDistiller: async () => ({ pattern_text: '当用户说晚安时，先回应情绪再轻声道别' })
+  });
+  const { character, conversation } = await readyConversation(base, 'dev-alice-token', 'skill');
+  const send = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'skill-msg', body: { content: { text: '晚安' } } });
+  const assistantId = send.body.assistant_message.message_id;
+  const praised = await request(base, `/api/v1/messages/${assistantId}/feedback`, { method: 'POST', key: 'skill-praise-1', body: { type: 'PRAISE', severity: 'LOW' } });
+  assert.equal(praised.status, 201);
+  assert.equal(praised.body.skill_candidate.type, 'SKILL');
+  assert.equal(praised.body.skill_candidate.display_text, '当用户说晚安时，先回应情绪再轻声道别');
+  const again = await request(base, `/api/v1/messages/${assistantId}/feedback`, { method: 'POST', key: 'skill-praise-2', body: { type: 'PRAISE', severity: 'LOW' } });
+  assert.equal(again.body.skill_candidate.candidate_id, praised.body.skill_candidate.candidate_id, '同一消息重复点赞必须复用同一候选');
+  const confirmed = await request(base, `/api/v1/memory-candidates/${praised.body.skill_candidate.candidate_id}/confirm`, { method: 'POST', key: 'skill-confirm', body: { expected_version: 1 } });
+  assert.equal(confirmed.status, 201);
+  assert.equal(confirmed.body.candidate.state, 'CONFIRMED');
+  assert.deepEqual(confirmed.body.character.persona.example_behaviors, ['当用户说晚安时，先回应情绪再轻声道别']);
+  assert.ok(confirmed.body.persona_version.version > character.version, '确认必须产生 persona 新版本');
+});
+
+test('高光沉淀上限：example_behaviors 满上限后确认新沉淀淘汰最旧一条', async (t) => {
+  const behaviors = Array.from({ length: 10 }, (_, index) => `既有行为${index + 1}`);
+  const base = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'mock', model_version: 'mock-v1', reply_text: text, ai_generated: true }),
+    skillDistiller: async () => ({ pattern_text: '当用户焦虑时先承认情绪再给一个小行动' })
+  });
+  const { character, conversation } = await readyConversation(base, 'dev-alice-token', 'skillcap');
+  const personaSaved = await request(base, `/api/v1/characters/${character.character_id}/persona-versions`, {
+    method: 'POST', key: 'skillcap-persona', body: { expected_version: character.version, persona: { ...(character.persona ?? {}), example_behaviors: behaviors }, note: '预填上限' }
+  });
+  assert.equal(personaSaved.status, 201, JSON.stringify(personaSaved.body));
+  const send = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'skillcap-msg', body: { content: { text: '有点焦虑' } } });
+  const praised = await request(base, `/api/v1/messages/${send.body.assistant_message.message_id}/feedback`, { method: 'POST', key: 'skillcap-praise', body: { type: 'PRAISE', severity: 'LOW' } });
+  const confirmed = await request(base, `/api/v1/memory-candidates/${praised.body.skill_candidate.candidate_id}/confirm`, { method: 'POST', key: 'skillcap-confirm', body: { expected_version: 1 } });
+  assert.equal(confirmed.status, 201);
+  assert.equal(confirmed.body.character.persona.example_behaviors.length, 10, '确认后必须仍为上限条数');
+  assert.equal(confirmed.body.character.persona.example_behaviors[9], '当用户焦虑时先承认情绪再给一个小行动');
+  assert.equal(confirmed.body.character.persona.example_behaviors[0], '既有行为2', '最旧的既有行为被淘汰');
+  assert.ok(confirmed.body.note.includes('上限'));
+});
+
+test('召回类型保障：边界与约定资产不与普通记忆竞争，始终进入上下文', async () => {
+  const { rankAssetsForContext } = require('../src/app');
+  const { deterministicEmbedding } = require('../src/domain/asset-embedding-worker');
+  const assets = new Map();
+  for (let index = 0; index < 25; index += 1) {
+    const id = `mem_${String(index).padStart(2, '0')}`;
+    assets.set(id, { asset_id: id, account_id: 'acct', character_id: 'char', type: 'development_note', display_text: `普通记忆条目${index}号`, state: 'ACTIVE', index_state: 'READY', version: 1, created_at: new Date().toISOString() });
+  }
+  assets.set('bnd_1', { asset_id: 'bnd_1', account_id: 'acct', character_id: 'char', type: 'boundary', display_text: '边界：不提前任', state: 'ACTIVE', index_state: 'READY', version: 1, created_at: new Date().toISOString() });
+  assets.set('cmt_1', { asset_id: 'cmt_1', account_id: 'acct', character_id: 'char', type: 'commitment', display_text: '约定：周末一起看电影', state: 'ACTIVE', index_state: 'READY', version: 1, created_at: new Date().toISOString() });
+  const store = { assets, assetEmbeddings: new Map() };
+  const ranked = await rankAssetsForContext(store, 'acct', 'char', '今天有点累', { modelVersion: 'unit-test-v1', dimensions: 256, embed: deterministicEmbedding });
+  const ids = ranked.map((asset) => asset.asset_id);
+  assert.ok(ids.includes('bnd_1'), '边界资产必须始终进入上下文');
+  assert.ok(ids.includes('cmt_1'), '约定资产必须始终进入上下文');
+  assert.ok(ranked.filter((asset) => asset.type === 'development_note').length <= 20, '普通记忆仍受 TOP_K 限制');
+});

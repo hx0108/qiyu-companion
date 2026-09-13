@@ -81,7 +81,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null } = {}) {
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -89,7 +89,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -125,7 +125,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -235,7 +235,9 @@ async function route(context) {
   }
   if (method === 'GET' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) return listMessages(store, account, path, url);
   if (method === 'GET' && /^\/api\/v1\/messages\/[^/]+$/.test(path)) return getMessage(store, account, path);
-  if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/feedback$/.test(path)) return idempotent(context, account, () => createMessageFeedback(store, account, path, body));
+  if (method === 'GET' && /^\/api\/v1\/characters\/[^/]+\/preferences$/.test(path)) return getPreferences(store, account, path);
+  if (method === 'PUT' && /^\/api\/v1\/characters\/[^/]+\/preferences$/.test(path)) return idempotent(context, account, () => updatePreferences(store, account, path, body));
+  if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/feedback$/.test(path)) return idempotent(context, account, () => createMessageFeedback(store, account, path, body, skillDistiller));
   if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider);
   if (method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(path)) return idempotent(context, account, () => deleteConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
@@ -1368,17 +1370,27 @@ async function buildContextPack(store, account, conversation, text, embeddingPro
     conversation_summary: summary ? { summary_id: summary.summary_id, source_to_id: summary.source_to_id, version: 1, text: summary.text } : null,
     confirmed_assets: (await rankAssetsForContext(store, account.account_id, conversation.character_id, text, embeddingProvider))
       .map(({ type, display_text, version }) => ({ type, display_text, version })),
+    user_preferences: publicPreferencesOrNull(store.userPreferences?.get(`${account.account_id}:${conversation.character_id}`)),
     world_state: publicWorldState(currentWorldState(store, account, character))
   };
 }
 
-// 混合召回（技术设计 7.7）：index_state=READY 且向量可用的资产按向量余弦相似度
-// 排序；未就绪（PENDING）、向量缺失或 embedding_model_version 与查询侧不一致的
-// 资产保留词法召回排序，保证索引未建好/重建期间不丢失召回。
-// embeddingProvider（Qwen 语义向量）配置时查询与索引同源同版本；未配置时
-// 用确定性开发嵌入。查询向量获取失败时本轮回退词法，不混用不同版本向量。
+// 混合召回（技术设计 7.7）+ 类型保障（沉淀方向三）：boundary/commitment 是
+// 关系硬约束，无论语义相关性高低都必须进入上下文，不与普通记忆竞争召回名额；
+// 其余资产按向量+词法混合排序——index_state=READY 且向量可用（model_version
+// 与查询侧同源）的按余弦相似度，未就绪/缺失/版本不一致的保留词法序，保证
+// 索引未建好/重建期间不丢失召回。分数不可比时按时间新→旧稳定排序。
+function compareNewestFirst(left, right) {
+  const leftAt = Date.parse(left.created_at ?? '') || 0;
+  const rightAt = Date.parse(right.created_at ?? '') || 0;
+  return rightAt - leftAt;
+}
 async function rankAssetsForContext(store, accountId, characterId, query, embeddingProvider = null) {
-  const lexicalAssets = rankRelationshipAssets(activeAssets(store, accountId), { accountId, characterId, query, limit: CONFIRMED_ASSET_TOP_K });
+  const allAssets = activeAssets(store, accountId).filter((asset) => !characterId || asset.character_id === characterId);
+  const guaranteedAssets = allAssets.filter((asset) => ['boundary', 'commitment'].includes(asset.type));
+  const guaranteedIds = new Set(guaranteedAssets.map((asset) => asset.asset_id));
+  const competitiveAssets = allAssets.filter((asset) => !guaranteedIds.has(asset.asset_id));
+  const lexicalAssets = rankRelationshipAssets(competitiveAssets, { accountId, characterId, query, limit: CONFIRMED_ASSET_TOP_K });
   const queryModelVersion = embeddingProvider?.modelVersion || DEVELOPMENT_EMBEDDING_MODEL_VERSION;
   let queryVector = null;
   try {
@@ -1391,12 +1403,13 @@ async function rankAssetsForContext(store, accountId, characterId, query, embedd
     vectorAssetIds = await store.rankActiveAssetsByVector({ accountId, characterId, queryVector, embeddingModelVersion: queryModelVersion, limit: CONFIRMED_ASSET_TOP_K });
   }
   const vectorsById = new Map(vectorAssetIds.map((item) => [item.asset_id, item.score]));
+  const competitiveIds = new Set(competitiveAssets.map((asset) => asset.asset_id));
   const vectorAssets = vectorAssetIds
     .map((item) => store.assets.get(item.asset_id))
-    .filter((asset) => asset?.account_id === accountId && asset.character_id === characterId && asset.state === 'ACTIVE' && asset.index_state === 'READY' && !asset.deleted_at);
+    .filter((asset) => asset && competitiveIds.has(asset.asset_id) && asset.index_state === 'READY' && !asset.deleted_at);
   const remainingLexical = lexicalAssets.filter((asset) => !vectorsById.has(asset.asset_id));
   const candidates = vectorAssetIds.length > 0 ? [...vectorAssets, ...remainingLexical] : lexicalAssets;
-  return candidates
+  const rankedCompetitive = candidates
     .map((asset) => {
       const embedding = store.assetEmbeddings.get(asset.asset_id);
       if (vectorsById.has(asset.asset_id)) return { asset, score: vectorsById.get(asset.asset_id) };
@@ -1410,11 +1423,12 @@ async function rankAssetsForContext(store, accountId, characterId, query, embedd
       if (left.score !== null && right.score !== null && left.score !== right.score) return right.score - left.score;
       if (left.score !== null && right.score === null) return -1;
       if (left.score === null && right.score !== null) return 1;
-      return 0;
+      return compareNewestFirst(left.asset, right.asset);
     })
     .map(({ asset }) => asset)
     .filter((asset, index, items) => items.findIndex((item) => item.asset_id === asset.asset_id) === index)
     .slice(0, CONFIRMED_ASSET_TOP_K);
+  return [...guaranteedAssets, ...rankedCompetitive];
 }
 
 // 角色名只在用户明确询问身份时才需要出现。该门禁补充提示词约束：
@@ -1737,9 +1751,13 @@ function publicMessage(message) {
   return { message_id: message.message_id, conversation_id: message.conversation_id, actor: message.actor, text: message.text, attachments: message.attachments ?? [], provider: message.provider ?? null, model_version: message.model_version ?? null, ai_generated: message.ai_generated, world_state_id: message.world_state_id ?? null, world_state_version: message.world_state_version ?? null, created_at: message.created_at };
 }
 
-const FEEDBACK_TYPES = new Set(['OOC', 'MEMORY_ERROR', 'IMAGE_FACE_MISMATCH', 'IMAGE_WARDROBE_ERROR', 'IMAGE_SCENE_CONFLICT', 'UNSAFE_OR_UNCOMFORTABLE']);
+const FEEDBACK_TYPES = new Set(['OOC', 'MEMORY_ERROR', 'IMAGE_FACE_MISMATCH', 'IMAGE_WARDROBE_ERROR', 'IMAGE_SCENE_CONFLICT', 'UNSAFE_OR_UNCOMFORTABLE', 'PRAISE']);
 const FEEDBACK_SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH']);
-function createMessageFeedback(store, account, path, body) {
+// 高光沉淀上限：与 sanitizePersona 的 example_behaviors 上限（10）对齐，超出
+// 淘汰最旧一条（防提示词膨胀与人格漂移）；单条模式文案长度上限。
+const SKILL_EXAMPLE_CAP = 10;
+const SKILL_PATTERN_MAX = 120;
+async function createMessageFeedback(store, account, path, body, skillDistiller = null) {
   // Feedback is a user-controlled correction signal, never an automatic model
   // instruction or relationship-memory write.
   authorize(account, 'DATA_RIGHTS', store);
@@ -1755,7 +1773,38 @@ function createMessageFeedback(store, account, path, body) {
     created_at: new Date().toISOString()
   };
   store.messageFeedback.set(feedback.feedback_id, feedback);
-  return created({ feedback });
+  // 高光沉淀（方向二）：PRAISE 把这条回复提炼为待确认的行为模式候选；用户在
+  // 记忆横幅里确认后写入 persona 下一版本的 example_behaviors。提炼失败回退
+  // 确定性模式文案，不阻断反馈本身；同一消息只产出一个 SKILL 候选。
+  let skillCandidate = null;
+  if (body.type === 'PRAISE') {
+    skillCandidate = [...store.candidates.values()].find((item) => item.account_id === account.account_id && item.type === 'SKILL' && item.source_message_id === message.message_id && item.state === 'CANDIDATE') ?? null;
+    if (!skillCandidate) {
+      const conversation = store.conversations.get(message.conversation_id);
+      if (!conversation) throw apiError(404, 'RESOURCE_NOT_FOUND', '会话不存在');
+      const messages = conversationMessages(store, message.conversation_id);
+      const index = messages.findIndex((item) => item.message_id === message.message_id);
+      const userText = index > 0 && messages[index - 1].actor === 'USER' ? messages[index - 1].text : '';
+      const patternText = (await distillSkillPattern(skillDistiller, { reply: message.text, userText })) ?? `在类似情境下沿用这条回应的表达方式：「${String(message.text ?? '').slice(0, 60)}」`;
+      skillCandidate = {
+        candidate_id: store.next('memc'), account_id: account.account_id, character_id: conversation.character_id,
+        state: 'CANDIDATE', version: 1, type: 'SKILL',
+        normalized_value: { text: patternText }, display_text: patternText,
+        provider: message.provider || null, expires_at: plusDays(30), source_message_id: message.message_id,
+        conflicts_with: []
+      };
+      store.candidates.set(skillCandidate.candidate_id, skillCandidate);
+    }
+  }
+  return created({ feedback, skill_candidate: skillCandidate });
+}
+async function distillSkillPattern(skillDistiller, { reply, userText }) {
+  if (typeof skillDistiller !== 'function') return null;
+  try {
+    const distilled = await skillDistiller({ reply, userText });
+    const pattern = typeof distilled?.pattern_text === 'string' ? distilled.pattern_text.trim() : '';
+    return pattern ? pattern.slice(0, SKILL_PATTERN_MAX) : null;
+  } catch { return null; }
 }
 const TRIAL_FEEDBACK_CATEGORIES = new Set(['ONBOARDING', 'PERSONA', 'MEMORY', 'SAFETY', 'USABILITY', 'OTHER']);
 function createTrialFeedback(store, account, body) {
@@ -2348,6 +2397,72 @@ async function deleteMediaAsset(store, account, path, mediaStore, imageStore) {
   return ok({ media_asset: publicMediaAsset(asset), deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob), revocation_epoch: account.revocation_epoch });
 }
 
+// ---- 结构化偏好档案（沉淀方向一）：确定性注入的称呼/雷区/作息/风格规则 ----
+// 与自由文本关系资产的本质区别：这些规则每次回复 100% 注入提示词（构建于
+// buildMessages 的 preference-data 段），不参与记忆召回竞争、不依赖检索命中。
+const PREFERENCE_TEXT_MAX = 40;
+const PREFERENCE_TABOO_MAX = 20;
+function emptyPreferences() {
+  return { address_terms: { character_to_user: null, user_to_character: null }, taboos: [], schedule: { sleep_at: null, wake_at: null }, style: { reply_length: null, emoji_enabled: null } };
+}
+function sanitizePreferences(input) {
+  if (input === undefined || input === null || typeof input !== 'object' || Array.isArray(input)) throw apiError(400, 'VALIDATION_ERROR', 'preferences 必须是对象');
+  const preferences = emptyPreferences();
+  const address = input.address_terms ?? {};
+  if (typeof address !== 'object' || Array.isArray(address)) throw apiError(400, 'VALIDATION_ERROR', 'address_terms 必须是对象');
+  for (const field of ['character_to_user', 'user_to_character']) {
+    const value = address[field];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string' || !value.trim() || value.trim().length > PREFERENCE_TEXT_MAX) throw apiError(400, 'VALIDATION_ERROR', `address_terms.${field} 必须是不超过 ${PREFERENCE_TEXT_MAX} 字的非空字符串`);
+    preferences.address_terms[field] = value.trim();
+  }
+  if (input.taboos !== undefined && input.taboos !== null) {
+    if (!Array.isArray(input.taboos) || input.taboos.length > PREFERENCE_TABOO_MAX) throw apiError(400, 'VALIDATION_ERROR', `taboos 必须是不超过 ${PREFERENCE_TABOO_MAX} 条的字符串数组`);
+    for (const item of input.taboos) {
+      if (typeof item !== 'string' || !item.trim() || item.trim().length > PREFERENCE_TEXT_MAX) throw apiError(400, 'VALIDATION_ERROR', `taboos 每项必须是不超过 ${PREFERENCE_TEXT_MAX} 字的非空字符串`);
+      preferences.taboos.push(item.trim());
+    }
+  }
+  const schedule = input.schedule ?? {};
+  if (typeof schedule !== 'object' || Array.isArray(schedule)) throw apiError(400, 'VALIDATION_ERROR', 'schedule 必须是对象');
+  for (const field of ['sleep_at', 'wake_at']) {
+    const value = schedule[field];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) throw apiError(400, 'VALIDATION_ERROR', `schedule.${field} 必须是 HH:MM 格式`);
+    preferences.schedule[field] = value;
+  }
+  const style = input.style ?? {};
+  if (typeof style !== 'object' || Array.isArray(style)) throw apiError(400, 'VALIDATION_ERROR', 'style 必须是对象');
+  if (style.reply_length !== undefined && style.reply_length !== null && !['short', 'balanced'].includes(style.reply_length)) throw apiError(400, 'VALIDATION_ERROR', 'style.reply_length 只能是 short 或 balanced');
+  if (style.reply_length) preferences.style.reply_length = style.reply_length;
+  if (style.emoji_enabled !== undefined && style.emoji_enabled !== null) preferences.style.emoji_enabled = Boolean(style.emoji_enabled);
+  return preferences;
+}
+function publicPreferences(record) {
+  const base = emptyPreferences();
+  return {
+    address_terms: { ...base.address_terms, ...(record.address_terms ?? {}) },
+    taboos: [...(record.taboos ?? [])],
+    schedule: { ...base.schedule, ...(record.schedule ?? {}) },
+    style: { ...base.style, ...(record.style ?? {}) },
+    version: record.version ?? 1, updated_at: record.updated_at ?? null
+  };
+}
+function publicPreferencesOrNull(record) { return record ? publicPreferences(record) : null; }
+function getPreferences(store, account, path) {
+  const character = ownCharacter(store, account.account_id, path.split('/')[4]);
+  const record = store.userPreferences?.get(`${account.account_id}:${character.character_id}`);
+  return ok({ preferences: record ? publicPreferences(record) : emptyPreferences() });
+}
+function updatePreferences(store, account, path, body) {
+  const character = ownCharacter(store, account.account_id, path.split('/')[4]);
+  const key = `${account.account_id}:${character.character_id}`;
+  const record = store.userPreferences.get(key) ?? { account_id: account.account_id, character_id: character.character_id, ...emptyPreferences(), version: 0 };
+  Object.assign(record, sanitizePreferences(body?.preferences ?? body), { version: (record.version ?? 0) + 1, updated_at: new Date().toISOString() });
+  store.userPreferences.set(key, record);
+  return ok({ preferences: publicPreferences(record) });
+}
+
 function resolveCandidate(store, account, path, body) {
   authorize(account, 'WRITE_MEMORY', store);
   const parts = path.split('/');
@@ -2369,6 +2484,18 @@ function resolveCandidate(store, account, path, body) {
     return ok({ candidate, undo_until: candidate.rejection_undo_until });
   }
   if (body.expected_version !== candidate.version) throw apiError(409, 'VERSION_CONFLICT', '候选记忆版本冲突');
+  if (candidate.type === 'SKILL') {
+    // 高光沉淀（方向二）：确认行为模式 = 聚合进 persona 下一版本的
+    // example_behaviors（复用"本人编辑即生效"管线），超上限淘汰最旧一条。
+    if (action === 'confirm-edited') candidate.display_text = requiredText(body.display_text, 'display_text').slice(0, SKILL_PATTERN_MAX);
+    const character = ownCharacter(store, account.account_id, candidate.character_id);
+    const currentBehaviors = Array.isArray(character.persona?.example_behaviors) ? character.persona.example_behaviors : [];
+    const replacedOldest = currentBehaviors.length >= SKILL_EXAMPLE_CAP;
+    const nextBehaviors = [...currentBehaviors, candidate.display_text].slice(-SKILL_EXAMPLE_CAP);
+    const result = createPersonaDraft(store, account, `/api/v1/characters/${candidate.character_id}/persona-versions`, { expected_version: character.version, persona: { ...(character.persona ?? {}), example_behaviors: nextBehaviors }, note: `高光沉淀（候选 ${candidate.candidate_id}）` });
+    candidate.state = 'CONFIRMED'; candidate.version += 1;
+    return created({ candidate, persona_version: result.body.persona_version, character: result.body.character, note: replacedOldest ? `示例行为已达 ${SKILL_EXAMPLE_CAP} 条上限，最早的一条已被替换。` : undefined });
+  }
   if (action === 'confirm-edited') {
     candidate.display_text = requiredText(body.display_text, 'display_text');
     candidate.normalized_value = body.normalized_value || { text: candidate.display_text };
