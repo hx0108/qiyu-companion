@@ -1991,7 +1991,23 @@ function renderError() {
   return screen(`<div class="topline"><span class="wordmark">栖语</span><span class="dev-label">M1 local</span></div><div class="error-state"><h2 id="app-title">尚未取得服务端事实</h2><p>${escapeHtml(state.error)}</p><div class="flow-actions"><button class="btn btn-primary" data-action="retry-bootstrap">重试连接本地 API</button></div></div><p class="muted">未接入 API 时，本壳不会显示任何模拟年龄、记忆或删除成功状态。</p>`);
 }
 
-let chatScrollMemory = null; // 上一次对话渲染的 { top, height, viewport, messageCount }
+let chatScrollMemory = null; // 最近一次对话滚动几何 { top, height, viewport, messageCount }
+let chatFollowBottom = true; // true=跟随最新消息；用户上滑回看历史时置 false
+let chatPinToken = 0;
+
+// 贴底必须"同步 + 两帧 rAF"各补一次：iOS WebKit 对刚插入元素的 scrollTop
+// 赋值可能不生效（视图停在顶部=跳回最早对话），且随后键盘/图片加载还会
+// 改变几何；token 保证只有最新一次贴底有效。
+function pinChatToBottom(scroller) {
+  scroller.scrollTop = scroller.scrollHeight;
+  const token = ++chatPinToken;
+  requestAnimationFrame(() => { if (token === chatPinToken) scroller.scrollTop = scroller.scrollHeight; });
+  requestAnimationFrame(() => {
+    if (token !== chatPinToken) return;
+    scroller.scrollTop = scroller.scrollHeight;
+    chatScrollMemory = { top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight, messageCount: state.messages.length };
+  });
+}
 
 function render() {
   document.documentElement.dataset.qyTheme = state.theme;
@@ -2024,16 +2040,24 @@ function render() {
   const scrollMemory = prevScroller
     ? { top: prevScroller.scrollTop, height: prevScroller.scrollHeight, viewport: prevScroller.clientHeight, messageCount: chatScrollMemory?.messageCount ?? state.messages.length }
     : null;
+  const hadFocusedMessageInput = document.activeElement?.getAttribute?.("name") === "message";
   app.innerHTML = view + renderContinuousReminder() + undoMemory + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
   if (state.route === "chat") {
     const scroller = app.querySelector(".chat-scroll");
     if (scroller) {
       const grew = !scrollMemory || state.messages.length !== scrollMemory.messageCount;
-      const wasAtBottom = !scrollMemory || scrollMemory.height - scrollMemory.top - scrollMemory.viewport < 160;
-      if (grew || wasAtBottom) scroller.scrollTop = scroller.scrollHeight;
-      else scroller.scrollTop = Math.min(scrollMemory.top, scroller.scrollHeight);
-      chatScrollMemory = { top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight, messageCount: state.messages.length };
+      if (grew || chatFollowBottom || !scrollMemory || scrollMemory.height - scrollMemory.top - scrollMemory.viewport < 160) {
+        chatFollowBottom = true;
+        pinChatToBottom(scroller);
+      } else {
+        chatFollowBottom = false;
+        scroller.scrollTop = Math.min(scrollMemory.top, scroller.scrollHeight);
+        chatScrollMemory = { top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight, messageCount: state.messages.length };
+      }
     }
+    // 全量重渲染会销毁聚焦的输入框（键盘反复弹收、几何抖动）；
+    // 若之前正在输入，恢复焦点且不触发滚动。
+    if (hadFocusedMessageInput) app.querySelector('#message-form [name="message"]')?.focus({ preventScroll: true });
     const holdButton = app.querySelector('[data-action="hold-asr"]');
     if (holdButton && state.asrRecording?.state === "recording") {
       holdButton.classList.add("recording");
@@ -2204,6 +2228,26 @@ document.addEventListener("click", (event) => {
   if (action === "delete-message-audio") deleteMessageAudio(state.messages.find((message) => String(messageId(message)) === button.dataset.messageId));
 });
 
+// 对话滚动交互（capture 监听 #app 内所有滚动）：用户上滑离开底部 → 停止跟随
+// 并刷新记忆（render 保持其阅读位置）；滚回底部 → 恢复跟随。
+app.addEventListener("scroll", (event) => {
+  if (state.route !== "chat") return;
+  const scroller = event.target;
+  if (!(scroller instanceof Element) || !scroller.classList.contains("chat-scroll")) return;
+  const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  chatScrollMemory = { top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight, messageCount: state.messages.length };
+  if (distance > 160) chatFollowBottom = false;
+  else if (!chatFollowBottom && distance <= 160) chatFollowBottom = true;
+}, true);
+// WebKit 没有滚动锚定：聊天图片等 blob 异步加载完成会在视口上方撑高内容，
+// 把画面顶离最新消息；跟随模式下图片加载完成后重新贴底。
+app.addEventListener("load", (event) => {
+  if (state.route !== "chat" || !chatFollowBottom) return;
+  if (!(event.target instanceof HTMLImageElement) || !event.target.closest(".chat-scroll")) return;
+  const scroller = app.querySelector(".chat-scroll");
+  if (scroller) scroller.scrollTop = scroller.scrollHeight;
+}, true);
+
 // 软键盘处理（2026-09-13 修复）：安卓各家内核对键盘的视口响应不一致——有的压缩
 // 布局视口（innerHeight 变小），有的只缩可视视口（visualViewport.height 变小），
 // 还有的 100dvh 滞后不缩，文档比可视区高出一截，输入行与键盘之间露出页面尾巴
@@ -2236,6 +2280,12 @@ function syncKeyboardInset() {
   }
   document.body.classList.toggle("qy-keyboard-open", open);
   if (!open) keyboardBaseline.height = window.innerHeight;
+  // 键盘开合只改 CSS 变量、不走 render，但 .chat-scroll 的可视高度已变：
+  // 跟随模式下重新贴底，否则画面停留在"离底一个键盘高度"的位置。
+  if (state.route === "chat" && chatFollowBottom) {
+    const scroller = app.querySelector(".chat-scroll");
+    if (scroller) pinChatToBottom(scroller);
+  }
 }
 window.addEventListener("resize", syncKeyboardInset);
 window.visualViewport?.addEventListener("resize", syncKeyboardInset);

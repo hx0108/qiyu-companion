@@ -126,6 +126,13 @@ async function main() {
         await page.waitForFunction(() => document.body.innerText.includes('开发 Mock 已收到'), null, { timeout: 15_000 });
       // 滚动交互：回复渲染后对话必须停留在最新消息，不得跳回最早对话。
       await page.waitForFunction(() => { const el = document.querySelector('.chat-scroll'); return el && el.scrollHeight - el.scrollTop - el.clientHeight < 160; }, null, { timeout: 15_000 });
+      // 回看保护：手动滚到顶部再触发重渲染（日夜主题切换），阅读位置必须保持。
+      await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); el.scrollTop = 0; });
+      await page.locator('[data-action="toggle-theme"]').click();
+      await page.locator('[data-action="toggle-theme"]').click();
+      const preserved = await page.evaluate(() => document.querySelector('.chat-scroll').scrollTop < 60);
+      assert(preserved, '回看历史时重渲染不得改变阅读位置');
+      await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); el.scrollTop = el.scrollHeight; });
       }
     });
 

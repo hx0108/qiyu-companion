@@ -81,7 +81,7 @@
 .qiyu-prototype .ai-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--qy-rose); }
 .qiyu-prototype .icon-btn { width: 44px; height: 44px; min-width: 44px; display: grid; place-items: center; border: 0; border-radius: 50%; color: currentColor; background: transparent; }
 .qiyu-prototype .icon-btn.soft { background: rgba(91,54,83,.06); }
-.qiyu-prototype .chat-scroll { flex: 1; overflow: auto; padding: 8px 18px 155px; position: relative; z-index: 2; }
+.qiyu-prototype .chat-scroll { flex: 1; overflow: auto; padding: 8px 18px 155px; position: relative; z-index: 2; overflow-anchor: none; }
 .qiyu-prototype .date-rule { display: flex; gap: 10px; align-items: center; margin: 7px 0 16px; color: #96888f; font-size: 9px; letter-spacing: .1em; }
 .qiyu-prototype .date-rule::before, .qiyu-prototype .date-rule::after { content: ""; height: 1px; flex: 1; background: var(--qy-line); }
 .qiyu-prototype .scene-state { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; padding: 13px 14px; border: 1px solid var(--qy-line); border-radius: 18px; background: rgba(255,255,255,.45); }
