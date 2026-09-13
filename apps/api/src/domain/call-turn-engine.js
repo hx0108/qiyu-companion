@@ -54,11 +54,8 @@ async function executeGreeting(deps, { store, account, call, emit, signal }) {
   const moodRecord = store.worldStates.get(call.character_id);
   const speech = createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId, turnId: null, moodRecord });
   emit('call.turn.text', { turn_id: null, sequence: 1, text: greeting.text });
-  try {
-    await speech.speakSentence(truncateForTts(sanitizeTtsText(greeting.text)));
-  } catch {
-    // 问候语音失败（额度/供应商）不阻断通话：字幕已在客户端，用户可直接说话。
-  }
+  // 问候语音失败（额度/供应商）不阻断通话：字幕已在客户端，用户可直接说话。
+  speech.speakSentence(truncateForTts(sanitizeTtsText(greeting.text)));
   const assistantMessage = buildAssistantMessage(deps, store, account, conversation, {
     message_id: assistantMessageId, text: greeting.text, provider: 'call-greeting', model_version: 'call-greeting-v1', ai_generated: false
   }, call);
@@ -242,7 +239,7 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
     ctx.emittedTexts.push(visibleFragment);
     emit('call.turn.text', { turn_id: turn.turn_id, sequence: textSequence, text: visibleFragment });
     const ttsText = truncateForTts(sanitizeTtsText(visibleFragment));
-    if (ttsText) await ctx.speech.speakSentence(ttsText);
+    if (ttsText) ctx.speech.speakSentence(ttsText); // 流水线：合成入队即返回，不阻塞下一句
     return true;
   };
   let modelReply;
@@ -286,7 +283,7 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
     textSequence += 1;
     ctx.emittedTexts.push(OUTPUT_GUARD_REPLY_TEXT);
     emit('call.turn.text', { turn_id: turn.turn_id, sequence: textSequence, text: OUTPUT_GUARD_REPLY_TEXT });
-    await ctx.speech.speakSentence(truncateForTts(sanitizeTtsText(OUTPUT_GUARD_REPLY_TEXT)));
+    ctx.speech.speakSentence(truncateForTts(sanitizeTtsText(OUTPUT_GUARD_REPLY_TEXT)));
   } else if (ctx.emittedTexts.length === 0) {
     // 流式片段全被门禁拦截但终稿复核通过（如全部只有动作描写）：终稿直接落库，
     // 可朗读部分照常合成，保证通话不“哑火”。
@@ -294,7 +291,7 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
     ctx.emittedTexts.push(finalText);
     emit('call.turn.text', { turn_id: turn.turn_id, sequence: textSequence, text: finalText });
     const ttsText = truncateForTts(sanitizeTtsText(finalText));
-    if (ttsText) await ctx.speech.speakSentence(ttsText);
+    if (ttsText) ctx.speech.speakSentence(ttsText);
   }
   const usage = usageCommit(modelReply);
   const settled = await ctx.speech.settle();
@@ -316,7 +313,7 @@ async function speakFixedReply(deps, { store, account, call, turn, emit, signal,
   const assistantMessage = buildAssistantMessage(deps, store, account, ctx.conversation, { message_id: ctx.assistantMessageId, text, provider, model_version, ai_generated: false }, call);
   store.messages.set(assistantMessage.message_id, assistantMessage);
   ctx.partialPersisted = true;
-  await ctx.speech.speakSentence(truncateForTts(sanitizeTtsText(text)));
+  ctx.speech.speakSentence(truncateForTts(sanitizeTtsText(text)));
   const settled = await ctx.speech.settle();
   settleTurnSafely(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: new Date() });
   emit('call.turn.completed', { turn_id: turn.turn_id, user_message_id: turn.user_message_id, assistant_message_id: assistantMessage.message_id, tts_job_id: settled.job?.job_id ?? null, usage: null, tts_degraded: Boolean(settled.job?.failure_code) });
@@ -354,11 +351,13 @@ async function closeAsrJob(deps, store, ctx, failureCode) {
 
 // 懒创建 TTS job（首个可合成片段出现时）+ 懒额度预留 min(90s,余额)（不阻塞
 // LLM 启动）。音频段到即 emit（回合首段打 AIGC 标识）；单句失败降级纯文字；
-// signal abort 向上抛（打断传播到 WS，计费立即停止）。TTS 未配置时返回惰性
-// 通道（纯文字通话）。settle 幂等：打断与失败路径可能重复触达。
+// signal abort 停止合成队列（打断传播到 WS，计费立即停止；中止经 generateStream
+// 与 signal 检查向上传播，队列自身不抛）。speakSentence 只入队立即返回：第 N+1
+// 句的合成与第 N 句的播放/LLM 流水线重叠，消除句间空拍（卡顿根因）。
+// settle 幂等：会先等合成队列排空再落资产与结算。
 function createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId, turnId, moodRecord }) {
   if (typeof deps.ttsGenerator !== 'function') {
-    return { notePolicyVersion() {}, async speakSentence() { return false; }, async settle() { return { job: null, committedSeconds: 0 }; } };
+    return { notePolicyVersion() {}, speakSentence() {}, async settle() { return { job: null, committedSeconds: 0 }; } };
   }
   const voiceGender = deps.normalizePersonaGender(store.characters.get(call.character_id)?.persona?.gender);
   const voiceProfile = deps.resolvedTtsVoiceProfile(deps.ttsGenerator, voiceGender);
@@ -376,6 +375,7 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
   let providerRequestId = null;
   let policyVersion = null;
   let settledResult = null;
+  let chain = Promise.resolve();
   const ensureJob = () => {
     if (job) return job;
     job = {
@@ -397,46 +397,50 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
     job.state = 'RUNNING'; job.attempts = 1;
     return job;
   };
+  const synthesizeOne = async (ttsText) => {
+    if (signal?.aborted) return;
+    if (failureCode) return; // 已降级纯文字：后续句子不再合成
+    const currentJob = ensureJob();
+    const sessionId = `${currentJob.job_id}_${spokenTexts.length + 1}`;
+    const startedAt = Date.now();
+    try {
+      const aggregate = await synthesizeSpeech(deps, {
+        text: ttsText, sessionId, gender: voiceGender,
+        emotion: baseEmotion.category, intensity: baseEmotion.intensity, speed: baseEmotion.speed,
+        onAudioSegment: (segment) => {
+          segmentCount += 1;
+          // AIGC 标识（ID3v2.3）只写回合首段；后续段是裸 MP3 帧，拼接可播。
+          const payload = segmentCount === 1 ? tagWithAigcMetadata(segment) : segment;
+          byteLength += payload.length;
+          emit('call.turn.audio', {
+            turn_id: turnId, sequence: segmentCount, segment_index: segmentCount - 1,
+            format: 'mp3', audio_base64: payload.toString('base64'), last: false
+          });
+        },
+        signal
+      });
+      recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'COMPLETED' });
+      spokenTexts.push(ttsText);
+      aggregateChunks.push(aggregate.asset.bytes);
+      seconds += deps.estimateTtsSeconds(ttsText);
+      providerRequestId = aggregate.providerRequestId;
+    } catch (error) {
+      recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'FAILED' });
+      // 中止（打断/挂断）：停止后续句子的合成，队列排空；中止本身经 generateStream
+      // 与 signal 检查向上传播，不再从队列抛出。其余失败（含额度不足）降级纯文字。
+      failureCode = error?.code || 'TTS_GENERATION_FAILED';
+    }
+  };
   return {
     notePolicyVersion(version) { policyVersion = version; if (job) job.moderation_policy_version = version; },
-    async speakSentence(ttsText) {
-      if (failureCode) return false; // 已降级纯文字：后续句子不再合成
-      const currentJob = ensureJob();
-      const sessionId = `${currentJob.job_id}_${spokenTexts.length + 1}`;
-      const startedAt = Date.now();
-      try {
-        const aggregate = await synthesizeSpeech(deps, {
-          text: ttsText, sessionId, gender: voiceGender,
-          emotion: baseEmotion.category, intensity: baseEmotion.intensity, speed: baseEmotion.speed,
-          onAudioSegment: (segment) => {
-            segmentCount += 1;
-            // AIGC 标识（ID3v2.3）只写回合首段；后续段是裸 MP3 帧，拼接可播。
-            const payload = segmentCount === 1 ? tagWithAigcMetadata(segment) : segment;
-            byteLength += payload.length;
-            emit('call.turn.audio', {
-              turn_id: turnId, sequence: segmentCount, segment_index: segmentCount - 1,
-              format: 'mp3', audio_base64: payload.toString('base64'), last: false
-            });
-          },
-          signal
-        });
-        recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'COMPLETED' });
-        spokenTexts.push(ttsText);
-        aggregateChunks.push(aggregate.asset.bytes);
-        seconds += deps.estimateTtsSeconds(ttsText);
-        providerRequestId = aggregate.providerRequestId;
-        return true;
-      } catch (error) {
-        recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'FAILED' });
-        if (signal?.aborted || error?.code === 'TENCENT_TTS_STREAM_ABORTED') throw error;
-        // 打断向上传播；其余失败（含额度不足）降级纯文字，回合继续。
-        failureCode = error?.code || 'TTS_GENERATION_FAILED';
-        return false;
-      }
+    // 非阻塞：入队立即返回（LLM 片段不被 TTS 合成背压阻塞）。
+    speakSentence(ttsText) {
+      chain = chain.then(() => synthesizeOne(ttsText));
     },
-    // 终局：实际合成字节的拼接资产落库（回放复用）+ 额度按实际量结算。
+    // 终局：等合成队列排空 → 实际合成字节的拼接资产落库（回放复用）+ 额度按实际量结算。
     async settle() {
       if (settledResult) return settledResult;
+      await chain.catch(() => {});
       if (!job) { settledResult = { job: null, committedSeconds: 0 }; return settledResult; }
       job.tts_text = spokenTexts.join('');
       job.provider_request_id = providerRequestId;

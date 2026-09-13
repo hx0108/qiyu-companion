@@ -23,12 +23,33 @@ const { fetchTencentGeneratedImage } = require('../src/media/tencent-image-resul
 const { MediaEntitlementService } = require('../src/domain/media-entitlement-service');
 const { createControlledPng } = require('./controlled-probe-png');
 
+// 2 秒 16k PCM16 连续正弦（640Hz、幅值 0.25）：Chromium 以 --use-file-for-
+// fake-audio-capture 循环播放，为免提 VAD 提供恒定高于阈值的能量。
+function writeContinuousToneWav(filePath, { seconds = 2, rate = 16_000 } = {}) {
+  const samples = rate * seconds;
+  const pcm = Buffer.alloc(samples * 2);
+  for (let index = 0; index < samples; index += 1) {
+    pcm.writeInt16LE(Math.round(Math.sin((2 * Math.PI * 640 * index) / rate) * 0.25 * 0x7fff), index * 2);
+  }
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0); header.writeUInt32LE(36 + pcm.length, 4); header.write('WAVE', 8);
+  header.write('fmt ', 12); header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(rate, 24); header.writeUInt32LE(rate * 2, 28); header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34);
+  header.write('data', 36); header.writeUInt32LE(pcm.length, 40);
+  fs.writeFileSync(filePath, Buffer.concat([header, pcm]));
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(`断言失败：${message}`);
 }
 
 async function main() {
   const { chromium } = require('playwright-core');
+
+  // 假麦克风音源：Chromium 默认假设备是间歇蜂鸣（<250ms），免提自动开回合需要
+  // ≥250ms 持续起说能量，必须换成受控的连续正弦（640Hz、幅值 0.25、2 秒循环）。
+  const fakeMicWav = path.join(require('node:os').tmpdir(), 'qiyu-e2e-fake-mic.wav');
+  writeContinuousToneWav(fakeMicWav);
   const realQwen = process.env.QIYU_E2E_REAL_QWEN === '1';
   const realTencentMedia = process.env.QIYU_E2E_REAL_TENCENT_MEDIA === '1';
   if (realTencentMedia && !realQwen) throw new Error('QIYU_E2E_REAL_TENCENT_MEDIA=1 requires QIYU_E2E_REAL_QWEN=1.');
@@ -39,7 +60,7 @@ async function main() {
   const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
+  const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${fakeMicWav.replace(/\\/g, '/')}`] });
   const page = await browser.newPage();
   const consoleErrors = [];
   const expectedFailures = [];
@@ -173,7 +194,7 @@ async function main() {
     }
 
     if (!realTencentMedia) {
-      await step('语音通话：发起→问候字幕→点击说话边录边传→转写与回复→挂断→通话记录卡片', async () => {
+      await step('语音通话（免提）：发起→静默监听自动开回合→边录边传→静音断句→转写与回复→挂断→通话记录卡片', async () => {
         // 通话受理前有语音额度预检：先开通 7 天完整体验（ASR 10 分钟 / TTS 30 分钟）。
         const trialResponse = await fetch(`${base}/api/v1/subscription-trials`, {
           method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': 'e2e-call-trial' }, body: '{}'
@@ -183,8 +204,18 @@ async function main() {
         const asrAssetsBefore = [...store.mediaAssets.values()].filter((item) => item.type === 'ASR_INPUT_AUDIO').length;
         const beforeUsage = [...store.dailyChatUsage.values()].reduce((sum, item) => sum + item.chat_rounds, 0);
         const beforeCalls = store.callSessions.size;
-        // 字幕是逐事件瞬时替换的，DOM 轮询会错过中间态：在页面内克隆 SSE 响应体，
-        // 挂断后对线上事件断言（Playwright 的 response.text() 对长流可能拿不到全量）。
+        const beforeTurns = store.callTurns.size;
+        // 服务端事实轮询：免提状态机的终局以落库为准（DOM 不再展示字幕）。
+        const waitForStore = async (predicate, timeout, label) => {
+          const started = Date.now();
+          while (Date.now() - started < timeout) {
+            if (predicate()) return;
+            await page.waitForTimeout(200);
+          }
+          assert(false, `等待超时：${label}`);
+        };
+        // 线上事件断言：在页面内克隆 SSE 响应体（Playwright 的 response.text()
+        // 对长流可能拿不全）。
         await page.evaluate(() => {
           window.__sseTexts = [];
           const originalFetch = window.fetch.bind(window);
@@ -199,14 +230,45 @@ async function main() {
         });
         await page.locator('[data-action="start-call"]').click();
         await page.waitForSelector('.call-screen', { timeout: 15_000 });
-        await page.waitForFunction(() => document.getElementById('call-subtitle')?.textContent?.includes('：'), null, { timeout: 15_000 });
-        // 假麦克风是持续音源（不会静音断句）：点按开始 → 攒满 2 秒分块 → 再次点按结束。
-        await page.locator('[data-action="call-speak"]').click();
-        await page.waitForFunction(() => document.getElementById('call-speak-label')?.textContent === '结束这句', null, { timeout: 15_000 });
-        await page.waitForTimeout(2_300);
-        await page.locator('[data-action="call-speak"]').click();
-        // 回合回到「点击说话」= 终局事件已到；事件明细随后按 SSE 响应体断言。
-        await page.waitForFunction(() => document.getElementById('call-speak-label')?.textContent === '点击说话', null, { timeout: 20_000 });
+        // 免提核心：接通后假麦克风是持续音源，监听态应自动开回合（无需任何按键）。
+        try {
+          await waitForStore(() => [...store.callTurns.values()].some((turn) => turn.state === 'UPLOADING'), 15_000, '免提自动开回合（假音源持续起说能量）');
+        } catch (error) {
+          const dump = await page.evaluate(() => ({
+            phase: window.__qiyuCall?.phase ?? null,
+            muted: window.__qiyuCall?.muted ?? null,
+            hasMic: Boolean(window.__qiyuCall?.mic),
+            lastRms: window.__qiyuCall?.mic?.lastRms ?? null,
+            bucketLen: window.__qiyuCall?.mic?.bucket?.length ?? null,
+            uploading: window.__qiyuCall?.mic?.uploading ?? null,
+            status: document.getElementById('call-status')?.textContent ?? null,
+            contextState: window.__qiyuCall?.context?.state ?? null,
+            callId: window.__qiyuCall?.call?.call_id ?? null,
+            turn: window.__qiyuCall?.turn?.turn_id ?? null,
+            lastTurnError: window.__qiyuCall?.lastTurnError ?? null
+          }));
+          console.error('[call-debug]', JSON.stringify(dump));
+          throw error;
+        }
+        await page.waitForTimeout(2_600); // 攒满至少一个 2 秒分块上传
+        // 静音 = 说完了：结束当前回合并暂停聆听（也防止音源引发下一个自动回合）。
+        await page.locator('[data-action="call-mute"]').click();
+        try {
+          await waitForStore(() => [...store.callTurns.values()].some((turn) => turn.state === 'COMPLETED'), 20_000, '回合自动断句后 COMPLETED');
+        } catch (error) {
+          const dump = await page.evaluate(() => ({
+            phase: window.__qiyuCall?.phase ?? null,
+            muted: window.__qiyuCall?.muted ?? null,
+            turnId: window.__qiyuCall?.turn?.turn_id ?? null,
+            turnState: window.__qiyuCall?.turn?.state ?? null,
+            lastTurnError: window.__qiyuCall?.lastTurnError ?? null,
+            sseCount: (window.__sseTexts ?? []).length,
+            sseText: (window.__sseTexts ?? []).map((text) => text.slice(0, 160)).join(' || ').slice(0, 400),
+            status: document.getElementById('call-status')?.textContent ?? null
+          }));
+          console.error('[call-debug-finish]', JSON.stringify(dump), 'serverTurns=', JSON.stringify([...store.callTurns.values()].map((turn) => ({ id: turn.turn_id, state: turn.state }))));
+          throw error;
+        }
         await page.locator('[data-action="call-hangup"]').click();
         await page.waitForSelector('.call-record-card', { timeout: 15_000 });
         const card = await page.locator('.call-record-card').last().innerText();
@@ -215,14 +277,15 @@ async function main() {
         const sseText = await page.evaluate(() => window.__sseTexts.join('\n'));
         assert(sseText.includes('call.turn.accepted'), 'SSE 应有 accepted 事件');
         assert(sseText.includes('"kind":"greeting"'), '问候流应标记 kind=greeting');
-        assert(sseText.includes('call.turn.transcript') && sseText.includes('这是一段浏览器录音。'), 'SSE 应有转写字幕事件');
+        assert(sseText.includes('call.turn.transcript') && sseText.includes('这是一段浏览器录音。'), 'SSE 应有转写事件');
         assert(sseText.includes('call.turn.text'), 'SSE 应有回复字幕事件');
         assert(sseText.includes('call.turn.completed'), 'SSE 应有 completed 终局事件');
-        // 服务端事实：ENDED 终态、回合 COMPLETED、无新增 ASR_INPUT_AUDIO 资产、额度按实际结算。
+        // 服务端事实：ENDED 终态、恰好一个 COMPLETED 回合、无新增 ASR_INPUT_AUDIO 资产。
         assert(store.callSessions.size === beforeCalls + 1, '应恰好新增一场通话');
         const call = [...store.callSessions.values()].at(-1);
         assert(call.state === 'ENDED' && call.end_reason === 'USER_HANGUP', `通话应 ENDED/USER_HANGUP：${call.state}/${call.end_reason}`);
         const turns = [...store.callTurns.values()].filter((turn) => turn.call_id === call.call_id);
+        assert(store.callTurns.size === beforeTurns + 1, `静音后不得再自动开回合：${store.callTurns.size - beforeTurns} 个`);
         assert(turns.length === 1 && turns[0].state === 'COMPLETED', `回合应 COMPLETED：${turns.map((turn) => turn.state).join(',')}`);
         assert(turns[0].audio_bytes > 0 && turns[0].chunk_count >= 1, '边录边传的音频应有字节与分块落账');
         const asrAssetsAfter = [...store.mediaAssets.values()].filter((item) => item.type === 'ASR_INPUT_AUDIO').length;

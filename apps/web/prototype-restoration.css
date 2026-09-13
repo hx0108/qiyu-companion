@@ -170,24 +170,27 @@ body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-nav { display: none; }
 #app > .toast { z-index: 60; bottom: calc(88px + env(safe-area-inset-bottom)); }
 @media (max-width: 393px) { .qiyu-prototype .content { padding-right: 18px; padding-left: 18px; }.qiyu-prototype .bottom-action { padding-right: 18px; padding-left: 18px; } }
 
-/* ---- 1:1 通话页（route="call"）：全屏立绘 + 声波脉冲 + 说话/挂断两键 ---- */
+/* 聊天页头部右侧动作组：拨打与日夜主题并排紧贴（避免 space-between 把中间按钮挤远） */
+.qiyu-prototype .app-header .header-actions { display: flex; align-items: center; gap: 10px; }
+
+/* ---- 1:1 通话页（route="call"，免提）：全屏立绘 + 声波脉冲 + 静音/挂断两键 ---- */
 .qiyu-prototype.call-screen { display: flex; flex-direction: column; height: var(--qy-app-height, calc(100dvh - 28px)); min-height: var(--qy-app-height, calc(100dvh - 28px)); padding: calc(14px + env(safe-area-inset-top)) 22px calc(20px + env(safe-area-inset-bottom)); }
 .qiyu-prototype.call-screen .call-top { display: flex; align-items: center; justify-content: space-between; color: var(--qy-muted); font-size: 11px; letter-spacing: .06em; }
 .qiyu-prototype.call-screen .call-top .wordmark { font: 500 13px var(--qy-font-serif); color: var(--qy-ink); }
 .qiyu-prototype.call-screen .call-timer { font-variant-numeric: tabular-nums; }
-.qiyu-prototype.call-screen .call-stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; }
-.qiyu-prototype.call-screen .call-avatar { position: relative; width: 148px; height: 148px; margin-bottom: 6px; }
+.qiyu-prototype.call-screen .call-stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; }
+.qiyu-prototype.call-screen .call-avatar { position: relative; width: 168px; height: 168px; margin-bottom: 6px; }
 .qiyu-prototype.call-screen .call-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; border: 3px solid rgba(255,255,255,.75); box-shadow: 0 16px 38px rgba(91,54,83,.3); }
 .qiyu-prototype.call-screen .call-pulse { position: absolute; inset: -9px; border-radius: 50%; border: 2px solid rgba(146,94,120,.55); opacity: 0; }
 .qiyu-prototype.call-screen .call-pulse[data-active="true"] { animation: qy-call-pulse 1.6s ease-out infinite; }
 @keyframes qy-call-pulse { 0% { transform: scale(.92); opacity: .8; } 100% { transform: scale(1.22); opacity: 0; } }
 .qiyu-prototype.call-screen h2 { margin: 0; font: 500 24px/1.2 var(--qy-font-serif); }
-.qiyu-prototype.call-screen .call-status { margin: 0; color: var(--qy-muted); font-size: 12px; }
-.qiyu-prototype.call-screen .call-subtitle { min-height: 44px; max-width: 300px; margin: 2px 0 0; color: var(--qy-ink); font-size: 13px; line-height: 1.55; }
+.qiyu-prototype.call-screen .call-status { min-height: 20px; margin: 0; color: var(--qy-muted); font-size: 12px; }
 .qiyu-prototype.call-screen .call-controls { display: flex; gap: 34px; align-items: center; justify-content: center; padding: 10px 0 2px; }
 .qiyu-prototype.call-screen .call-key { min-width: 84px; display: flex; flex-direction: column; align-items: center; gap: 7px; border: 0; color: inherit; background: transparent; font-size: 11px; cursor: pointer; }
 .qiyu-prototype.call-screen .call-key-icon { width: 66px; height: 66px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--qy-plum); box-shadow: 0 12px 26px rgba(91,54,83,.34); }
 .qiyu-prototype.call-screen .call-key:active .call-key-icon { transform: scale(.94); }
+.qiyu-prototype.call-screen .call-key.mute.muted .call-key-icon { background: #8d8089; box-shadow: 0 10px 20px rgba(60,52,58,.28); }
 .qiyu-prototype.call-screen .call-key.hangup .call-key-icon { background: #a63a4c; box-shadow: 0 12px 26px rgba(120,38,56,.36); }
 .qiyu-prototype.call-screen .call-quota { margin: 6px 0 0; color: var(--qy-muted); font-size: 10px; text-align: center; }
 .qiyu-prototype.call-screen.night .call-status, .qiyu-prototype.call-screen.night .call-top, .qiyu-prototype.call-screen.night .call-quota { color: var(--qy-night-muted); }

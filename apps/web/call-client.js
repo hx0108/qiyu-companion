@@ -1,28 +1,28 @@
 'use strict';
 
-// 1:1 通话常驻引擎（独立于 app.js 的 render 全量重建）：
-// - 骨架只渲染一次，HUD/字幕/计时由 onEvent 回调定点更新；音频走 AudioContext，
-//   不进 DOM，全量重渲染不破坏通话。
-// - 「点击说话」一级交互：点按开始说话，边录边传（每 2 秒自封带头 WAV 分块，
-//   与语音消息共用 encodePcm16Wav 编码口径）；VAD 静默 700ms 自动断句，再次
-//   点按可提前结束。
-// - 打断（barge-in）：AI 播报中点按说话键 = 停播 + 中止当前回合 SSE fetch
-//   （服务端断开即按 INTERRUPTED 结算）；播放期 VAD 检出 300ms 持续高能量也
-//   会自动打断——阈值更高且打断后 800ms 冷却，防 AEC 残留自打断循环。
-// - 断线恢复：回合 SSE 10 秒无事件自动 GET /calls/{id} 对账，服务端事实优先；
-//   服务端已终局则就地恢复待说状态，通话已结束则如实呈现。
+// 1:1 通话常驻引擎（豆包式免提交互，独立于 app.js 的 render 全量重建）：
+// - 接通即常开麦克风：能量监测全程运行，用户随时开口即自动开回合（250ms 持续
+//   起说能量），静默 700ms 自动断句——全程免按键；AI 播报中开口 = 打断（更高
+//   阈值 + 300ms 持续能量 + 800ms 冷却防 AEC 残留自打断循环）。
+// - 静音键：免提的唯一切换（静音 = 结束当前回合并暂停聆听）；挂断键独立。
+// - 无缝播放：段落在任意 MP3 帧边界时与下一段拼接重试解码；按 AudioContext
+//   时钟精确排程（nextStart 链），消除 onended 链式起播的句间空拍。
+// - 断线恢复：回合 SSE 10 秒无事件自动 GET /calls/{id} 对账，服务端事实优先。
+// - 骨架只渲染一次，状态由 onEvent 定点更新；音频走 AudioContext 不进 DOM。
 
 import { encodePcm16Wav } from './media-input.js';
 
 export const CALL_SAMPLE_RATE = 16_000;
 export const CALL_CHUNK_MS = 2_000;
 export const CALL_CHUNK_SAMPLES = CALL_SAMPLE_RATE * (CALL_CHUNK_MS / 1000);
-export const CALL_VAD_SPEAK_THRESHOLD = 0.045; // 静默监听期起说能量（RMS）
+export const CALL_MAX_PRE_ROLL_MS = 12_000; // 未开回合时的预录缓冲上限（打断后语音开头不丢）
+export const CALL_VAD_SPEAK_THRESHOLD = 0.045; // 起说能量（RMS）
 export const CALL_VAD_SILENCE_MS = 700; // 静默断句
+export const CALL_AUTO_START_MS = 250; // 持续起说多久自动开回合
 export const CALL_BARGE_IN_THRESHOLD = 0.12; // 播放期更高阈值（防 AEC 残留）
 export const CALL_BARGE_IN_HOLD_MS = 300; // 持续高能量才判打断
 export const CALL_BARGE_IN_COOLDOWN_MS = 800; // 打断后冷却，抑制回声尾
-export const CALL_MAX_UTTERANCE_MS = 50_000; // 客户端强制断句（服务端 2MB 触顶更早）
+export const CALL_MAX_UTTERANCE_MS = 50_000; // 单次发言强制断句（服务端 2MB 触顶更早）
 export const CALL_IDLE_RECONCILE_MS = 10_000; // SSE 无事件对账时限
 
 function concatBytes(chunks) {
@@ -74,16 +74,17 @@ function rmsOf(samples) {
   return Math.sqrt(sum / Math.max(1, samples.length));
 }
 
-// 播放管线：逐段 decodeAudioData → AudioBufferSourceNode 无缝排队；分段落在
-// 任意 MP3 帧边界时单独解码可能失败——留在缓冲与下一段拼接重试（通话后回放
-// 由服务端聚合资产兜底，不依赖本端拼接）。stopAll 即打断：立即静音并清队。
+// 播放管线：逐段 decodeAudioData（帧不完整时与下一段拼接重试）→ 按
+// AudioContext 时钟精确排程的零间隙队列。
 export class AudioOutPipeline {
   constructor({ onAudibleChange = () => {} } = {}) {
     this.context = null;
     this.pending = [];
     this.pendingBytes = [];
-    this.playing = null;
+    this.sources = [];
+    this.nextStart = 0;
     this.stopped = false;
+    this.decoding = false;
     this.onAudibleChange = onAudibleChange;
   }
 
@@ -93,52 +94,62 @@ export class AudioOutPipeline {
     return this.context;
   }
 
-  get audible() { return Boolean(this.playing) || this.pending.length > 0; }
+  get audible() { return this.pending.length > 0 || this.sources.length > 0 || this.decoding; }
 
   async enqueueMp3(bytes) {
     if (this.stopped) return;
     this.pendingBytes.push(bytes);
-    while (this.pendingBytes.length) {
-      const merged = concatBytes(this.pendingBytes);
-      try {
-        const buffer = await this.ensureContext().decodeAudioData(merged.slice().buffer);
-        this.pendingBytes = [];
-        this.pending.push(buffer);
-        this.pump();
-      } catch {
-        break; // 帧不完整：等下一段拼接重试
+    this.decoding = true;
+    try {
+      while (this.pendingBytes.length) {
+        const merged = concatBytes(this.pendingBytes);
+        try {
+          const buffer = await this.ensureContext().decodeAudioData(merged.slice().buffer);
+          this.pendingBytes = [];
+          this.pending.push(buffer);
+          this.pump();
+        } catch {
+          break; // 帧不完整：等下一段拼接重试
+        }
       }
-    }
+    } finally { this.decoding = false; }
   }
 
+  // 零间隙排程：新段从上一段的精确结束时刻起播（硬件时钟），而不是等
+  // onended 事件再起播（事件调度天然带毫秒级空拍，累积成句间卡顿）。
   pump() {
-    if (this.playing || this.stopped || this.pending.length === 0) return;
-    const source = this.context.createBufferSource();
-    source.buffer = this.pending.shift();
-    source.connect(this.context.destination);
-    this.playing = source;
+    if (this.stopped || this.pending.length === 0) return;
+    if (this.sources.length === 0) this.nextStart = this.context.currentTime + 0.06;
+    while (this.pending.length) {
+      const source = this.context.createBufferSource();
+      source.buffer = this.pending.shift();
+      source.connect(this.context.destination);
+      source.start(Math.max(this.nextStart, this.context.currentTime + 0.02));
+      this.nextStart = Math.max(this.nextStart, this.context.currentTime + 0.02) + source.buffer.duration;
+      this.sources.push(source);
+      source.onended = () => {
+        this.sources = this.sources.filter((item) => item !== source);
+        if (!this.sources.length && !this.pending.length && !this.decoding) this.onAudibleChange(false);
+      };
+    }
     this.onAudibleChange(true);
-    source.onended = () => {
-      this.playing = null;
-      if (!this.pending.length) this.onAudibleChange(false);
-      this.pump();
-    };
-    source.start();
   }
 
   stopAll() {
     this.stopped = true;
     this.pending = [];
     this.pendingBytes = [];
-    const playing = this.playing;
-    this.playing = null;
-    try { playing?.stop(); } catch { /* 已停止 */ }
+    this.nextStart = 0;
+    for (const source of this.sources) { try { source.stop(); } catch { /* 已停止 */ } }
+    this.sources = [];
     this.onAudibleChange(false);
   }
 }
 
 // 采集管线：AEC 约束取流 → ScriptProcessor(4096) 实时 PCM（Safari 全兼容）
-// → 线性降采样 16k → 2 秒自封 WAV 分块上传 + RMS 能量/VAD 回调。
+// → 线性降采样 16k → 能量/VAD 判定交给 onEnergy 回调（返回指令）。
+// 缓冲桶始终累积（封顶 12 秒预录，丢最旧）：免提模式下打断后的语音开头
+// 不会因回合尚未建立而丢失；uploading 开启后按 2 秒自封 WAV 顺序上传。
 export class MicPipeline {
   constructor({ context, onChunk, onEnergy }) {
     this.context = context;
@@ -148,10 +159,9 @@ export class MicPipeline {
     this.source = null;
     this.processor = null;
     this.bucket = [];
-    this.capturing = false; // 仅说话回合内累积/上传；AI 播报期只监测能量
+    this.uploading = false;
     this.speaking = false;
     this.silenceMs = 0;
-    this.highEnergyMs = 0;
   }
 
   async start() {
@@ -173,38 +183,54 @@ export class MicPipeline {
     const input = event.inputBuffer.getChannelData(0);
     const samples = downsampleTo16k(input, event.inputBuffer.sampleRate);
     const rms = rmsOf(samples);
+    this.lastRms = rms; // 诊断暴露：免提触发失败时可直接读实时能量
     const now = performance.now();
-    // 播放期用更高阈值+持续能量判打断（回调返回 true 表示已触发打断，VAD 状态复位）。
-    if (this.onEnergy(rms, now) === 'barge-in') { this.speaking = false; this.silenceMs = 0; this.highEnergyMs = 0; return; }
+    // 静默计时（供断句）：桶内样本数即本块时长。
     const loud = rms >= CALL_VAD_SPEAK_THRESHOLD;
     if (loud) { this.speaking = true; this.silenceMs = 0; }
-    else if (this.speaking) { this.silenceMs += (samples.length / CALL_SAMPLE_RATE) * 1000; }
-    if (!this.capturing) return;
-    // 分块桶：满 2 秒自封一个带头 WAV 立即上传（边录边传）。
+    else if (this.speaking) this.silenceMs += (samples.length / CALL_SAMPLE_RATE) * 1000;
+    this.onEnergy(rms, now);
+    // 常开缓冲：无论是否在回合内都累积（预录），封顶丢最旧。
     this.bucket.push(samples);
-    const bucketLength = this.bucket.reduce((sum, item) => sum + item.length, 0);
-    if (bucketLength >= CALL_CHUNK_SAMPLES) {
-      this.onChunk(encodePcm16Wav(this.bucketFlat(bucketLength), CALL_SAMPLE_RATE));
-      this.bucket = [];
+    let bucketLength = this.bucket.reduce((sum, item) => sum + item.length, 0);
+    const maxSamples = CALL_SAMPLE_RATE * (CALL_MAX_PRE_ROLL_MS / 1000);
+    while (bucketLength > maxSamples && this.bucket.length > 1) {
+      bucketLength -= this.bucket[0].length;
+      this.bucket.shift();
+    }
+    if (!this.uploading) return;
+    while (bucketLength >= CALL_CHUNK_SAMPLES) {
+      const [chunk, rest] = this.takeBucket(CALL_CHUNK_SAMPLES);
+      this.onChunk(encodePcm16Wav(chunk, CALL_SAMPLE_RATE));
+      this.bucket = rest;
+      bucketLength -= chunk.length;
     }
   }
 
-  setCapturing(value) {
-    this.capturing = value;
-    if (!value) { this.bucket = []; this.speaking = false; this.silenceMs = 0; }
-  }
-
-  bucketFlat(length) {
-    const merged = new Float32Array(length);
+  takeBucket(samplesWanted) {
+    const merged = new Float32Array(samplesWanted);
     let offset = 0;
-    for (const item of this.bucket) { merged.set(item, offset); offset += item.length; }
-    return merged;
+    let rest = [];
+    let remaining = samplesWanted;
+    for (const item of this.bucket) {
+      if (remaining <= 0) { rest.push(item); continue; }
+      if (item.length <= remaining) {
+        merged.set(item, offset); offset += item.length; remaining -= item.length;
+      } else {
+        merged.set(item.subarray(0, remaining), offset);
+        rest.push(item.subarray(remaining));
+        remaining = 0;
+      }
+    }
+    return [merged, rest];
   }
 
-  // 断句收尾：把不满 2 秒的余量作为最后一块上传（可能不足 64KB，服务端按块校验）。
+  // 断句收尾：把不满 2 秒的余量作为最后一块上传（服务端按块校验）。
   flushRemainder() {
     if (!this.bucket.length) return;
-    this.onChunk(encodePcm16Wav(this.bucketFlat(this.bucket.reduce((sum, item) => sum + item.length, 0)), CALL_SAMPLE_RATE));
+    const length = this.bucket.reduce((sum, item) => sum + item.length, 0);
+    const [chunk] = this.takeBucket(length);
+    this.onChunk(encodePcm16Wav(chunk, CALL_SAMPLE_RATE));
     this.bucket = [];
   }
 
@@ -213,10 +239,11 @@ export class MicPipeline {
     for (const track of this.stream?.getTracks() ?? []) track.stop();
     this.processor = null; this.source = null; this.stream = null;
   }
+
+  setUploading(value) { this.uploading = value; }
 }
 
-// 通话会话客户端：发起/回合上传/回合 SSE/打断/挂断/断线对账。UI 通过 onEvent
-// 拿到状态与字幕，本类不触碰 DOM。
+// 通话会话客户端：接通即免提。UI 通过 onEvent 拿状态，本类不触碰 DOM。
 export class CallSessionClient {
   constructor({ apiBase = '', authHeaders, conversationId, onEvent = () => {} }) {
     this.apiBase = apiBase;
@@ -225,6 +252,7 @@ export class CallSessionClient {
     this.onEvent = onEvent;
     this.call = null;
     this.phase = 'idle';
+    this.muted = false;
     this.mic = null;
     this.audioOut = null;
     this.context = null;
@@ -236,7 +264,11 @@ export class CallSessionClient {
     this.uploadChain = Promise.resolve();
     this.barrierUntil = 0; // 打断冷却
     this.highEnergySince = 0;
+    this.speakSince = 0;
+    this.startingTurn = false;
+    this.finishingTurn = false;
     this.reconciling = false;
+    this.micStartTime = null;
   }
 
   emit(payload) { this.onEvent(payload); }
@@ -260,38 +292,86 @@ export class CallSessionClient {
     // AudioContext 必须在手势调用链内创建/恢复（iOS Safari 口径）。
     this.audioOut = new AudioOutPipeline({ onAudibleChange: (audible) => this.emit({ type: 'audible', audible }) });
     this.context = this.audioOut.ensureContext();
-    const payload = await this.request(`/conversations/${encodeURIComponent(this.conversationId)}/calls`, { method: 'POST', headers: this.authHeaders(), body: JSON.stringify({}) });
+    const payload = await this.request(`/conversations/${encodeURIComponent(this.conversationId)}/calls`, { method: 'POST', body: JSON.stringify({}) });
     this.call = payload.call;
     this.emit({ type: 'started', call: this.call, greetingText: payload.greeting?.text ?? '' });
     this.startWatchdog();
+    // 常开麦：接通即聆听（免提核心）。问候也允许直接打断。
+    this.mic = new MicPipeline({
+      context: this.context,
+      onChunk: (wavBuffer) => this.uploadChunk(wavBuffer),
+      onEnergy: (rms, now) => this.handleEnergy(rms, now)
+    });
+    await this.mic.start();
     this.setPhase('greeting');
-    // 问候语音失败（额度/供应商/网络）不阻塞通话：字幕已由受理响应给出，
-    // 流结束（含失败）即进入待说状态。
+    // 问候语音失败（额度/供应商/网络）不阻塞通话：流结束（含失败）即进入聆听态。
     this.playTurnStream(payload.greeting?.stream?.stream_url, { greeting: true })
       .catch(() => {})
       .then(() => { if (this.phase === 'greeting') this.markReady(); });
     return this.call;
   }
 
+  // ---- 能量判定（免提状态机核心，MicPipeline 每个处理块回调一次）----
+
+  handleEnergy(rms, now) {
+    if (this.muted || this.phase === 'ended') return;
+    const audible = this.audioOut?.audible;
+
+    // AI 播报中：持续高能量 = 打断（冷却期内忽略，防 AEC 残留循环）。
+    if ((this.phase === 'responding' || this.phase === 'greeting') && audible) {
+      if (rms >= CALL_BARGE_IN_THRESHOLD && now >= this.barrierUntil) {
+        if (!this.highEnergySince) this.highEnergySince = now;
+        if (now - this.highEnergySince >= CALL_BARGE_IN_HOLD_MS) {
+          this.highEnergySince = 0;
+          this.speakSince = now; // 打断的话音立刻进入起说计时
+          this.bargeIn();
+        }
+      } else {
+        this.highEnergySince = 0;
+      }
+      return;
+    }
+    this.highEnergySince = 0;
+
+    // 聆听态：持续起说能量自动开回合（打断后由冷却期稍作延迟，语音开头在预录里）。
+    if (this.phase === 'ready' && !this.startingTurn) {
+      if (rms >= CALL_VAD_SPEAK_THRESHOLD) {
+        if (!this.speakSince) this.speakSince = now;
+        if (now - this.speakSince >= CALL_AUTO_START_MS && now >= this.barrierUntil) {
+          this.speakSince = 0;
+          this.startTurn().catch((error) => { this.lastTurnError = error?.message ?? String(error); /* 起说失败静默重试：下一口说话再触发 */ });
+        }
+      } else {
+        this.speakSince = 0;
+      }
+      return;
+    }
+
+    // 说话中：静默自动断句；50 秒强制断句。
+    if (this.phase === 'recording' && !this.finishingTurn && this.mic) {
+      if (this.mic.silenceMs >= CALL_VAD_SILENCE_MS && this.mic.speaking) { this.finishTurn().catch(() => {}); return; }
+      if (this.micStartTime && now - this.micStartTime >= CALL_MAX_UTTERANCE_MS) { this.finishTurn().catch(() => {}); }
+    }
+  }
+
   // ---- 说话回合 ----
 
   async startTurn() {
-    if (this.phase !== 'ready' || performance.now() < this.barrierUntil) return;
-    const payload = await this.request(`/calls/${encodeURIComponent(this.call.call_id)}/turns`, { method: 'POST', body: JSON.stringify({}) });
-    this.turn = payload.turn;
-    this.chunkIndex = 0;
-    this.micStartTime = performance.now();
-    this.setPhase('recording');
-    this.emit({ type: 'turn', turn: this.turn });
-    if (!this.mic) {
-      this.mic = new MicPipeline({
-        context: this.context,
-        onChunk: (wavBuffer) => this.uploadChunk(wavBuffer),
-        onEnergy: (rms, now) => this.handleEnergy(rms, now)
-      });
-      await this.mic.start();
+    if (this.phase !== 'ready' || this.startingTurn || performance.now() < this.barrierUntil) return;
+    this.startingTurn = true;
+    try {
+      const payload = await this.request(`/calls/${encodeURIComponent(this.call.call_id)}/turns`, { method: 'POST', body: JSON.stringify({}) });
+      this.turn = payload.turn;
+      if (!this.turn) throw Object.assign(new Error('回合创建响应缺少 turn'), { code: 'CALL_TURN_RESPONSE_INVALID' });
+      this.chunkIndex = 0;
+      this.micStartTime = performance.now();
+      this.speaking = false;
+      this.setPhase('recording');
+      this.emit({ type: 'turn', turn: this.turn });
+      this.mic.setUploading(true); // 预录里的语音开头随首块上传
+    } finally {
+      this.startingTurn = false;
     }
-    this.mic.setCapturing(true);
   }
 
   uploadChunk(wavBuffer) {
@@ -308,51 +388,51 @@ export class CallSessionClient {
     });
   }
 
-  handleEnergy(rms, now) {
-    // AI 播报中：高能量持续 300ms 即自动打断（冷却期内忽略，防 AEC 残留）。
-    if (this.phase === 'responding' && this.audioOut?.audible) {
-      if (rms >= CALL_BARGE_IN_THRESHOLD && now >= this.barrierUntil) {
-        if (!this.highEnergySince) this.highEnergySince = now;
-        if (now - this.highEnergySince >= CALL_BARGE_IN_HOLD_MS) { this.highEnergySince = 0; this.bargeIn(); return 'barge-in'; }
-      } else {
-        this.highEnergySince = 0;
-      }
-      return 'monitoring';
-    }
-    this.highEnergySince = 0;
-    // 说话中静默 700ms 自动断句；单次发言 50 秒强制断句。
-    if (this.phase === 'recording' && this.mic?.speaking && this.mic.silenceMs >= CALL_VAD_SILENCE_MS) {
-      this.finishTurn().catch(() => {});
-      return 'finalized';
-    }
-    if (this.phase === 'recording' && this.mic && this.micStartTime && now - this.micStartTime >= CALL_MAX_UTTERANCE_MS) {
-      this.finishTurn().catch(() => {});
-      return 'finalized';
-    }
-    return 'idle';
-  }
-
   async finishTurn() {
-    if (this.phase !== 'recording' || !this.turn) return;
-    const turnId = this.turn.turn_id;
-    this.mic?.setCapturing(false);
-    this.mic?.flushRemainder();
-    await this.uploadChain.catch(() => {});
-    if (!this.turn || this.turn.turn_id !== turnId) return;
-    this.micStartTime = null;
-    this.setPhase('responding');
-    const payload = await this.request(`/calls/${encodeURIComponent(this.call.call_id)}/turns/${encodeURIComponent(turnId)}/finalize`, { method: 'POST', body: JSON.stringify({}) });
-    this.emit({ type: 'turn-finalized', turn: payload.turn });
-    this.lastEventAt = Date.now();
-    await this.playTurnStream(payload.stream?.stream_url, {});
+    if (this.phase !== 'recording' || !this.turn || this.finishingTurn) return;
+    this.finishingTurn = true;
+    try {
+      const turnId = this.turn.turn_id;
+      this.mic?.setUploading(false);
+      this.mic?.flushRemainder();
+      await this.uploadChain.catch(() => {});
+      if (!this.turn || this.turn.turn_id !== turnId) return;
+      this.micStartTime = null;
+      this.speaking = false;
+      this.setPhase('responding');
+      const payload = await this.request(`/calls/${encodeURIComponent(this.call.call_id)}/turns/${encodeURIComponent(turnId)}/finalize`, { method: 'POST', body: JSON.stringify({}) });
+      this.emit({ type: 'turn-finalized', turn: payload.turn });
+      this.lastEventAt = Date.now();
+      await this.playTurnStream(payload.stream?.stream_url, {});
+    } finally {
+      this.finishingTurn = false;
+    }
   }
 
-  // ---- 回合 SSE（字幕 + 逐段音频）----
+  // ---- 静音 ----
+
+  setMuted(value) {
+    if (this.muted === value) return;
+    this.muted = value;
+    this.emit({ type: 'muted', muted: value });
+    if (value) {
+      // 静音 = 说完了：结束进行中的回合并停止聆听（不再自动开回合/打断）。
+      this.speakSince = 0;
+      if (this.phase === 'recording') this.finishTurn().catch((error) => { this.lastTurnError = error?.message ?? String(error); });
+    } else {
+      this.barrierUntil = performance.now() + 300; // 取消静音后短暂冷却，防麦克风声学冲击误触发
+    }
+  }
+
+  // ---- 回合 SSE（音频只进播放管线；服务端仍发字幕事件，客户端不展示）----
 
   async playTurnStream(streamUrl, { greeting = false }) {
     if (this.audioOut) this.audioOut.stopped = false; // 打断后新回合恢复可播
     this.turnAbort = new AbortController();
-    const streamPath = String(streamUrl || '').startsWith(`${this.apiBase}/`) ? streamUrl : `${this.apiBase}${streamUrl}`;
+    // 服务端返回的 stream_url 以根路径开头（/api/v1/...）：不要重复拼 apiBase。
+    const streamPath = String(streamUrl || '').startsWith(`${this.apiBase}/`) || /^https?:\/\//.test(streamUrl)
+      ? streamUrl
+      : `${this.apiBase}${streamUrl}`;
     const response = await fetch(streamPath, { headers: this.authHeaders('text/event-stream'), signal: this.turnAbort.signal });
     if (!response.ok || !response.body) throw Object.assign(new Error(`通话流不可用（HTTP ${response.status}）`), { status: response.status });
     this.lastEventAt = Date.now();
@@ -378,8 +458,6 @@ export class CallSessionClient {
   }
 
   handleTurnEvent(event, data, { greeting }) {
-    if (event === 'call.turn.transcript') this.emit({ type: 'transcript', text: data.text });
-    if (event === 'call.turn.text') this.emit({ type: 'subtitle', text: data.text });
     if (event === 'call.turn.audio' && data.audio_base64) {
       this.audioOut?.enqueueMp3(base64ToBytes(data.audio_base64)).catch(() => {});
     }
@@ -399,12 +477,12 @@ export class CallSessionClient {
 
   // ---- 打断 ----
 
-  // 用户点按打断或 VAD 自动打断：停播 + 中止 SSE（服务端断开即中止 LLM/TTS，
-  // 已播出部分按 INTERRUPTED 结算）。说话键随后可直接开始新回合。
+  // 停播 + 中止 SSE（服务端断开即中止 LLM/TTS，已播出部分按 INTERRUPTED 结算）。
+  // 打断后处于聆听态：正在说的话由免提状态机自动开新回合（预录不丢开头）。
   bargeIn() {
     if (performance.now() < this.barrierUntil) return;
     this.barrierUntil = performance.now() + CALL_BARGE_IN_COOLDOWN_MS;
-    this.mic?.setCapturing(false);
+    this.mic?.setUploading(false);
     this.audioOut?.stopAll();
     try { this.turnAbort?.abort(); } catch { /* 已中止 */ }
     this.turnAbort = null;

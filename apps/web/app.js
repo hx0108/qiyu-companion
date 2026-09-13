@@ -1923,29 +1923,31 @@ function renderChat() {
     : `<input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}>`;
   const sendButton = voiceMode ? "" : `<button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button>`;
   const latestAssistantId = messageId([...state.messages].reverse().find((item) => (item.actor ?? item.role) === "ASSISTANT") ?? {});
-  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div>${state.voiceCallEnabled && conversationId() ? `<button class="icon-btn soft" data-action="start-call" aria-label="发起语音通话">${prototypeIcon("phone", 19)}</button>` : ""}<button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map((message) => messageMarkup(message, latestAssistantId)).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</section>`;
+  return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><div class="header-actions">${state.voiceCallEnabled && conversationId() ? `<button class="icon-btn soft" data-action="start-call" aria-label="发起语音通话">${prototypeIcon("phone", 19)}</button>` : ""}<button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></div></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map((message) => messageMarkup(message, latestAssistantId)).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</section>`;
 }
 
-// ---- 1:1 通话页（route="call"）----
-// 骨架只渲染一次；进入通话后 HUD/字幕/计时由 call-client 事件定点更新，
-// 不再走 render() 全量重建（音频走 AudioContext，与 DOM 无关）。
+// ---- 1:1 通话页（route="call"，豆包式免提）----
+// 骨架只渲染一次；进入通话后状态/计时由 call-client 事件定点更新，不走
+// render() 全量重建（音频走 AudioContext，与 DOM 无关）。免提交互：接通即
+// 常开麦，开口即说、停顿即断句、随时打断；唯一按键是静音与挂断。
 
 let callClient = null;
 let callTimerTimer = null;
+let callNoticeTimer = null;
 
 const CALL_PHASE_STATUS = {
   ringing: "正在接通…",
-  greeting: "正在打招呼",
-  ready: "点按下方说话",
-  recording: "正在聆听 · 说完停顿一下，或再次点按结束",
-  responding: "正在回应 · 点按说话键可打断"
+  greeting: "正在打招呼 · 开口即可打断",
+  ready: "在听，请讲",
+  recording: "正在聆听 · 说完停顿一下即可",
+  responding: "正在回应 · 随时开口打断"
 };
 
 function renderCall() {
   const call = state.call;
   if (!call) { state.route = "chat"; return renderChat(); }
   const characterName = state.character?.name ?? "当前角色";
-  return `<section class="screen qiyu-prototype call-screen ${state.theme === "night" ? "night" : "paper"}" aria-label="语音通话"><header class="call-top"><span class="wordmark">语音通话</span><span id="call-timer" class="call-timer">00:00</span></header><div class="call-stage"><div class="call-avatar"><img src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><span id="call-pulse" class="call-pulse" aria-hidden="true"></span></div><h2>${escapeHtml(characterName)}</h2><p class="call-status" id="call-status">${escapeHtml(CALL_PHASE_STATUS[call.phase ?? "ringing"] ?? call.status ?? "正在接通…")}</p><p class="call-subtitle" id="call-subtitle">${escapeHtml(call.subtitle ?? "")}</p></div><div class="call-controls"><button type="button" class="call-key speak" data-action="call-speak"><span class="call-key-icon">${prototypeIcon("mic", 26)}</span><span class="call-key-label" id="call-speak-label">点击说话</span></button><button type="button" class="call-key hangup" data-action="call-hangup"><span class="call-key-icon">${prototypeIcon("phone", 26)}</span><span class="call-key-label">挂断</span></button></div><p class="call-quota" id="call-quota">${escapeHtml(call.quotaText ?? "")}</p></section>`;
+  return `<section class="screen qiyu-prototype call-screen ${state.theme === "night" ? "night" : "paper"}" aria-label="语音通话"><header class="call-top"><span class="wordmark">语音通话</span><span id="call-timer" class="call-timer">00:00</span></header><div class="call-stage"><div class="call-avatar"><img src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><span id="call-pulse" class="call-pulse" aria-hidden="true"></span></div><h2>${escapeHtml(characterName)}</h2><p class="call-status" id="call-status">${escapeHtml(call.notice ?? CALL_PHASE_STATUS[call.phase ?? "ringing"] ?? "正在接通…")}</p></div><div class="call-controls"><button type="button" class="call-key mute ${callClient?.muted ? "muted" : ""}" data-action="call-mute"><span class="call-key-icon">${prototypeIcon("mic", 26)}</span><span class="call-key-label" id="call-mute-label">静音</span></button><button type="button" class="call-key hangup" data-action="call-hangup"><span class="call-key-icon">${prototypeIcon("phone", 26)}</span><span class="call-key-label">挂断</span></button></div><p class="call-quota" id="call-quota">${escapeHtml(call.quotaText ?? "")}</p></section>`;
 }
 
 function updateCallHud() {
@@ -1953,9 +1955,11 @@ function updateCallHud() {
   const phase = callClient.phase;
   state.call.phase = phase;
   const status = document.getElementById("call-status");
-  if (status) status.textContent = CALL_PHASE_STATUS[phase] ?? status.textContent;
-  const label = document.getElementById("call-speak-label");
-  if (label) label.textContent = phase === "responding" ? "打断" : phase === "recording" ? "结束这句" : "点击说话";
+  // 短暂提示（如「没有听清」）展示期间不覆盖；3 秒后由 setCallNotice 还原。
+  if (status && !state.call.notice) status.textContent = CALL_PHASE_STATUS[phase] ?? status.textContent;
+  const muteLabel = document.getElementById("call-mute-label");
+  if (muteLabel) muteLabel.textContent = callClient.muted ? "取消静音" : "静音";
+  document.querySelector('[data-action="call-mute"]')?.classList.toggle("muted", callClient.muted);
   const pulse = document.getElementById("call-pulse");
   if (pulse) pulse.dataset.active = phase === "recording" || phase === "responding" ? "true" : "false";
 }
@@ -1970,25 +1974,28 @@ function startCallTimer() {
   }, 1_000);
 }
 
-// 字幕写入 state.call 再同步 DOM：通话期间任何 toast/重渲染都会重建骨架，
-// 只改 DOM 的内容会被清掉（必须随 renderCall 一起还原）。
-function setCallSubtitle(text) {
-  if (state.call) state.call.subtitle = text;
-  const el = document.getElementById("call-subtitle");
-  if (el) el.textContent = text;
+// 状态行的瞬时提示（失败原因等）：不展示对话内容，只给必要反馈；写入
+// state.call.notice 使重渲染也能还原，3 秒后回到阶段状态。
+function setCallNotice(text) {
+  if (state.call) state.call.notice = text;
+  const status = document.getElementById("call-status");
+  if (status) status.textContent = text;
+  window.clearTimeout(callNoticeTimer);
+  callNoticeTimer = window.setTimeout(() => {
+    if (state.call) state.call.notice = null;
+    updateCallHud();
+  }, 3_200);
 }
 
 function handleCallEvent(event) {
   if (event.type === "started") {
     state.call = { ...state.call, callId: event.call.call_id, startedAt: Date.parse(event.call.started_at), phase: "greeting" };
-    if (event.greetingText) setCallSubtitle(`${state.character?.name ?? "TA"}：${event.greetingText}`);
     startCallTimer();
-  } else if (event.type === "transcript") {
-    setCallSubtitle(`你：${event.text}`);
-  } else if (event.type === "subtitle") {
-    setCallSubtitle(`${state.character?.name ?? "TA"}：${event.text}`);
+  } else if (event.type === "muted") {
+    setCallNotice(event.muted ? "已静音 · 取消后继续说话" : "在听，请讲");
+    return; // 静音提示展示期内不被阶段状态覆盖
   } else if (event.type === "turn-failed") {
-    setCallSubtitle(TURN_FAILURE_LABELS[event.code] ?? event.message ?? "本回合没有完成，请再试一次");
+    setCallNotice(TURN_FAILURE_LABELS[event.code] ?? event.message ?? "没有听清，请再说一次");
   }
   if (["phase", "turn", "turn-done", "turn-finalized", "interrupted", "barge-in", "reconciled"].includes(event.type)) updateCallHud();
 }
@@ -2005,6 +2012,7 @@ function startVoiceCall() {
     conversationId: conversationId(),
     onEvent: handleCallEvent
   });
+  window.__qiyuCall = callClient; // 诊断句柄（挂断时随生命周期清除）
   callClient.start().then(async () => {
     // 额度余量提示（尽力而为；读取失败不影响通话）。
     const entitlements = await api("/entitlements").catch(() => null);
@@ -2017,6 +2025,7 @@ function startVoiceCall() {
     window.clearInterval(callTimerTimer);
     callTimerTimer = null;
     callClient = null;
+    window.__qiyuCall = null;
     state.call = null;
     state.route = "chat";
     render();
@@ -2024,19 +2033,16 @@ function startVoiceCall() {
   });
 }
 
-async function callSpeakAction() {
+function toggleCallMute() {
   if (!callClient) return;
-  try {
-    if (callClient.phase === "responding") { callClient.bargeIn(); return; }
-    if (callClient.phase === "recording") { await callClient.finishTurn(); return; }
-    if (callClient.phase === "ready") await callClient.startTurn();
-  } catch (error) { setToast(serverMessage(error)); }
+  callClient.setMuted(!callClient.muted);
 }
 
 async function hangupCall() {
   const client = callClient;
   if (!client) { state.route = "chat"; render(); return; }
   callClient = null;
+  window.__qiyuCall = null;
   window.clearInterval(callTimerTimer);
   callTimerTimer = null;
   const ended = await client.hangup().catch(() => null);
@@ -2424,7 +2430,7 @@ document.addEventListener("click", (event) => {
   if (action === "dismiss-reminder") { state.continuousReminder = null; render(); }
   if (action === "back-chat") { state.route = "chat"; render(); }
   if (action === "start-call") startVoiceCall();
-  if (action === "call-speak") callSpeakAction();
+  if (action === "call-mute") toggleCallMute();
   if (action === "call-hangup") hangupCall();
   if (action === "open-asr") { state.route = "asr"; render(); }
   if (action === "enter-voice-mode") { state.composerVoice = true; render(); }
