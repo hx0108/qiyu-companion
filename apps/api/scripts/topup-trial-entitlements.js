@@ -7,7 +7,9 @@
 
 const { Client } = require('pg');
 
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// 宽松 UUID 结构校验：账户/订阅 ID 由 app.uuid_v7() 生成，variant 位
+// 不保证 RFC 4122 的 8-b 取值，只按 8-4-4-4-12 十六进制结构校验。
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseOptions(argv = process.argv.slice(2)) {
   const argument = (name) => { const index = argv.indexOf(name); return index >= 0 ? argv[index + 1] : undefined; };
