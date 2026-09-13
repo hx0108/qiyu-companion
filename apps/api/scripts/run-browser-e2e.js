@@ -124,6 +124,8 @@ async function main() {
         assert((await page.locator('article.message.ai .bubble').last().innerText()).trim().length > 0, 'Qwen 回复应完整回放到浏览器');
       } else {
         await page.waitForFunction(() => document.body.innerText.includes('开发 Mock 已收到'), null, { timeout: 15_000 });
+      // 滚动交互：回复渲染后对话必须停留在最新消息，不得跳回最早对话。
+      await page.waitForFunction(() => { const el = document.querySelector('.chat-scroll'); return el && el.scrollHeight - el.scrollTop - el.clientHeight < 160; }, null, { timeout: 15_000 });
       }
     });
 
@@ -191,6 +193,9 @@ async function main() {
       // 两条受控降级路径都算过：无额度 → 权益页引导；有额度但 TTS 未启用 → 失败横幅。
       await page.waitForFunction(() => Boolean(document.querySelector('.rights[data-media-type="TTS"]'))
         || /权益与领取|角色语音/.test(document.body.innerText), null, { timeout: 10_000 });
+      // 等待语音生成期间页面必须保持阅读位置，不得跳回最早对话。
+      const nearBottom = await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); return Boolean(el) && el.scrollHeight - el.scrollTop - el.clientHeight < 200; });
+      assert(nearBottom, '语音生成等待期间对话不得跳回最早消息');
     });
 
     if (realTencentMedia) {

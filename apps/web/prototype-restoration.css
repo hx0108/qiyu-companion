@@ -104,6 +104,9 @@
 .qiyu-prototype .voice-trigger img { width: 10px; height: 10px; display: block; }
 .qiyu-prototype .voice-trigger:hover .voice-trigger-visual { background: #313236; border-color: rgba(255,255,255,.09); }.qiyu-prototype .voice-trigger:active .voice-trigger-visual { transform: scale(.96); }.qiyu-prototype .voice-trigger:focus-visible { outline: 3px solid var(--qy-rose); outline-offset: 1px; border-radius: 999px; }
 .qiyu-prototype .voice-trigger[data-playing="true"] .voice-trigger-visual { background: #735064; border-color: rgba(255,255,255,.42); }
+/* 语音合成中：播放键脉冲反馈（点击到出声有数秒服务端合成耗时）。 */
+.qiyu-prototype .voice-trigger[data-synthesizing="true"] { pointer-events: none; }.qiyu-prototype .voice-trigger[data-synthesizing="true"] .voice-trigger-visual { animation: qy-voice-loading 1.1s ease-in-out infinite; }
+@keyframes qy-voice-loading { 0%, 100% { transform: scale(1); opacity: .7; } 50% { transform: scale(1.14); opacity: 1; } }
 .qiyu-prototype .voice-audio { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
 .qiyu-prototype .composer-wrap { position: absolute; z-index: 5; right: 0; bottom: calc(63px + env(safe-area-inset-bottom)); left: 0; padding: 10px 14px 12px; background: linear-gradient(180deg, transparent, var(--qy-paper) 30%); }
 .qiyu-prototype .composer { height: 56px; display: flex; gap: 0; align-items: center; padding: 6px 6px 6px 8px; border: 1px solid var(--qy-line); border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 14px 30px rgba(66,41,54,.13); }

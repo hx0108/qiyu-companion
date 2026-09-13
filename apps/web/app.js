@@ -55,6 +55,7 @@ const state = {
   imageJob: null,
   generatedImage: null,
   lastTtsJob: null,
+  synthesizingMessageId: null,
   ocImport: null,
   ocRightsReview: null,
   noticeChecks: new Set(),
@@ -849,27 +850,12 @@ async function synthesizeMessageAudio(message) {
   const id = messageId(message);
   if (!id) return;
   let autoplayReady = false;
+  // 生成期间在对应气泡的播放键上给脉冲反馈（点击到出声有数秒合成耗时）。
+  state.synthesizingMessageId = id;
   setBusy(true);
   try {
-    // 语音额度是服务端事实。先读取再创建任务，避免用户在未领取试用时
-    // 反复得到一个必然失败的 TTS 作业。
-    const [current, entitlements] = await Promise.all([
-      api("/subscriptions/current"),
-      api("/entitlements"),
-    ]);
-    state.currentSubscription = current?.subscription ?? null;
-    state.trial = current?.trial ?? null;
-    state.entitlements = entitlements?.entitlements ?? [];
-    const ttsEntitlement = state.entitlements.find((item) => item?.capability === "SYNTHESIZE_TTS");
-    if (!ttsEntitlement || Number(ttsEntitlement.available_quantity) <= 0) {
-      state.lastTtsJob = null;
-      state.route = "subscription";
-      setToast(state.trial?.state === "NOT_STARTED"
-        ? "请先领取 7 天完整体验，其中包含角色语音额度。"
-        : "当前角色语音额度已用完；可在权益页查看状态。"
-      );
-      return;
-    }
+    // 语音额度以服务端判定为准：额度不足时任务以 ENTITLEMENT_QUOTA_EXCEEDED
+    // 失败，下方有对应引导。不再先发两个权益预检请求拖慢起播。
     const payload = await api(`/messages/${encodeURIComponent(id)}/tts-jobs`, { method: "POST", idempotent: uuid(), body: {} });
     const job = payload?.tts_job ?? payload;
     if (job?.state !== "COMPLETED" || !job.result_asset_id) {
@@ -904,6 +890,7 @@ async function synthesizeMessageAudio(message) {
       setToast(`${serverMessage(error)}；文字回复仍可正常阅读。`);
     }
   } finally {
+    state.synthesizingMessageId = null;
     setBusy(false);
     if (autoplayReady) window.requestAnimationFrame(() => toggleMessageAudio(id, true));
   }
@@ -1747,7 +1734,8 @@ function messageMarkup(message) {
   const audio = !isUser && id ? state.audioUrls.get(id) : null;
   // 参考对话视觉：括号动作描写转斜体弱化；先转义再包裹，不引入用户可控 HTML。
   const bubbleHtml = (escapeHtml(content) || "…").replace(/([（(][^（）()]*[）)])/g, '<em class="action">$1</em>');
-  const voiceControl = !isUser && id ? `<button type="button" class="voice-trigger" data-action="${audio ? "toggle-message-audio" : "synthesize-message-audio"}" data-message-id="${escapeHtml(id)}" aria-label="${audio ? "播放角色语音" : "生成并播放角色语音"}" ${state.busy ? "disabled" : ""}><span class="voice-trigger-visual"><img src="/assets/player-play-filled.svg" alt="" aria-hidden="true"></span></button>` : "";
+  const synthesizing = !isUser && id && state.synthesizingMessageId === id;
+  const voiceControl = !isUser && id ? `<button type="button" class="voice-trigger" data-action="${audio ? "toggle-message-audio" : "synthesize-message-audio"}" data-message-id="${escapeHtml(id)}" aria-label="${synthesizing ? "正在生成角色语音" : audio ? "播放角色语音" : "生成并播放角色语音"}" ${synthesizing ? 'data-synthesizing="true" disabled' : state.busy ? "disabled" : ""}><span class="voice-trigger-visual"><img src="/assets/player-play-filled.svg" alt="" aria-hidden="true"></span></button>` : "";
   const voicePlayback = !isUser && audio ? `<audio class="voice-audio" preload="metadata" src="${escapeHtml(audio.url)}"></audio>` : "";
   const voiceRow = voiceControl ? `<div class="voice-control-row">${voiceControl}${voicePlayback}</div>` : "";
   const attachments = (message.attachments ?? []).map((attachment) => {
@@ -2003,6 +1991,8 @@ function renderError() {
   return screen(`<div class="topline"><span class="wordmark">栖语</span><span class="dev-label">M1 local</span></div><div class="error-state"><h2 id="app-title">尚未取得服务端事实</h2><p>${escapeHtml(state.error)}</p><div class="flow-actions"><button class="btn btn-primary" data-action="retry-bootstrap">重试连接本地 API</button></div></div><p class="muted">未接入 API 时，本壳不会显示任何模拟年龄、记忆或删除成功状态。</p>`);
 }
 
+let chatScrollMemory = null; // 上一次对话渲染的 { top, height, viewport, messageCount }
+
 function render() {
   document.documentElement.dataset.qyTheme = state.theme;
   if (state.booting) { app.innerHTML = '<div class="boot-state"><span class="spinner" aria-hidden="true"></span><p>正在读取服务端状态…</p></div>'; return; }
@@ -2027,8 +2017,23 @@ function render() {
     : state.route === "proactive" ? renderProactive()
     : renderChat();
   const undoMemory = state.lastRejectedCandidate ? `<div class="toast" role="status">已选择“不记住” <button class="btn btn-line" data-action="undo-memory-reject">撤销</button></div>` : "";
+  // 对话滚动记忆：整树重渲染会把 .chat-scroll 重置回顶部（此前发消息/播语音
+  // 时页面“跳回第一次对话”的根因）。渲染前记录位置与消息数，渲染后——
+  // 新消息或原本贴底 → 跟到最新消息；用户正回看历史 → 保持原阅读位置。
+  const prevScroller = state.route === "chat" ? app.querySelector(".chat-scroll") : null;
+  const scrollMemory = prevScroller
+    ? { top: prevScroller.scrollTop, height: prevScroller.scrollHeight, viewport: prevScroller.clientHeight, messageCount: chatScrollMemory?.messageCount ?? state.messages.length }
+    : null;
   app.innerHTML = view + renderContinuousReminder() + undoMemory + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
   if (state.route === "chat") {
+    const scroller = app.querySelector(".chat-scroll");
+    if (scroller) {
+      const grew = !scrollMemory || state.messages.length !== scrollMemory.messageCount;
+      const wasAtBottom = !scrollMemory || scrollMemory.height - scrollMemory.top - scrollMemory.viewport < 160;
+      if (grew || wasAtBottom) scroller.scrollTop = scroller.scrollHeight;
+      else scroller.scrollTop = Math.min(scrollMemory.top, scroller.scrollHeight);
+      chatScrollMemory = { top: scroller.scrollTop, height: scroller.scrollHeight, viewport: scroller.clientHeight, messageCount: state.messages.length };
+    }
     const holdButton = app.querySelector('[data-action="hold-asr"]');
     if (holdButton && state.asrRecording?.state === "recording") {
       holdButton.classList.add("recording");
