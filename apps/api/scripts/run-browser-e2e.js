@@ -159,7 +159,7 @@ async function main() {
     if (!realTencentMedia) {
       await step('聊天图片：私密上传、前审、消息气泡展示与删除立即失效', async () => {
         await page.locator('#context-image-file').setInputFiles({ name: 'qiyu-context.png', mimeType: 'image/png', buffer: createControlledPng() });
-        await page.waitForFunction(() => document.body.innerText.includes('图片状态：AVAILABLE'), null, { timeout: 15_000 });
+        await page.waitForFunction(() => document.body.innerText.includes('图片状态：可用'), null, { timeout: 15_000 });
         await page.locator('#message-form [name="message"]').fill('只描述你能确定的画面。');
         await page.locator('#message-form .send').click();
         await page.waitForFunction(() => document.querySelectorAll('article.message.me .context-image-thumb').length > 0, null, { timeout: 15_000 });
