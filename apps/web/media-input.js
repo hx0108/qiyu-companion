@@ -26,7 +26,8 @@ export async function recordingBlobToWav(blob) {
   } finally { await audioContext.close().catch(() => {}); }
 }
 
-function encodePcm16Wav(samples, sampleRate) {
+// 通话页边录边传按 2 秒自封带头 WAV：与语音消息共用同一编码口径（导出复用）。
+export function encodePcm16Wav(samples, sampleRate) {
   const buffer = new ArrayBuffer(44 + samples.length * 2); const view = new DataView(buffer);
   writeAscii(view, 0, 'RIFF'); view.setUint32(4, 36 + samples.length * 2, true); writeAscii(view, 8, 'WAVE');
   writeAscii(view, 12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
