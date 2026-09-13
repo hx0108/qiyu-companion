@@ -128,7 +128,7 @@ async function main() {
     });
 
     if (!realTencentMedia) {
-      await step('按住说话：长按录音、浏览器转 WAV、转写确认后只回填不发送', async () => {
+      await step('按住说话：长按录音、浏览器转 WAV、转写自动确认后直接回填输入框不发送', async () => {
         await page.context().grantPermissions(['microphone'], { origin: base });
         const beforeMessages = store.messages.size;
         // 微信式输入区：按住说话胶囊只在语音模式下出现，先切换再长按。
@@ -138,14 +138,11 @@ async function main() {
         await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
         await page.waitForSelector('[data-action="hold-asr"][data-recording="true"]', { timeout: 10_000 });
         await page.waitForTimeout(700); await page.mouse.up();
-        await page.waitForTimeout(4_000);
-        assert(await page.locator('#asr-edit').count() > 0, `长按录音后应显示转写编辑框；当前界面：${(await page.locator('body').innerText()).replace(/\s+/g, ' ').slice(-500)}`);
-        assert((await page.locator('#asr-edit').inputValue()).includes('浏览器录音'), 'Mock ASR 应返回待确认文字');
-        assert(store.messages.size === beforeMessages, '转写未经确认和发送时不得创建聊天消息');
-        await page.locator('[data-action="confirm-asr"]').click();
-        await page.waitForSelector('#message-form [name="message"]', { timeout: 10_000 });
-        assert((await page.locator('#message-form [name="message"]').inputValue()).includes('浏览器录音'), '确认转写后应只回填输入框');
-        assert(store.messages.size === beforeMessages, '确认转写仍不得自动发送');
+        // 无确认面板：转写完成后自动确认（触发原始音频删除），文字直达发送框。
+        await page.waitForFunction(() => document.querySelector('#message-form [name="message"]')?.value.includes('浏览器录音'), null, { timeout: 15_000 });
+        assert(!(await page.locator('#asr-edit').count()), '不应再出现“检查转写后再发送”确认面板');
+        assert(store.messages.size === beforeMessages, '转写回填不得自动发送');
+        assert([...store.mediaAssets.values()].some((item) => item.type === 'ASR_INPUT_AUDIO'), '确认后服务端应已受理原始音频删除流程');
         await page.locator('#message-form [name="message"]').fill('');
       });
     }

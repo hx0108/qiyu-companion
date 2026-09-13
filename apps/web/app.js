@@ -1514,8 +1514,10 @@ async function createAsrJob() {
     state.asrFile = null;
     state.asrJob = payload?.asr_job ?? payload;
     if (state.asrJob?.state === "COMPLETED" && state.asrJob?.transcript?.state === "PENDING_CONFIRMATION") {
+      // 产品口径（2026-09-13）：跳过"检查转写后再发送"面板，自动调用确认接口
+      //（服务端随即删除原始音频），转写文字直接落到发送框。
       state.asrEdit = state.asrJob.transcript.text;
-      state.route = "chat";
+      await confirmAsrTranscript();
     }
   } catch (error) {
     setToast(serverMessage(error));
@@ -1807,7 +1809,9 @@ function renderChat() {
   const worldText = world ? `${world.mood_code ?? "平静"} · ${world.location_code ?? "未设定"}` : "此刻由你决定";
   const memoryBanner = candidate ? `<button class="memory-banner" data-action="open-candidate" data-candidate-id="${escapeHtml(candidateId(candidate))}"><span>${prototypeIcon("archive", 18)}</span><span><b>1 条候选记忆等待你确认</b><small>不会自动写入长期记忆</small></span><span class="chev">${prototypeIcon("chev", 16)}</span></button>` : "";
   const paused = state.userPaused ? `<button class="memory-banner" data-action="resume-interaction"><span>${prototypeIcon("shield", 18)}</span><span><b>普通互动已暂停</b><small>由你恢复前，不会继续生成角色回复</small></span></button>` : "";
-  const asrPanel = state.asrJob?.state === "COMPLETED" ? `<div class="inline-media-panel"><label>检查转写后再发送<textarea id="asr-edit" maxlength="4000">${escapeHtml(state.asrEdit)}</textarea></label><button type="button" class="btn btn-primary" data-action="confirm-asr">确认到输入框</button></div>` : state.asrJob?.state === "FAILED" ? `<div class="inline-media-panel error">转写失败：${escapeHtml(state.asrJob.failure_code ?? "UNKNOWN")}<button type="button" class="btn btn-line" data-action="delete-failed-asr-input">删除原音频</button></div>` : "";
+  // 转写完成不再弹"检查转写后再发送"面板：确认由前端自动完成（并触发原始音频
+  // 删除），文字直接回填发送框；只有失败时才保留错误面板供删除原音频。
+  const asrPanel = state.asrJob?.state === "FAILED" ? `<div class="inline-media-panel error">转写失败：${escapeHtml(state.asrJob.failure_code ?? "UNKNOWN")}<button type="button" class="btn btn-line" data-action="delete-failed-asr-input">删除原音频</button></div>` : "";
   const imagePanel = state.contextImageAsset ? `<div class="inline-media-panel"><span>图片状态：${escapeHtml(state.contextImageAsset.state)}</span>${state.contextImagePreviewUrl ? `<img class="context-image-preview" src="${escapeHtml(state.contextImagePreviewUrl)}" alt="待发送图片">` : ""}<button type="button" class="btn btn-line" data-action="remove-context-image">删除图片</button></div>` : "";
   // 微信式语音输入：左侧麦克风/键盘切换；语音模式下整条输入框换成「按住 说话」
   // 胶囊（文字态由 CSS ::after 随 recording/cancel 类切换），按住时上方浮出
