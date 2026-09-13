@@ -56,6 +56,8 @@ const state = {
   generatedImage: null,
   lastTtsJob: null,
   synthesizingMessageId: null,
+  ttsAutoPrefetch: false,
+  prefetchingIds: new Set(),
   ocImport: null,
   ocRightsReview: null,
   noticeChecks: new Set(),
@@ -789,6 +791,7 @@ async function sendMessage(form) {
         const finalMessage = unwrap(finalPayload, "message", null) ?? finalPayload;
         const index = state.messages.indexOf(streaming);
         if (index >= 0) state.messages[index] = finalMessage;
+        prefetchMessageAudio(finalMessage);
       } else if (terminalEvent === "failed") {
         // 失败的临时片段不是完整 AI 回复，不保留在对话里。
         // 恢复用户输入并用 toast 说明原因，便于原样重试。
@@ -817,6 +820,7 @@ async function sendMessage(form) {
       }
       if (!streaming.text) streaming.text = assistant.text;
       render();
+      prefetchMessageAudio(assistant);
     }
     await refreshMemoryAndAssets();
   } catch (error) {
@@ -848,7 +852,10 @@ function messageId(message) { return message?.message_id ?? message?.id; }
 
 async function synthesizeMessageAudio(message) {
   const id = messageId(message);
-  if (!id) return;
+  if (!id || state.prefetchingIds.has(id)) return;
+  // 用户点过语音播放 = 语音活跃用户：此后新回复在后台预合成（星野式“点按即响”）；
+  // 纯文字用户不预合成，不白烧试用语音额度。
+  state.ttsAutoPrefetch = true;
   let autoplayReady = false;
   // 生成期间在对应气泡的播放键上给脉冲反馈（点击到出声有数秒合成耗时）。
   state.synthesizingMessageId = id;
@@ -893,6 +900,28 @@ async function synthesizeMessageAudio(message) {
     state.synthesizingMessageId = null;
     setBusy(false);
     if (autoplayReady) window.requestAnimationFrame(() => toggleMessageAudio(id, true));
+  }
+}
+
+// 星野式预合成：AI 回复落定即后台生成这条消息的语音，用户读到时音频已就绪，
+// 点播放键即刻出声。只做不弹任何提示的静默预取；额度不足/被拦截/失败都
+// 保持安静（按钮回到“生成”态，用户手动点播时才走正式链路给出引导）。
+async function prefetchMessageAudio(message) {
+  const id = messageId(message);
+  if (!id || !state.ttsAutoPrefetch || state.audioUrls.has(id) || state.prefetchingIds.has(id)) return;
+  state.prefetchingIds.add(id);
+  render();
+  try {
+    const payload = await api(`/messages/${encodeURIComponent(id)}/tts-jobs`, { method: "POST", idempotent: uuid(), body: {} });
+    const job = payload?.tts_job ?? payload;
+    if (job?.state === "COMPLETED" && job.result_asset_id) {
+      const url = await apiAudio(`/media-assets/${encodeURIComponent(job.result_asset_id)}/content`);
+      state.audioUrls.set(id, { assetId: job.result_asset_id, url });
+    }
+  } catch { /* 预取失败静默。 */ }
+  finally {
+    state.prefetchingIds.delete(id);
+    render();
   }
 }
 
@@ -1734,7 +1763,7 @@ function messageMarkup(message) {
   const audio = !isUser && id ? state.audioUrls.get(id) : null;
   // 参考对话视觉：括号动作描写转斜体弱化；先转义再包裹，不引入用户可控 HTML。
   const bubbleHtml = (escapeHtml(content) || "…").replace(/([（(][^（）()]*[）)])/g, '<em class="action">$1</em>');
-  const synthesizing = !isUser && id && state.synthesizingMessageId === id;
+  const synthesizing = !isUser && id && (state.synthesizingMessageId === id || state.prefetchingIds.has(id));
   const voiceControl = !isUser && id ? `<button type="button" class="voice-trigger" data-action="${audio ? "toggle-message-audio" : "synthesize-message-audio"}" data-message-id="${escapeHtml(id)}" aria-label="${synthesizing ? "正在生成角色语音" : audio ? "播放角色语音" : "生成并播放角色语音"}" ${synthesizing ? 'data-synthesizing="true" disabled' : state.busy ? "disabled" : ""}><span class="voice-trigger-visual"><img src="/assets/player-play-filled.svg" alt="" aria-hidden="true"></span></button>` : "";
   const voicePlayback = !isUser && audio ? `<audio class="voice-audio" preload="metadata" src="${escapeHtml(audio.url)}"></audio>` : "";
   const voiceRow = voiceControl ? `<div class="voice-control-row">${voiceControl}${voicePlayback}</div>` : "";

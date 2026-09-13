@@ -1947,6 +1947,10 @@ async function confirmAsrJob(store, account, path, body, mediaStore) {
   return ok({ asr_job: publicAsrJob(job), input_audio_deletion: deletion && deletion.body.deletion_job });
 }
 
+// 情绪判断是一次 LLM 调用（自身超时 8s）；语音起播不等慢判断，超过此窗口
+// 即回退世界状态基线开始合成（emotion_source 如实记录，可审计）。
+const TTS_EMOTION_JUDGE_MAX_WAIT_MS = 1500;
+
 async function createTtsJob(store, account, path, ttsGenerator, textModerator, mediaStore, mediaEntitlementService, emotionJudge = null) {
   authorize(account, 'SYNTHESIZE_TTS', store);
   if (typeof ttsGenerator !== 'function') throw apiError(503, 'TTS_NOT_ENABLED', '本地开发未显式启用 TTS');
@@ -1954,6 +1958,13 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
   const conversation = ownConversation(store, account.account_id, source.conversation_id);
   // 音色随角色性别（用户在人格档案设定）：male→男声音色，female/未设定→默认音色。
   const voiceGender = normalizePersonaGender(store.characters.get(conversation.character_id)?.persona?.gender);
+  // 同一条消息已有可用语音时直接复用：重播即点即响，不重复合成、不重复计费；
+  // 人格性别变了则按新音色重新合成。
+  const reusable = [...store.mediaJobs.values()].find((item) => item.type === 'TTS'
+    && item.source_message_id === source.message_id && item.state === 'COMPLETED'
+    && item.voice_gender === voiceGender && item.result_asset_id
+    && store.mediaAssets.get(item.result_asset_id)?.state === 'AVAILABLE');
+  if (reusable) return accepted({ tts_job: publicTtsJob(reusable) });
   const voiceProfile = resolvedTtsVoiceProfile(ttsGenerator, voiceGender);
   const worldState = source.world_state_id
     ? { world_state_id: source.world_state_id, state_version: source.world_state_version }
@@ -1982,6 +1993,11 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
     await mediaStore.updateJob(job);
     return accepted({ tts_job: publicTtsJob(job), note: '这条回复只有动作描写，没有可朗读的台词。' });
   }
+  // 审核与情绪判断互不依赖，并行执行：此前判断器（一次 LLM 调用 1-3s）
+  // 串行挡在合成之前，是起播延迟的最大单一来源。
+  const judgePromise = typeof emotionJudge === 'function'
+    ? emotionJudge({ text: ttsText }).catch(() => null)
+    : null;
   if (typeof textModerator === 'function') {
     try {
       const moderation = await moderateTextWithMetric(store, account, textModerator, { text: ttsText, conversationId: conversation.conversation_id, direction: 'TTS_OUTPUT' });
@@ -2010,11 +2026,15 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
       return accepted({ tts_job: publicTtsJob(job), note: '角色语音额度不足；文字回复不受影响。' });
     }
   }
-  // P1：逐条情绪判断只覆盖合法枚举值；失败/非法输出静默回退世界状态基线，
-  // 语音流程不因判断器故障失败（回退来源已落 emotion_source 可审计）。
-  if (typeof emotionJudge === 'function') {
+  // P1：逐条情绪判断只覆盖合法枚举值；失败/非法输出/超过 1.5s 竞速窗口都
+  // 静默回退世界状态基线，语音流程不因判断器故障或慢响应失败。
+  if (judgePromise) {
+    let timer;
     try {
-      const judged = await emotionJudge({ text: ttsText });
+      const judged = await Promise.race([
+        judgePromise,
+        new Promise((resolve) => { timer = setTimeout(() => resolve(null), TTS_EMOTION_JUDGE_MAX_WAIT_MS); }),
+      ]);
       if (isSupportedEmotionCategory(judged?.category)) {
         const intensity = Number.isInteger(judged.intensity) && judged.intensity >= 50 && judged.intensity <= 200 ? judged.intensity : 100;
         job.emotion_category = judged.category;
@@ -2023,6 +2043,7 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
         job.tts_speed = emotionSpeedHint(judged.category);
       }
     } catch { /* 判断器失败不阻断语音合成。 */ }
+    finally { clearTimeout(timer); }
   }
   job.state = 'RUNNING'; job.attempts = 1;
   await mediaStore.updateJob(job);

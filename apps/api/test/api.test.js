@@ -650,6 +650,44 @@ test('TTS 情绪判断器覆盖世界状态基线，非法输出或故障时静�
   assert.deepEqual(broken.body.tts_job.emotion, { category: 'neutral', intensity: 100, source: 'world_state_mood' });
 });
 
+test('TTS 同一条消息重播复用已完成任务：不再合成、不再走审核与计费', async (t) => {
+  let ttsCalls = 0;
+  let moderationCalls = 0;
+  const mediaStore = { async createPendingJob() {}, async updateJob() {}, async putAudio() { return { objectKey: 'tts/x.mp3', checksum: 'a'.repeat(64), byteLength: 3, mimeType: 'audio/mpeg' }; }, async deleteAsset() {} };
+  const base = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: text, ai_generated: true }),
+    textModerator: async ({ direction }) => { if (direction === 'TTS_OUTPUT') moderationCalls += 1; return { decision: 'PASS', providerRequestId: 'tms_req_1', policyVersion: 'tms_dev_v1' }; },
+    ttsGenerator: async () => { ttsCalls += 1; return { asset: { bytes: Buffer.from('mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts_req_1' }; },
+    mediaStore
+  });
+  const { conversation } = await readyConversation(base, 'dev-alice-token', 'tts-reuse');
+  const message = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'tts-reuse-source', body: { content: { text: '这条语音会被重播' } } });
+  const messageIdValue = message.body.assistant_message.message_id;
+  const first = await request(base, `/api/v1/messages/${messageIdValue}/tts-jobs`, { method: 'POST', key: 'tts-reuse-job-1', body: {} });
+  assert.equal(first.body.tts_job.state, 'COMPLETED');
+  const second = await request(base, `/api/v1/messages/${messageIdValue}/tts-jobs`, { method: 'POST', key: 'tts-reuse-job-2', body: {} });
+  assert.equal(second.body.tts_job.job_id, first.body.tts_job.job_id, '重播必须复用同一任务而不是重复合成');
+  assert.equal(second.body.tts_job.state, 'COMPLETED');
+  assert.equal(ttsCalls, 1, '重播不得触发第二次供应商合成');
+  assert.equal(moderationCalls, 1, '重播不得重复烧审核调用');
+});
+
+test('TTS 情绪判断慢于竞速窗口时合成不等它：回退世界状态基线照常完成', async (t) => {
+  const mediaStore = { async createPendingJob() {}, async updateJob() {}, async putAudio() { return { objectKey: 'tts/x.mp3', checksum: 'a'.repeat(64), byteLength: 3, mimeType: 'audio/mpeg' }; }, async deleteAsset() {} };
+  const base = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: text, ai_generated: true }),
+    textModerator: async () => ({ decision: 'PASS', providerRequestId: 'tms_req_1', policyVersion: 'tms_dev_v1' }),
+    ttsGenerator: async (input) => ({ asset: { bytes: Buffer.from('mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts_req_1', emotionUsed: input.emotion }),
+    emotionJudge: () => new Promise((resolve) => setTimeout(() => resolve({ category: 'exciting', intensity: 150 }), 2500)),
+    mediaStore
+  });
+  const { conversation } = await readyConversation(base, 'dev-alice-token', 'tts-slow-judge');
+  const message = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'tts-slow-source', body: { content: { text: '慢判断也要尽快出声' } } });
+  const created = await request(base, `/api/v1/messages/${message.body.assistant_message.message_id}/tts-jobs`, { method: 'POST', key: 'tts-slow-job', body: {} });
+  assert.equal(created.body.tts_job.state, 'COMPLETED');
+  assert.deepEqual(created.body.tts_job.emotion, { category: 'neutral', intensity: 100, source: 'world_state_mood' });
+});
+
 test('TTS 音色随角色性别：male 选男声音色，未设定回默认音色并记录 voice_gender', async (t) => {
   const ttsInputs = [];
   const mediaStore = { async createPendingJob() {}, async updateJob() {}, async putAudio() { return { objectKey: 'tts/x.mp3', checksum: 'a'.repeat(64), byteLength: 3, mimeType: 'audio/mpeg' }; }, async deleteAsset() {} };
