@@ -34,7 +34,7 @@ const { buildCostReport, parseRateCard } = require('./domain/cost-accounting');
 const reviewerIdentity = require('./domain/reviewer-identity');
 const { inspectContextImage } = require('./domain/context-image-policy');
 const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
-const { CallSessionError, TURN_TERMINAL_STATES, callTurns, createCall, createTurn, endCall, ensureCallWithinLimits, ownCall, ownTurn, publicCall, publicTurn, requireActiveCall, settleTurn, transitionTurn } = require('./domain/call-session');
+const { CallSessionError, TURN_TERMINAL_STATES, callTurns, createCall, createTurn, endCall, ensureCallWithinLimits, ownCall, ownTurn, publicCall, publicTurn, reapExpiredCalls, requireActiveCall, settleTurn, transitionTurn } = require('./domain/call-session');
 const { CALL_AUDIO_MIME_TYPE, executeCallTurn, executeGreeting, previewGreeting, settleTurnSafely } = require('./domain/call-turn-engine');
 
 const TOKENS = new Map([
@@ -3627,4 +3627,24 @@ async function sendStatic(res, staticFile, requestId) {
   }
 }
 
-module.exports = { createApp, TOKENS, rankAssetsForContext };
+// 孤儿通话定时兜底（内存模式 API 进程 / PG 模式 Worker 进程共用）：把越限的
+// ACTIVE 通话惰性结清——未终局回合按 CALL_ENDED 失败结算、进程内音频缓冲即弃、
+// 落通话记录卡片与一次性摘要。store 全量扫描 ACTIVE 通话，账户解析由调用方注入
+// （内存模式直接取 Map；PG 模式在账户作用域事务内恒为同一账户）。
+function reapExpiredVoiceCalls(store, resolveAccount, summaryGenerator = null) {
+  const reaped = reapExpiredCalls(store);
+  for (const call of reaped) {
+    const account = resolveAccount(call.account_id);
+    if (!account) continue;
+    for (const turn of callTurns(store, call.call_id)) {
+      if (!TURN_TERMINAL_STATES.has(turn.state)) {
+        callAudioRegistry.discard(turn.turn_id);
+        settleTurnSafely(store, call, turn, { state: 'FAILED', failureCode: 'CALL_ENDED', now: new Date() });
+      }
+    }
+    settleEndedCallSideEffects(store, account, call, summaryGenerator);
+  }
+  return reaped;
+}
+
+module.exports = { createApp, TOKENS, rankAssetsForContext, callAudioRegistry, reapExpiredVoiceCalls };

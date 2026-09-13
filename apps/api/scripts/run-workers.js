@@ -33,6 +33,7 @@ const { createTencentCosPrivateMediaStoreFromEnvironment } = require('../src/med
 const { LocalPrivateMediaStore } = require('../src/media/local-private-media-store');
 const { fetchTencentGeneratedImage } = require('../src/media/tencent-image-result-fetcher');
 const { scheduleAccountNotifications } = require('../src/domain/notification-scheduler');
+const { reapExpiredVoiceCalls } = require('../src/app');
 const pg = require('pg');
 
 function parseArgs(argv) {
@@ -221,6 +222,25 @@ async function main() {
       });
       if (scheduled > 0) console.log(`[worker] 账户 ${accountId}：通知 +${scheduled}`);
       worked += scheduled;
+    }
+
+    // 孤儿通话兜底结清（客户端崩溃/进程重启后越限的 ACTIVE 通话）：越限回合
+    // 按 CALL_ENDED 失败结算、落通话记录卡片与一次性摘要（卡片判重，幂等）。
+    const activeCallAccounts = await discoverAccounts(`
+      SELECT DISTINCT account_id FROM call_sessions WHERE state = 'ACTIVE'`);
+    for (const accountId of activeCallAccounts) {
+      const reaped = await store.withAccountTransaction(accountId, async (scoped) => {
+        const account = [...scoped.accounts.values()][0];
+        if (!account) return [];
+        return reapExpiredVoiceCalls(scoped, () => account, summaryGenerator);
+      }).catch((error) => {
+        console.error(`[worker] 账户 ${accountId} 通话兜底结清失败：`, error.message);
+        return [];
+      });
+      if (reaped.length > 0) {
+        console.log(`[worker] 账户 ${accountId}：通话兜底结清 ${reaped.length} 场`);
+        worked += reaped.length;
+      }
     }
 
     if (cleanupWorker) {

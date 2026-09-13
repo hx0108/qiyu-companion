@@ -1,6 +1,6 @@
 'use strict';
 
-const { createApp } = require('./app');
+const { createApp, callAudioRegistry, reapExpiredVoiceCalls } = require('./app');
 const { assertRuntimeConfiguration, assertLocalSyntheticRuntimeAllowed } = require('./production/startup');
 const { createPersistenceFromEnvironment } = require('./persistence/composition');
 const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
@@ -66,3 +66,15 @@ if (process.env.QIYU_PERSISTENCE !== 'postgres') {
 }
 // 账户注销生产清理（P0 删除编排）：内存模式进程内执行；PG 模式由独立 Worker 部署。
 if (process.env.QIYU_PERSISTENCE !== 'postgres') startAccountDeletionCleanupWorker(store, { mediaStore, imageStore });
+
+// 通话兜底清扫：进程内音频缓冲按 TTL 丢弃（注册表是 API 进程本地状态，两种
+// 持久化模式都要跑）；孤儿通话越限结清仅内存模式内嵌——PG 模式的请求作用域
+// 存储不适合后台轮询，由 run-workers 进程在账户事务内承担。
+setInterval(() => callAudioRegistry.sweepExpired(), 60_000).unref();
+if (process.env.QIYU_PERSISTENCE !== 'postgres') {
+  setInterval(() => {
+    if ([...store.callSessions.values()].some((call) => call.state === 'ACTIVE')) {
+      reapExpiredVoiceCalls(store, (accountId) => store.account(accountId), summaryGenerator);
+    }
+  }, 60_000).unref();
+}
