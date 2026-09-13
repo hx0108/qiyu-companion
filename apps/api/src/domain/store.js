@@ -17,6 +17,8 @@ class DevelopmentStore {
     this.assets = new Map();
     this.mediaJobs = new Map();
     this.mediaAssets = new Map();
+    this.callSessions = new Map();
+    this.callTurns = new Map();
     this.entitlementLedgers = new Map();
     this.subscriptions = new Map();
     this.subscriptionOrders = new Map();

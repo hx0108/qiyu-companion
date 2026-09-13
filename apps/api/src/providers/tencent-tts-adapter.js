@@ -69,7 +69,15 @@ class TencentStreamTtsAdapter {
     this.now = now;
   }
 
-  async synthesize({ text, sessionId, emotion, intensity, speed } = {}) {
+  // 聚合合同（既有调用方）：等 final=1 拿完整 MP3。回调模式见 synthesizeStream。
+  async synthesize(input = {}) {
+    return await this.synthesizeStream(input);
+  }
+
+  // 流式回调模式（1:1 通话逐段下发）：每个 binary 帧转成 Buffer 后立即回调
+  // onAudioSegment（SSE emit 同步写响应）；signal 中止即关 WS——打断后必须
+  // 立刻停止计费，不能等本句 final。
+  async synthesizeStream({ text, sessionId, emotion, intensity, speed, onAudioSegment, signal } = {}) {
     if (!nonBlank(text) || text.trim().length > MAX_STREAM_TTS_TEXT_LENGTH) {
       throw new TencentProviderError('TENCENT_TTS_TEXT_INVALID', `语音文本必须为 1-${MAX_STREAM_TTS_TEXT_LENGTH} 个字符`, 400);
     }
@@ -93,7 +101,7 @@ class TencentStreamTtsAdapter {
     // 二进制帧直接拿 ArrayBuffer，避免 undici 默认 Blob 再转一次；
     // 仍兼容注入实现返回 Blob/Buffer 的情况。
     if ('binaryType' in socket) socket.binaryType = 'arraybuffer';
-    return await receiveStreamAudio(socket, this.timeoutMs, params.SessionId);
+    return await receiveStreamAudio(socket, this.timeoutMs, params.SessionId, { onAudioSegment, signal });
   }
 }
 
@@ -128,7 +136,7 @@ function normalizeStreamEmotion({ emotion, intensity, speed } = {}) {
   return normalized;
 }
 
-async function receiveStreamAudio(socket, timeoutMs, fallbackRequestId) {
+async function receiveStreamAudio(socket, timeoutMs, fallbackRequestId, { onAudioSegment, signal } = {}) {
   return await new Promise((resolve, reject) => {
     const chunks = [];
     let settled = false;
@@ -138,19 +146,26 @@ async function receiveStreamAudio(socket, timeoutMs, fallbackRequestId) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
       try { socket.close(); } catch { /* 已断开时忽略。 */ }
       fn(arg);
     };
     const fail = (error) => finish(reject, error);
+    const onAbort = () => fail(new TencentProviderError('TENCENT_TTS_STREAM_ABORTED', '实时语音合成已中止', 499, {}, false));
     const timer = setTimeout(() => {
       fail(new TencentProviderError('TENCENT_TTS_STREAM_TIMEOUT', '实时语音合成超时', 502, {}, true));
     }, timeoutMs);
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort);
+    }
     socket.onmessage = (event) => {
       // Blob→ArrayBuffer 是异步的；必须串行处理，否则 final 帧可能抢在
       // 还在转换的音频分片之前到达，返回不完整音频。
       processing = processing.then(() => handleStreamFrame(event.data)).catch(fail);
     };
     const handleStreamFrame = async (data) => {
+      if (settled) return; // 已中止/超时：排队中的余帧全部忽略。
       if (typeof data === 'string') {
         const frame = JSON.parse(data);
         if (frame.code !== 0) throw streamFrameError(frame);
@@ -162,7 +177,9 @@ async function receiveStreamAudio(socket, timeoutMs, fallbackRequestId) {
         }
         return;
       }
-      chunks.push(await toBuffer(data));
+      const chunk = await toBuffer(data);
+      chunks.push(chunk);
+      if (onAudioSegment) onAudioSegment(chunk);
     };
     socket.onerror = () => fail(new TencentProviderError('TENCENT_TTS_STREAM_CONNECTION_FAILED', '实时语音合成连接中断', 502, {}, true));
     socket.onclose = () => {
@@ -217,7 +234,12 @@ function createTencentTtsGeneratorFromEnvironment(environment = process.env, dep
   const maleAdapter = positiveInteger(environment.TENCENT_TTS_VOICE_TYPE_MALE)
     ? createAdapter(environment.TENCENT_TTS_VOICE_TYPE_MALE)
     : defaultAdapter;
-  const synthesize = (input) => (input?.gender === 'male' ? maleAdapter : defaultAdapter).synthesize(input);
+  const dispatch = (input) => (input?.gender === 'male' ? maleAdapter : defaultAdapter);
+  const synthesize = (input) => dispatch(input).synthesize(input);
+  // 通话回合引擎用逐段回调；仅实时合成（stream）适配器具备，basic 模式不透出。
+  if (typeof defaultAdapter.synthesizeStream === 'function') {
+    synthesize.synthesizeStream = (input) => dispatch(input).synthesizeStream(input);
+  }
   // Standard Tencent voices are never selected by the client.  The operator
   // records the provider entitlement and the completed internal rights review
   // once, then every task snapshots this immutable provenance.

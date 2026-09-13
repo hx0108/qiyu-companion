@@ -114,6 +114,58 @@ test('流式适配器校验文本长度与情感参数取值', async () => {
   await assert.rejects(() => adapter.synthesize({ text: 'x', sessionId: 'job', emotion: 'sad', speed: 9 }), (error) => error.code === 'TENCENT_TTS_SPEED_INVALID');
 });
 
+test('synthesizeStream：首段音频即时回调，final 汇总仍返回完整字节与请求 ID', async () => {
+  const { wsFactory, sockets } = fakeStreamServer([
+    JSON.stringify({ code: 0, request_id: 'ws_req_stream', final: 0 }),
+    new Uint8Array([104, 105]).buffer,
+    new Blob([Buffer.from('!')]),
+    JSON.stringify({ code: 0, final: 1 }),
+  ]);
+  const adapter = new TencentStreamTtsAdapter({ secretId: 'id', secretKey: 'key', appId: '1300123456', voiceType: 101001, wsFactory, timeoutMs: 2000, now: FIXED_NOW });
+  const order = [];
+  const result = await adapter.synthesizeStream({
+    text: '你好。',
+    sessionId: 'tts_job_stream',
+    onAudioSegment: (segment) => order.push(`seg:${segment.toString()}`)
+  }).then((aggregate) => { order.push('done'); return aggregate; });
+  // 回调必须发生在 final 汇总之前（逐段下发不等整句合成完）。
+  assert.deepEqual(order, ['seg:hi', 'seg:!', 'done']);
+  assert.equal(result.asset.bytes.toString(), 'hi!');
+  assert.equal(result.providerRequestId, 'ws_req_stream');
+  assert.equal(sockets[0].closeCalls, 1);
+});
+
+test('synthesizeStream：abort 即关 WS 立刻中止，余帧与回调不再发生（打断不继续烧钱）', async () => {
+  const { wsFactory, sockets } = fakeStreamServer([
+    JSON.stringify({ code: 0, request_id: 'ws_req_abort', final: 0 }),
+    new Uint8Array([1]).buffer,
+    JSON.stringify({ code: 0, final: 1 }),
+  ]);
+  const adapter = new TencentStreamTtsAdapter({ secretId: 'id', secretKey: 'key', appId: '1300123456', voiceType: 101001, wsFactory, timeoutMs: 2000, now: FIXED_NOW });
+  const controller = new AbortController();
+  const segments = [];
+  await assert.rejects(
+    () => adapter.synthesizeStream({
+      text: '打断我。',
+      sessionId: 'job_abort',
+      onAudioSegment: (segment) => { segments.push(segment); controller.abort(); },
+      signal: controller.signal
+    }),
+    (error) => error.code === 'TENCENT_TTS_STREAM_ABORTED' && error.retryable === false && error.status === 499
+  );
+  assert.equal(segments.length, 1); // 首段之后到达的 final 帧不触发任何回调
+  assert.equal(sockets[0].closeCalls, 1);
+
+  // 起播前就打断（帧尚未到达）：abort 监听器路径同样立即关 WS。
+  const quiet = fakeStreamServer([]);
+  const early = new TencentStreamTtsAdapter({ secretId: 'id', secretKey: 'key', appId: '1300123456', voiceType: 101001, wsFactory: quiet.wsFactory, timeoutMs: 2000, now: FIXED_NOW });
+  const earlyController = new AbortController();
+  const pending = early.synthesizeStream({ text: '早停。', sessionId: 'job_early', signal: earlyController.signal });
+  earlyController.abort();
+  await assert.rejects(() => pending, (error) => error.code === 'TENCENT_TTS_STREAM_ABORTED');
+  assert.equal(quiet.sockets[0].closeCalls, 1);
+});
+
 test('TTS 工厂 stream 模式要求 AppId，并切换到实时合成模型版本', () => {
   const base = { QIYU_TTS_PROVIDER: 'tencent', TENCENT_SECRET_ID: 'id', TENCENT_SECRET_KEY: 'key', TENCENT_REGION: 'ap-guangzhou', TENCENT_TTS_VOICE_TYPE: '101001', TENCENT_TTS_VOICE_VERSION: 'provider-catalog-2026-09', TENCENT_TTS_AUTHORIZATION_RECORD_ID: 'tencent-service-entitlement-2026', TENCENT_TTS_RIGHTS_REVIEW_ID: 'rights-review-voice-001' };
   assert.throws(() => createTencentTtsGeneratorFromEnvironment({ ...base, TENCENT_TTS_API_MODE: 'stream' }), (error) => error.code === 'TENCENT_TTS_APP_ID_REQUIRED');
@@ -142,4 +194,26 @@ test('TTS 工厂按角色性别分派双音色：male 用男声音色，其余�
   // 男声音色未配置时回退默认音色：不会静默构建第二个适配器或失败。
   const fallback = createTencentTtsGeneratorFromEnvironment({ ...base, TENCENT_TTS_VOICE_TYPE_MALE: undefined }, { wsFactory: fakeStreamServer(frames).wsFactory });
   assert.equal(fallback.voiceProfileFor('male').voice_id, 'tencent-standard-601009');
+});
+
+test('TTS 工厂 stream 模式透出 synthesizeStream 分派（含双音色与回调），basic 模式不透出', async () => {
+  const base = {
+    QIYU_TTS_PROVIDER: 'tencent', TENCENT_SECRET_ID: 'id', TENCENT_SECRET_KEY: 'key', TENCENT_REGION: 'ap-guangzhou',
+    TENCENT_TTS_API_MODE: 'stream', TENCENT_TTS_APP_ID: '1300123456',
+    TENCENT_TTS_VOICE_TYPE: '601009', TENCENT_TTS_VOICE_TYPE_MALE: '601008',
+    TENCENT_TTS_VOICE_VERSION: 'provider-catalog-2026-09', TENCENT_TTS_AUTHORIZATION_RECORD_ID: 'tencent-service-entitlement-2026', TENCENT_TTS_RIGHTS_REVIEW_ID: 'rights-review-voice-001'
+  };
+  const frames = [new Uint8Array([7]).buffer, JSON.stringify({ code: 0, final: 1, request_id: 'req_dispatch' })];
+  const { wsFactory, sockets } = fakeStreamServer(frames);
+  const generator = createTencentTtsGeneratorFromEnvironment(base, { wsFactory });
+  assert.equal(typeof generator.synthesizeStream, 'function');
+  const segments = [];
+  const result = await generator.synthesizeStream({ text: '男声台词。', sessionId: 'job_dispatch', gender: 'male', onAudioSegment: (segment) => segments.push(segment) });
+  assert.equal(result.asset.bytes.toString(), '\x07');
+  assert.match(sockets[0].url, /VoiceType=601008/); // 分派沿性别路由，不因流式回调旁路
+  assert.equal(segments.length, 1);
+
+  // basic 模式（无 WS 适配器）不透出 synthesizeStream，调用方回退聚合合同。
+  const basicGenerator = createTencentTtsGeneratorFromEnvironment({ ...base, TENCENT_TTS_API_MODE: undefined, TENCENT_TTS_APP_ID: undefined });
+  assert.equal(basicGenerator.synthesizeStream, undefined);
 });
