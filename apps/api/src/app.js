@@ -1029,6 +1029,8 @@ function createPersonaDraft(store, account, path, body) {
 // PRD 3.2.1 用户可见可改的人格档案字段；系统安全边界由服务端持有，不在此列。
 const PERSONA_TEXT_FIELDS = ['worldview', 'age_setting', 'relationship_to_user', 'personality', 'expression_style'];
 const PERSONA_LIST_FIELDS = ['hard_boundaries', 'example_behaviors'];
+// 角色性别：驱动语音合成选择男声/女声，也进入人格提示词；未设定用默认音色。
+const PERSONA_GENDERS = new Set(['male', 'female', 'unspecified']);
 const PERSONA_TEXT_MAX = 500;
 const PERSONA_LIST_ITEM_MAX = 200;
 
@@ -1036,6 +1038,7 @@ function sanitizePersona(input) {
   if (input === undefined || input === null) return emptyPersona();
   if (typeof input !== 'object' || Array.isArray(input)) throw apiError(400, 'VALIDATION_ERROR', 'persona 必须是对象');
   const persona = emptyPersona();
+  persona.gender = normalizePersonaGender(input.gender, true);
   for (const field of PERSONA_TEXT_FIELDS) {
     const value = input[field];
     if (value === undefined || value === null || value === '') continue;
@@ -1060,13 +1063,22 @@ function sanitizePersona(input) {
     if (items.length > 10) throw apiError(400, 'VALIDATION_ERROR', `persona.${field} 最多 10 项`);
     persona[field] = items;
   }
-  const unknown = Object.keys(input).filter((key) => !PERSONA_TEXT_FIELDS.includes(key) && !PERSONA_LIST_FIELDS.includes(key));
+  const unknown = Object.keys(input).filter((key) => !PERSONA_TEXT_FIELDS.includes(key) && !PERSONA_LIST_FIELDS.includes(key) && key !== 'gender');
   if (unknown.length > 0) throw apiError(400, 'VALIDATION_ERROR', `persona 不支持字段：${unknown.join(', ')}`);
   return persona;
 }
 
 function emptyPersona() {
-  return { worldview: '', age_setting: '', relationship_to_user: '', personality: '', expression_style: '', hard_boundaries: [], example_behaviors: [] };
+  return { gender: 'unspecified', worldview: '', age_setting: '', relationship_to_user: '', personality: '', expression_style: '', hard_boundaries: [], example_behaviors: [] };
+}
+
+// 存量角色的 persona 没有 gender（JSONB 原样保存），读取侧统一经此归一。
+// strict 模式用于用户输入校验：非枚举值直接 400，不静默吞掉拼写错误。
+function normalizePersonaGender(value, strict = false) {
+  if (value === undefined || value === null || value === '') return 'unspecified';
+  if (PERSONA_GENDERS.has(value)) return value;
+  if (strict) throw apiError(400, 'VALIDATION_ERROR', 'persona.gender 只能是 male、female 或 unspecified');
+  return 'unspecified';
 }
 
 // 世界状态是短期、可理解的情境数据；人格、安全结论和确认关系事实均不能写入这里。
@@ -1938,9 +1950,11 @@ async function confirmAsrJob(store, account, path, body, mediaStore) {
 async function createTtsJob(store, account, path, ttsGenerator, textModerator, mediaStore, mediaEntitlementService, emotionJudge = null) {
   authorize(account, 'SYNTHESIZE_TTS', store);
   if (typeof ttsGenerator !== 'function') throw apiError(503, 'TTS_NOT_ENABLED', '本地开发未显式启用 TTS');
-  const voiceProfile = resolvedTtsVoiceProfile(ttsGenerator);
   const source = ownAssistantMessage(store, account.account_id, path.split('/')[4]);
   const conversation = ownConversation(store, account.account_id, source.conversation_id);
+  // 音色随角色性别（用户在人格档案设定）：male→男声音色，female/未设定→默认音色。
+  const voiceGender = normalizePersonaGender(store.characters.get(conversation.character_id)?.persona?.gender);
+  const voiceProfile = resolvedTtsVoiceProfile(ttsGenerator, voiceGender);
   const worldState = source.world_state_id
     ? { world_state_id: source.world_state_id, state_version: source.world_state_version }
     : publicWorldState(currentWorldState(store, account.account_id, store.characters.get(conversation.character_id)));
@@ -1953,7 +1967,7 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
     job_id: store.next('tts'), account_id: account.account_id, character_id: conversation.character_id, conversation_id: conversation.conversation_id,
     source_message_id: source.message_id, entitlement_id: null, type: 'TTS', state: 'PENDING', attempts: 0, provider: 'tencent-tts', provider_request_id: null,
     moderation_policy_version: null, result_asset_id: null, failure_code: null,
-    voice_id: voiceProfile.voice_id, voice_version: voiceProfile.voice_version, authorization_record_id: voiceProfile.authorization_record_id,
+    voice_id: voiceProfile.voice_id, voice_version: voiceProfile.voice_version, voice_gender: voiceGender, authorization_record_id: voiceProfile.authorization_record_id,
     rights_review_id: voiceProfile.rights_review_id, rights_review_state: voiceProfile.rights_review_state,
     world_state_id: worldState.world_state_id, world_state_version: worldState.state_version,
     tts_text: ttsText, emotion_category: baseEmotion.category, emotion_intensity: baseEmotion.intensity,
@@ -2016,7 +2030,7 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
     const providerStartedAt = Date.now();
     let result;
     try {
-      result = await ttsGenerator({ text: ttsText, sessionId: job.job_id, emotion: job.emotion_category, intensity: job.emotion_intensity, speed: job.tts_speed });
+      result = await ttsGenerator({ text: ttsText, sessionId: job.job_id, gender: voiceGender, emotion: job.emotion_category, intensity: job.emotion_intensity, speed: job.tts_speed });
       recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(ttsGenerator, job.provider), modelVersion: providerModelVersion(ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: 'COMPLETED' });
     } catch (error) {
       recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(ttsGenerator, job.provider), modelVersion: providerModelVersion(ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: 'FAILED' });
@@ -3098,17 +3112,19 @@ function ownOperationMetrics(store, accountId) { return [...(store.operationMetr
 function ownTrialFeedback(store, accountId) { return [...(store.trialFeedback?.values() || [])].filter((item) => item.account_id === accountId).map(publicTrialFeedback); }
 function publicTrialFeedback(feedback) { return { feedback_id: feedback.feedback_id, category: feedback.category, rating: feedback.rating, note: feedback.note, created_at: feedback.created_at }; }
 function publicNotice(notice) { return { ...notice }; }
-function publicTtsJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, source_message_id: job.source_message_id, voice: { voice_id: job.voice_id || null, voice_version: job.voice_version || null, authorization_record_id: job.authorization_record_id || null, rights_review_id: job.rights_review_id || null, rights_review_state: job.rights_review_state || null }, emotion: job.emotion_category ? { category: job.emotion_category, intensity: job.emotion_intensity ?? null, source: job.emotion_source || null } : null, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
+function publicTtsJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, source_message_id: job.source_message_id, voice: { voice_id: job.voice_id || null, voice_version: job.voice_version || null, voice_gender: job.voice_gender || 'unspecified', authorization_record_id: job.authorization_record_id || null, rights_review_id: job.rights_review_id || null, rights_review_state: job.rights_review_state || null }, emotion: job.emotion_category ? { category: job.emotion_category, intensity: job.emotion_intensity ?? null, source: job.emotion_source || null } : null, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
 function publicAsrJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, input_asset_id: job.input_asset_id, transcript: job.transcript_text ? { text: job.transcript_text, state: job.transcript_state, version: 1 } : null, failure_code: job.failure_code, created_at: job.created_at }; }
 function publicImageJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, reference_asset_id: job.reference_asset_id, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
-function resolvedTtsVoiceProfile(ttsGenerator) {
+function resolvedTtsVoiceProfile(ttsGenerator, gender = 'unspecified') {
   // Direct function injection is only used by the local synthetic test harness.
-  // Runtime-created Tencent adapters must supply an operator-recorded profile.
-  const profile = ttsGenerator.voiceProfile || {
-    voice_id: 'development-synthetic-voice', voice_version: 'development-v1',
-    authorization_record_id: 'development-synthetic-authorization', rights_review_id: 'development-synthetic-rights-review',
-    rights_review_state: 'APPROVED'
-  };
+  // Runtime-created Tencent adapters must supply an operator-recorded profile;
+  // adapters that configure a separate male voice expose voiceProfileFor(gender).
+  const profile = (typeof ttsGenerator.voiceProfileFor === 'function' ? ttsGenerator.voiceProfileFor(gender) : null)
+    || ttsGenerator.voiceProfile || {
+      voice_id: 'development-synthetic-voice', voice_version: 'development-v1',
+      authorization_record_id: 'development-synthetic-authorization', rights_review_id: 'development-synthetic-rights-review',
+      rights_review_state: 'APPROVED'
+    };
   if (!['voice_id', 'voice_version', 'authorization_record_id', 'rights_review_id'].every((key) => typeof profile[key] === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(profile[key]))) {
     throw apiError(503, 'TTS_VOICE_PROVENANCE_INVALID', 'TTS 音色授权溯源配置无效');
   }

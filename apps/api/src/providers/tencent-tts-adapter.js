@@ -198,24 +198,30 @@ function createTencentTtsGeneratorFromEnvironment(environment = process.env, dep
   if (environment.QIYU_TTS_PROVIDER !== 'tencent') return null;
   // stream = 实时合成（WebSocket，带情感参数）；缺 AppId 必须显式失败，
   // 静默回退 basic 会让“情感语音已上线”成为假象。
-  const adapter = environment.TENCENT_TTS_API_MODE === 'stream'
+  const createAdapter = (voiceType) => environment.TENCENT_TTS_API_MODE === 'stream'
     ? new TencentStreamTtsAdapter({
         secretId: environment.TENCENT_SECRET_ID, secretKey: environment.TENCENT_SECRET_KEY,
-        appId: environment.TENCENT_TTS_APP_ID, voiceType: environment.TENCENT_TTS_VOICE_TYPE,
+        appId: environment.TENCENT_TTS_APP_ID, voiceType,
         codec: 'mp3', sampleRate: environment.TENCENT_TTS_SAMPLE_RATE || 16000,
         wsFactory: dependencies.wsFactory, timeoutMs: environment.TENCENT_TTS_TIMEOUT_MS, now: dependencies.now,
       })
     : new TencentTtsAdapter({
         client: new TencentTc3Client({ secretId: environment.TENCENT_SECRET_ID, secretKey: environment.TENCENT_SECRET_KEY, region: environment.TENCENT_REGION, fetchImpl: dependencies.fetchImpl || globalThis.fetch, timeoutMs: environment.TENCENT_TTS_TIMEOUT_MS, now: dependencies.now }),
-        voiceType: environment.TENCENT_TTS_VOICE_TYPE,
+        voiceType,
         modelType: environment.TENCENT_TTS_MODEL_TYPE || 1,
         codec: 'mp3', sampleRate: environment.TENCENT_TTS_SAMPLE_RATE || 16000
       });
-  const synthesize = (input) => adapter.synthesize(input);
+  // 双音色（2026-09-13 角色性别驱动）：TENCENT_TTS_VOICE_TYPE 为默认/女声音色，
+  // TENCENT_TTS_VOICE_TYPE_MALE 为男声音色；男声未配置时回退默认音色。
+  const defaultAdapter = createAdapter(environment.TENCENT_TTS_VOICE_TYPE);
+  const maleAdapter = positiveInteger(environment.TENCENT_TTS_VOICE_TYPE_MALE)
+    ? createAdapter(environment.TENCENT_TTS_VOICE_TYPE_MALE)
+    : defaultAdapter;
+  const synthesize = (input) => (input?.gender === 'male' ? maleAdapter : defaultAdapter).synthesize(input);
   // Standard Tencent voices are never selected by the client.  The operator
   // records the provider entitlement and the completed internal rights review
   // once, then every task snapshots this immutable provenance.
-  synthesize.voiceProfile = Object.freeze({
+  const profileFor = (adapter) => Object.freeze({
     voice_id: `tencent-standard-${adapter.voiceType}`,
     voice_version: requiredProfileValue(environment.TENCENT_TTS_VOICE_VERSION, 'TENCENT_TTS_VOICE_VERSION'),
     authorization_record_id: requiredProfileValue(environment.TENCENT_TTS_AUTHORIZATION_RECORD_ID, 'TENCENT_TTS_AUTHORIZATION_RECORD_ID'),
@@ -223,10 +229,13 @@ function createTencentTtsGeneratorFromEnvironment(environment = process.env, dep
     rights_review_state: 'APPROVED',
     source: 'TENCENT_STANDARD_VOICE_OPERATOR_RECORD'
   });
+  synthesize.voiceProfile = profileFor(defaultAdapter);
+  const maleProfile = maleAdapter === defaultAdapter ? synthesize.voiceProfile : profileFor(maleAdapter);
+  synthesize.voiceProfileFor = (gender) => (gender === 'male' ? maleProfile : synthesize.voiceProfile);
   synthesize.provider = 'tencent-tts';
   synthesize.modelVersion = environment.TENCENT_TTS_API_MODE === 'stream'
     ? 'TextToStreamAudioWS:emotion-v1'
-    : `TextToVoice/${TTS_VERSION}:${adapter.modelType}`;
+    : `TextToVoice/${TTS_VERSION}:${defaultAdapter.modelType}`;
   return synthesize;
 }
 

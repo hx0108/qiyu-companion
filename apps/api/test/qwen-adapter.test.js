@@ -230,6 +230,21 @@ test('角色仅在用户明确询问身份时才自报姓名，普通聊天不�
   assert.match(system, /不得以「我是何以深」开头/);
 });
 
+test('人格档案包含用户设定的性别时进入提示词，未设定不产生性别行', () => {
+  const male = buildMessages('你好', {
+    character: { name: '林默', persona: { gender: 'male', personality: '沉稳', hard_boundaries: [], example_behaviors: [] } }
+  });
+  assert.match(male[0].content, /- 性别：男（用户设定，以此为准）/);
+  const female = buildMessages('你好', {
+    character: { name: '阿栖', persona: { gender: 'female', personality: '温柔', hard_boundaries: [], example_behaviors: [] } }
+  });
+  assert.match(female[0].content, /- 性别：女（用户设定，以此为准）/);
+  const unset = buildMessages('你好', {
+    character: { name: '无名', persona: { gender: 'unspecified', personality: '随性', hard_boundaries: [], example_behaviors: [] } }
+  });
+  assert.doesNotMatch(unset[0].content, /- 性别：/);
+});
+
 test('AI-08 fixed attack data remains subordinate to the immutable system safety instruction', () => {
   const [personaAttack, assetAttack, historyAttack, userAttack] = PROMPT_INJECTION_ATTACK_SET_V1;
   const messages = buildMessages(userAttack.payload, {

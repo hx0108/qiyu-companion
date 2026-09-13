@@ -338,10 +338,14 @@ const PERSONA_LABELS = {
   worldview: '世界观', age_setting: '年龄设定', relationship_to_user: '与用户的关系',
   personality: '性格', expression_style: '表达方式'
 };
+const PERSONA_GENDER_LABELS = { male: '男', female: '女' };
 
 function personaLinesFor(persona) {
   if (!persona) return [];
   const lines = [];
+  // 性别放首行：用户显式设定的角色性别同时驱动语音男/女声，模型不得自行改判。
+  const genderLabel = PERSONA_GENDER_LABELS[persona.gender];
+  if (genderLabel) lines.push(`- 性别：${genderLabel}（用户设定，以此为准）`);
   for (const [field, label] of Object.entries(PERSONA_LABELS)) {
     if (persona[field]) lines.push(`- ${label}：${escapePromptData(persona[field])}`);
   }

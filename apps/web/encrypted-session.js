@@ -7,8 +7,10 @@ const KEY_ID = 'closed-trial-session-aes-gcm';
 // - v2（非安全上下文降级，如封测期 http://IP 直连）：base64 编码 + 明确 encoding 标记。
 //   不伪装成加密；会话令牌的暴露面与本页任何脚本一致（同源可读），封测白名单
 //   边界下可接受。HTTPS 启用后新会话自动回到 v1。
+// 2026-09-13 起：令牌保存在 localStorage（退出浏览器后仍保留），邀请码只需输入一次；
+// refresh_token 供 bootstrap 静默续期。主动“退出试用会话”才会清除。
 export async function loadEncryptedSession(storageKey) {
-  const envelope = sessionStorage.getItem(storageKey);
+  const envelope = localStorage.getItem(storageKey);
   if (!envelope) return null;
   try {
     const parsed = JSON.parse(envelope);
@@ -20,23 +22,23 @@ export async function loadEncryptedSession(storageKey) {
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(parsed.iv) }, key, decode(parsed.data));
     return JSON.parse(new TextDecoder().decode(plain));
   } catch {
-    sessionStorage.removeItem(storageKey);
+    localStorage.removeItem(storageKey);
     return null;
   }
 }
 
 export async function saveEncryptedSession(storageKey, value) {
   if (!secureStorageAvailable()) {
-    sessionStorage.setItem(storageKey, JSON.stringify({ v: 2, encoding: 'base64', data: encode(new TextEncoder().encode(JSON.stringify(value))) }));
+    localStorage.setItem(storageKey, JSON.stringify({ v: 2, encoding: 'base64', data: encode(new TextEncoder().encode(JSON.stringify(value))) }));
     return;
   }
   const key = await deviceKey();
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(value)));
-  sessionStorage.setItem(storageKey, JSON.stringify({ v: 1, iv: encode(iv), data: encode(new Uint8Array(data)) }));
+  localStorage.setItem(storageKey, JSON.stringify({ v: 1, iv: encode(iv), data: encode(new Uint8Array(data)) }));
 }
 
-export function clearEncryptedSession(storageKey) { sessionStorage.removeItem(storageKey); }
+export function clearEncryptedSession(storageKey) { localStorage.removeItem(storageKey); }
 
 function secureStorageAvailable() { return Boolean(globalThis.crypto?.subtle && globalThis.indexedDB); }
 

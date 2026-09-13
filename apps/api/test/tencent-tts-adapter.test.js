@@ -121,3 +121,25 @@ test('TTS 工厂 stream 模式要求 AppId，并切换到实时合成模型版�
   assert.equal(generator.modelVersion, 'TextToStreamAudioWS:emotion-v1');
   assert.equal(generator.provider, 'tencent-tts');
 });
+
+test('TTS 工厂按角色性别分派双音色：male 用男声音色，其余回默认音色', async () => {
+  const base = {
+    QIYU_TTS_PROVIDER: 'tencent', TENCENT_SECRET_ID: 'id', TENCENT_SECRET_KEY: 'key', TENCENT_TTS_API_MODE: 'stream', TENCENT_TTS_APP_ID: '1300123456',
+    TENCENT_TTS_VOICE_TYPE: '601009', TENCENT_TTS_VOICE_TYPE_MALE: '601008',
+    TENCENT_TTS_VOICE_VERSION: 'provider-catalog-2026-09', TENCENT_TTS_AUTHORIZATION_RECORD_ID: 'tencent-service-entitlement-2026', TENCENT_TTS_RIGHTS_REVIEW_ID: 'rights-review-voice-001'
+  };
+  const frames = [new Uint8Array([1, 2, 3]).buffer, JSON.stringify({ code: 0, final: 1, request_id: 'req_gender' })];
+  const { wsFactory, sockets } = fakeStreamServer(frames);
+  const generator = createTencentTtsGeneratorFromEnvironment(base, { wsFactory });
+  await generator({ text: '男声台词。', sessionId: 'job_male', gender: 'male' });
+  assert.match(sockets[0].url, /VoiceType=601008/);
+  assert.equal(generator.voiceProfileFor('male').voice_id, 'tencent-standard-601008');
+  assert.equal(generator.voiceProfileFor('female').voice_id, 'tencent-standard-601009');
+  assert.equal(generator.voiceProfile.voice_id, 'tencent-standard-601009');
+  await generator({ text: '默认台词。', sessionId: 'job_default' });
+  assert.match(sockets[1].url, /VoiceType=601009/);
+
+  // 男声音色未配置时回退默认音色：不会静默构建第二个适配器或失败。
+  const fallback = createTencentTtsGeneratorFromEnvironment({ ...base, TENCENT_TTS_VOICE_TYPE_MALE: undefined }, { wsFactory: fakeStreamServer(frames).wsFactory });
+  assert.equal(fallback.voiceProfileFor('male').voice_id, 'tencent-standard-601009');
+});

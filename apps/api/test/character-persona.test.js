@@ -96,6 +96,30 @@ test('人格字段校验拒绝超长、错误类型与未知字段', async (t) =
   assert.match(unknown.body.error.message, /secret_field/);
 });
 
+test('persona.gender 决定语音男/女声：合法枚举入库，非法值拒绝，缺省归一为 unspecified', async (t) => {
+  const base = await start(t);
+  await passAge(base, 'persona-gender');
+  const male = await request(base, '/api/v1/characters', { method: 'POST', key: 'pg-male', body: { name: '男声角色', persona: { ...PERSONA, gender: 'male' } } });
+  assert.equal(male.status, 201);
+  assert.equal(male.body.character.persona.gender, 'male');
+  await passAge(base, 'persona-gender-bob', 'dev-bob-token');
+  // 非法枚举在校验层拒绝（不占用单角色名额），随后正常创建女声角色。
+  const invalid = await request(base, '/api/v1/characters', { method: 'POST', token: 'dev-bob-token', key: 'pg-invalid', body: { name: '非法性别', persona: { gender: 'boy' } } });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.body.error.message, /persona\.gender/);
+  const female = await request(base, '/api/v1/characters', { method: 'POST', token: 'dev-bob-token', key: 'pg-female', body: { name: '女声角色', persona: { gender: 'female' } } });
+  assert.equal(female.status, 201);
+  assert.equal(female.body.character.persona.gender, 'female');
+  // 自助修改回“未设定”归一为 unspecified：存量角色与旧客户端不产生隐性差异。
+  const cleared = await request(base, `/api/v1/characters/${female.body.character.character_id}/persona-versions`, {
+    method: 'POST', token: 'dev-bob-token', key: 'pg-clear',
+    body: { expected_version: 1, persona: { gender: '', personality: '随性' }, note: '清除性别设定' }
+  });
+  assert.equal(cleared.status, 201);
+  assert.equal(cleared.body.character.persona.gender, 'unspecified');
+  assert.deepEqual(cleared.body.persona_version.changed_fields, ['gender', 'personality']);
+});
+
 test('模型上下文包包含当前人格档案', async (t) => {
   const observed = [];
   const base = await start(t, {

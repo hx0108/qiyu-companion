@@ -285,6 +285,7 @@ paths:
                   type: object
                   description: 可选人格档案（PRD 3.2.1 用户可编辑字段）；省略时创建空档案。字段约束同 PATCH。
                   properties:
+                    gender: { type: string, enum: [male, female, unspecified], description: 角色性别；驱动语音合成选择男声或女声。 }
                     worldview: { type: string }
                     age_setting: { type: string }
                     relationship_to_user: { type: string }
@@ -381,6 +382,7 @@ paths:
                   type: object
                   description: PRD 3.2.1 用户可编辑人格字段；文本字段最长500字，列表字段最多10项、单项最长200字。
                   properties:
+                    gender: { type: string, enum: [male, female, unspecified], description: 角色性别；驱动语音合成选择男声或女声。 }
                     worldview: { type: string }
                     age_setting: { type: string }
                     relationship_to_user: { type: string }

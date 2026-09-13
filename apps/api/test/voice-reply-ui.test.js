@@ -6,6 +6,7 @@ const test = require('node:test');
 const webRoot = path.resolve(__dirname, '../../web');
 const css = fs.readFileSync(path.join(webRoot, 'prototype-restoration.css'), 'utf8');
 const app = fs.readFileSync(path.join(webRoot, 'app.js'), 'utf8');
+const session = fs.readFileSync(path.join(webRoot, 'encrypted-session.js'), 'utf8');
 
 function rule(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -68,4 +69,29 @@ test('assistant voice control stays inside the message bubble and has no visible
   assert.match(app, /<div class="bubble">[\s\S]*\$\{voiceRow\}<\/div><\/article>/);
   assert.doesNotMatch(app, /<span[^>]*>\s*(?:播放|播放语音|AI 生成语音|\d+[″"'])\s*<\/span>/);
   assert.doesNotMatch(app, /class="voice-trigger"[^>]*\stitle=/);
+});
+
+test('软键盘弹出时底部导航保持锚在物理屏幕底部，不被顶到键盘上方', () => {
+  const nav = rule('.qiyu-prototype .bottom-nav');
+  assert.match(nav, /position:\s*absolute/);
+  // 键盘压缩布局视口时，JS 写入等量 inset 把导航推回屏幕底部（藏在键盘后）。
+  assert.match(nav, /bottom:\s*calc\(0px - var\(--qy-keyboard-inset, 0px\)\)/);
+  assert.match(app, /--qy-keyboard-inset/);
+  assert.match(app, /KEYBOARD_INSET_THRESHOLD_PX/);
+  assert.match(app, /visualViewport\?\.addEventListener\("resize", syncKeyboardInset\)/);
+});
+
+test('人格表单提供角色性别选择，性别值随 persona 提交给服务端驱动男/女声', () => {
+  assert.match(app, /name="persona_gender"/);
+  assert.match(app, /genderOption\("female", "女性 · 女声"\)/);
+  assert.match(app, /genderOption\("male", "男性 · 男声"\)/);
+  assert.match(app, /gender:\s*\["male", "female"\]\.includes\(form\.elements\.persona_gender\?\.value\)/);
+});
+
+test('试用会话令牌保存在 localStorage：退出浏览器后邀请码不需重复输入', () => {
+  assert.match(session, /localStorage\.getItem\(storageKey\)/);
+  assert.match(session, /localStorage\.setItem\(storageKey/);
+  assert.doesNotMatch(session, /sessionStorage/);
+  // 主动退出试用会话仍要能清除凭据。
+  assert.match(app, /function logoutTrial\(\)[\s\S]*?clearTrialSession\(\)/);
 });

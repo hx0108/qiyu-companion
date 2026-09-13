@@ -522,7 +522,7 @@ test('TTS 先持久化任务、审核助手文本、保存私有音频元数据�
   assert.equal(created.body.tts_job.state, 'COMPLETED');
   assert.equal(created.body.tts_job.world_state_id, message.body.assistant_message.world_state_id);
   assert.equal(created.body.tts_job.world_state_version, 1);
-  assert.deepEqual(created.body.tts_job.voice, { voice_id: 'development-synthetic-voice', voice_version: 'development-v1', authorization_record_id: 'development-synthetic-authorization', rights_review_id: 'development-synthetic-rights-review', rights_review_state: 'APPROVED' });
+  assert.deepEqual(created.body.tts_job.voice, { voice_id: 'development-synthetic-voice', voice_version: 'development-v1', voice_gender: 'unspecified', authorization_record_id: 'development-synthetic-authorization', rights_review_id: 'development-synthetic-rights-review', rights_review_state: 'APPROVED' });
   // 情感投放来自当前世界状态（HAPPY），供应商收到的是剥离（动作）后的台词与情感三元组。
   assert.deepEqual(created.body.tts_job.emotion, { category: 'happy', intensity: 110, source: 'world_state_mood' });
   assert.equal(ttsInput.text, '可朗读：请说一句晚安');
@@ -648,6 +648,46 @@ test('TTS 情绪判断器覆盖世界状态基线，非法输出或故障时静�
   const broken = await request(base, `/api/v1/messages/${await send('判断器故障时的台词', 'tts-judge-3')}/tts-jobs`, { method: 'POST', key: 'tts-judge-job-3', body: {} });
   assert.equal(broken.body.tts_job.state, 'COMPLETED');
   assert.deepEqual(broken.body.tts_job.emotion, { category: 'neutral', intensity: 100, source: 'world_state_mood' });
+});
+
+test('TTS 音色随角色性别：male 选男声音色，未设定回默认音色并记录 voice_gender', async (t) => {
+  const ttsInputs = [];
+  const mediaStore = { async createPendingJob() {}, async updateJob() {}, async putAudio() { return { objectKey: 'tts/x.mp3', checksum: 'a'.repeat(64), byteLength: 3, mimeType: 'audio/mpeg' }; }, async deleteAsset() {} };
+  const base = await start(t, {
+    replyGenerator: async (text) => ({ provider: 'qwen', model_version: 'qwen3.8-flash', reply_text: text, ai_generated: true }),
+    textModerator: async () => ({ decision: 'PASS', providerRequestId: 'tms_req_1', policyVersion: 'tms_dev_v1' }),
+    // 模拟腾讯适配器的双音色合同：voiceProfileFor(gender) 返回对应运营音色档案。
+    ttsGenerator: Object.assign(async (input) => { ttsInputs.push(input); return { asset: { bytes: Buffer.from('mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts_req_1' }; }, {
+      voiceProfileFor: (gender) => ({
+        voice_id: gender === 'male' ? 'tencent-standard-601008' : 'tencent-standard-601009',
+        voice_version: 'dev-gender-v1', authorization_record_id: 'development-synthetic-authorization',
+        rights_review_id: 'development-synthetic-rights-review', rights_review_state: 'APPROVED'
+      })
+    }),
+    mediaStore
+  });
+  // 单账户单角色：male 用 dev-alice，未设定用 dev-bob。
+  await displayAndPass(base, 'dev-alice-token', 'tts-gender-male');
+  const maleCharacter = await request(base, '/api/v1/characters', { method: 'POST', token: 'dev-alice-token', key: 'tts-gender-m-char', body: { name: '男声角色', persona: { gender: 'male' } } });
+  assert.equal(maleCharacter.status, 201);
+  const maleConversation = await request(base, '/api/v1/conversations', { method: 'POST', token: 'dev-alice-token', key: 'tts-gender-m-conv', body: { character_id: maleCharacter.body.character.character_id } });
+  const maleMessage = await request(base, `/api/v1/conversations/${maleConversation.body.conversation.conversation_id}/messages`, { method: 'POST', token: 'dev-alice-token', key: 'tts-gender-m-msg', body: { content: { text: '男声角色台词' } } });
+  const maleJob = await request(base, `/api/v1/messages/${maleMessage.body.assistant_message.message_id}/tts-jobs`, { method: 'POST', token: 'dev-alice-token', key: 'tts-gender-m-job', body: {} });
+  assert.equal(maleJob.body.tts_job.state, 'COMPLETED');
+  assert.equal(maleJob.body.tts_job.voice.voice_gender, 'male');
+  assert.equal(maleJob.body.tts_job.voice.voice_id, 'tencent-standard-601008');
+  assert.equal(ttsInputs[0].gender, 'male');
+
+  await displayAndPass(base, 'dev-bob-token', 'tts-gender-plain');
+  const plainCharacter = await request(base, '/api/v1/characters', { method: 'POST', token: 'dev-bob-token', key: 'tts-gender-p-char', body: { name: '默认音色角色' } });
+  assert.equal(plainCharacter.body.character.persona.gender, 'unspecified');
+  const plainConversation = await request(base, '/api/v1/conversations', { method: 'POST', token: 'dev-bob-token', key: 'tts-gender-p-conv', body: { character_id: plainCharacter.body.character.character_id } });
+  const plainMessage = await request(base, `/api/v1/conversations/${plainConversation.body.conversation.conversation_id}/messages`, { method: 'POST', token: 'dev-bob-token', key: 'tts-gender-p-msg', body: { content: { text: '默认音色台词' } } });
+  const plainJob = await request(base, `/api/v1/messages/${plainMessage.body.assistant_message.message_id}/tts-jobs`, { method: 'POST', token: 'dev-bob-token', key: 'tts-gender-p-job', body: {} });
+  assert.equal(plainJob.body.tts_job.state, 'COMPLETED');
+  assert.equal(plainJob.body.tts_job.voice.voice_gender, 'unspecified');
+  assert.equal(plainJob.body.tts_job.voice.voice_id, 'tencent-standard-601009');
+  assert.equal(ttsInputs[1].gender, 'unspecified');
 });
 
 test('ASR 先写私有输入音频、返回待确认转写，确认后删除原始音频', async (t) => {

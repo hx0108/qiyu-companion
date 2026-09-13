@@ -6,8 +6,9 @@ const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
 const TRIAL_SESSION_STORAGE_KEY = "qiyu.closed-trial.session.v1";
 const app = document.querySelector("#app");
 
-// Only opaque closed-trial tokens live in sessionStorage. Product facts and
-// personal interaction data are always reloaded from the API.
+// Only opaque closed-trial tokens live in browser storage (persisted so the
+// invite code is entered once per device; cleared only on explicit logout).
+// Product facts and personal interaction data are always reloaded from the API.
 const state = {
   booting: true,
   busy: false,
@@ -529,6 +530,7 @@ const PERSONA_TEMPLATES = [
     id: "illustrator",
     label: "温柔的插画师",
     persona: {
+      gender: "female",
       worldview: "近未来海边小城，经营一间小画室的插画师",
       age_setting: "27",
       relationship_to_user: "认识很久、让人放松的老朋友",
@@ -542,6 +544,7 @@ const PERSONA_TEMPLATES = [
     id: "writer",
     label: "深夜写作的作家",
     persona: {
+      gender: "male",
       worldview: "老城区阁楼里写作的悬疑小说家",
       age_setting: "32",
       relationship_to_user: "每周通信、彼此坦诚的笔友",
@@ -555,6 +558,7 @@ const PERSONA_TEMPLATES = [
     id: "barista",
     label: "街角咖啡店主",
     persona: {
+      gender: "female",
       worldview: "大学街角咖啡店的店主，养了一只叫“芝麻”的猫",
       age_setting: "29",
       relationship_to_user: "常客变朋友，记得每个人的口味",
@@ -569,6 +573,7 @@ const PERSONA_TEMPLATES = [
 function personaFromForm(form) {
   const lines = (value) => value.split("\n").map((line) => line.trim()).filter(Boolean);
   return {
+    gender: ["male", "female"].includes(form.elements.persona_gender?.value) ? form.elements.persona_gender.value : "unspecified",
     worldview: form.elements.persona_worldview?.value?.trim() ?? "",
     age_setting: form.elements.persona_age_setting?.value?.trim() ?? "",
     relationship_to_user: form.elements.persona_relationship?.value?.trim() ?? "",
@@ -1693,7 +1698,10 @@ function renderAge() {
 }
 
 function personaFields(persona = {}) {
+  const gender = ["male", "female"].includes(persona.gender) ? persona.gender : "unspecified";
+  const genderOption = (value, label) => `<option value="${value}" ${gender === value ? "selected" : ""}>${label}</option>`;
   return `
+    <label class="field"><span>性别（决定角色语音是男声还是女声）</span><select name="persona_gender">${genderOption("unspecified", "未设定（使用默认音色）")}${genderOption("female", "女性 · 女声")}${genderOption("male", "男性 · 男声")}</select></label>
     <label class="field"><span>世界观</span><textarea name="persona_worldview" maxlength="500" rows="2" placeholder="TA 生活在哪里、做什么">${escapeHtml(persona.worldview ?? "")}</textarea></label>
     <label class="field"><span>年龄设定</span><input name="persona_age_setting" maxlength="500" value="${escapeHtml(persona.age_setting ?? "")}" placeholder="例如：27"></label>
     <label class="field"><span>与我的关系</span><input name="persona_relationship" maxlength="500" value="${escapeHtml(persona.relationship_to_user ?? "")}" placeholder="例如：认识很久的老朋友"></label>
@@ -1964,7 +1972,7 @@ function prototypeNav(active) {
 function screen(content) { return `<section class="screen">${content}</section>`; }
 
 function renderTrialLogin() {
-  return prototypeShell(`<form id="trial-login-form"><div class="content"><div class="eyebrow">Invite-only trial</div><h1 id="app-title">凭邀请进入，<br>安心试用。</h1><p class="lead">这是仅限受邀成年用户的免费封闭试用：不提供支付、不公开注册，也不代表正式上线。</p><div class="fact-grid"><article class="fact"><span class="fact-icon">${prototypeIcon("spark")}</span><div><strong>你正在与 AI 互动</strong><small>角色回复由 AI 生成并保留明显标识。</small></div></article><article class="fact"><span class="fact-icon">${prototypeIcon("shield")}</span><div><strong>仅向受邀成年用户开放</strong><small>登录后仍需完成系统告知与年龄声明。</small></div></article></div><label class="field"><span>邀请码</span><input name="invite_code" inputmode="latin" autocomplete="off" autocapitalize="characters" required placeholder="例如 QYXXXX-XXXXXX-XXXXXX-XXXXXX"></label><div class="bottom-action"><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>进入封闭试用 ${prototypeIcon("arrow", 18)}</button><div class="note">凭邀请码即可登录。如需退出，可在数据中心注销账户和发起数据删除。</div></div><div class="rights">${prototypeIcon("lock", 17)}<span>登录凭据仅保留在本浏览器会话中。请勿输入他人的隐私、证件或支付信息。</span></div></div></form>`, "Closed beta");
+  return prototypeShell(`<form id="trial-login-form"><div class="content"><div class="eyebrow">Invite-only trial</div><h1 id="app-title">凭邀请进入，<br>安心试用。</h1><p class="lead">这是仅限受邀成年用户的免费封闭试用：不提供支付、不公开注册，也不代表正式上线。</p><div class="fact-grid"><article class="fact"><span class="fact-icon">${prototypeIcon("spark")}</span><div><strong>你正在与 AI 互动</strong><small>角色回复由 AI 生成并保留明显标识。</small></div></article><article class="fact"><span class="fact-icon">${prototypeIcon("shield")}</span><div><strong>仅向受邀成年用户开放</strong><small>登录后仍需完成系统告知与年龄声明。</small></div></article></div><label class="field"><span>邀请码</span><input name="invite_code" inputmode="latin" autocomplete="off" autocapitalize="characters" required placeholder="例如 QYXXXX-XXXXXX-XXXXXX-XXXXXX"></label><div class="bottom-action"><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>进入封闭试用 ${prototypeIcon("arrow", 18)}</button><div class="note">凭邀请码即可登录；本设备只需输入一次，之后直接进入。如需退出，可在数据中心退出试用会话或注销账户。</div></div><div class="rights">${prototypeIcon("lock", 17)}<span>登录凭据仅保留在本设备浏览器中（7 天内打开会自动续期）。请勿输入他人的隐私、证件或支付信息。</span></div></div></form>`, "Closed beta");
 }
 
 function renderError() {
@@ -2074,6 +2082,7 @@ document.addEventListener("click", (event) => {
     const form = templateButton.closest("form");
     if (!template || !form) return;
     form.elements.persona_worldview.value = template.persona.worldview;
+    if (form.elements.persona_gender) form.elements.persona_gender.value = ["male", "female"].includes(template.persona.gender) ? template.persona.gender : "unspecified";
     form.elements.persona_age_setting.value = template.persona.age_setting;
     form.elements.persona_relationship.value = template.persona.relationship_to_user;
     form.elements.persona_personality.value = template.persona.personality;
@@ -2162,6 +2171,25 @@ document.addEventListener("click", (event) => {
   if (action === "toggle-message-audio") toggleMessageAudio(button.dataset.messageId);
   if (action === "delete-message-audio") deleteMessageAudio(state.messages.find((message) => String(messageId(message)) === button.dataset.messageId));
 });
+
+// 软键盘处理（2026-09-13 修复）：安卓上部分浏览器/WebView 在输入法弹出时会压缩
+// 布局视口（高度变小、宽度不变），absolute 定位在容器底部的导航栏就被顶到键盘
+// 上方。这里以“宽度不变的前提下高度大幅缩短”识别键盘，把等量 inset 写回
+// --qy-keyboard-inset，CSS 用它把导航栏推回物理屏幕底部（藏在键盘后面），
+// 而不是浮在键盘上面；输入行仍随视口收缩保持在键盘上方。
+const KEYBOARD_INSET_THRESHOLD_PX = 150;
+let keyboardBaseline = { width: window.innerWidth, height: window.innerHeight };
+function syncKeyboardInset() {
+  const widthChanged = window.innerWidth !== keyboardBaseline.width;
+  if (widthChanged) keyboardBaseline = { width: window.innerWidth, height: window.innerHeight };
+  const shrink = Math.max(0, keyboardBaseline.height - window.innerHeight);
+  const inset = !widthChanged && shrink > KEYBOARD_INSET_THRESHOLD_PX ? shrink : 0;
+  if (inset === 0) keyboardBaseline.height = window.innerHeight;
+  document.documentElement.style.setProperty("--qy-keyboard-inset", `${inset}px`);
+}
+window.addEventListener("resize", syncKeyboardInset);
+window.visualViewport?.addEventListener("resize", syncKeyboardInset);
+syncKeyboardInset();
 
 loadTrialSession().then((session) => {
   state.trialSession = session;
