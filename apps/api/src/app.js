@@ -2206,10 +2206,12 @@ async function createAsrJob(store, account, path, body, asrTranscriber, mediaSto
   return accepted({ asr_job: publicAsrJob(job) });
 }
 
-// 语音时长估算（开发口径）：按 32kbps 等效码率从字节数折算秒数并向上取整。
-// 供应商未返回精确时长前这是可审计的下限估算；生产必须改用供应商 duration 字段。
+// 语音时长估算：所有录音入库前统一转 16k PCM16 单声道 WAV（=32KB/s，256kbps），
+// 按字节数/32000 折算秒数并向上取整。此前误按 32kbps 口径（bytes*8/32000），
+// 高估 8 倍，把试用 ASR 额度在真实 ~75 秒处打空（2026-09-14 根治，通话与异步
+// 语音消息共用同一口径）。供应商未返回精确时长前这是可审计的估算。
 function estimateAudioSeconds(byteLength) {
-  return Math.max(1, Math.ceil(byteLength * 8 / 32000));
+  return Math.max(1, Math.ceil(byteLength / 32000));
 }
 
 function estimateTtsSeconds(text) {

@@ -75,7 +75,7 @@ function buildDeps(overrides = {}) {
     normalizeUnpromptedSelfIntro: (wrapped) => wrapped,
     currentWorldState: () => ({ world_state_id: 'ws_000001', state_version: 3 }),
     publicWorldState: (state) => state,
-    estimateAudioSeconds: (byteLength) => Math.max(1, Math.ceil(byteLength * 8 / 32000)),
+    estimateAudioSeconds: (byteLength) => Math.max(1, Math.ceil(byteLength / 32000)),
     estimateTtsSeconds: (text) => Math.max(1, Math.ceil(String(text).length / 4)),
     resolvedTtsVoiceProfile: (generator, gender) => generator.voiceProfileFor(gender)
   };
@@ -147,7 +147,7 @@ test('回合主链路：转写字幕→逐句字幕+音频段（首段带 AIGC �
   assert.notEqual(Buffer.from(audioEvents[1].data.audio_base64, 'base64').subarray(0, 3).toString(), 'ID3');
 
   assert.equal(turn.state, 'COMPLETED');
-  assert.equal(call.asr_seconds_used, 8); // 32000B ≈ 8s
+  assert.equal(call.asr_seconds_used, 1); // 32000B ÷ 32000B/s(16k PCM16) ≈ 1s
   assert.equal(call.tts_seconds_used, 3); // 两句各 1s+2s
 
   const messages = [...store.messages.values()].sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
@@ -173,10 +173,10 @@ test('回合主链路：转写字幕→逐句字幕+音频段（首段带 AIGC �
   assert.ok(ttsJobs[0].result_asset_id);
   assert.ok(store.mediaAssets.get(ttsJobs[0].result_asset_id).byte_length > 0);
 
-  // 账本：ASR 预留 8 提交 8；TTS 预留 90 提交 3（余量终态自动释放）。
+  // 账本：ASR 预留 1 提交 1（16k PCM16=32KB/s，32000B≈1s）；TTS 预留 90 提交 3（余量终态自动释放）。
   const entries = [...store.entitlementLedgers.values()];
   const balanceOf = (capability) => balanceFor(entries, ACCOUNT_ID, 'sub_000001:' + new Date(NOW.getTime() + 7 * 86400000).toISOString(), capability);
-  assert.equal(balanceOf('TRANSCRIBE_ASR').committed_quantity, 8);
+  assert.equal(balanceOf('TRANSCRIBE_ASR').committed_quantity, 1);
   assert.equal(balanceOf('TRANSCRIBE_ASR').reserved_quantity, 0);
   assert.equal(balanceOf('SYNTHESIZE_TTS').committed_quantity, 3);
   assert.equal(balanceOf('SYNTHESIZE_TTS').reserved_quantity, 0);
