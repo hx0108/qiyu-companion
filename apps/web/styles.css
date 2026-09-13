@@ -129,6 +129,11 @@ p { margin: 0; }
 .deletion[data-state="PARTIAL_FAILED"], .error-state { border-left: 4px solid var(--qy-danger); }
 .toast { position: fixed; z-index: 5; right: max(var(--qy-space-4), calc((100vw - var(--qy-screen-width)) / 2 + var(--qy-space-4))); bottom: calc(var(--qy-space-5) + env(safe-area-inset-bottom)); max-width: min(360px, calc(100vw - 32px)); padding: var(--qy-space-3) var(--qy-space-4); border-radius: var(--qy-radius-md); color: #fff; background: var(--qy-ink); box-shadow: 0 8px 24px rgba(0,0,0,.2); }
 .boot-state { min-height: calc(100dvh - 28px); display: grid; place-content: center; justify-items: center; gap: var(--qy-space-3); color: var(--qy-text-secondary); }
+/* 软键盘打开（body.qy-keyboard-open，由 app.js 维护）：文档链路按可视高度收缩，
+   避免 100dvh 滞后的 WebView 里文档高出一截、浏览器下滚后在输入行与键盘间露出空档。 */
+body.qy-keyboard-open { min-height: calc(var(--qy-app-height, 100dvh) + 28px); }
+body.qy-keyboard-open .device-shell { min-height: calc(var(--qy-app-height, 100dvh) + 28px); }
+body.qy-keyboard-open .app { min-height: var(--qy-app-height, calc(100dvh - 28px)); }
 .spinner { width: 24px; height: 24px; border: 3px solid var(--qy-rose-soft); border-top-color: var(--qy-plum); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

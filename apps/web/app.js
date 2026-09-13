@@ -2172,20 +2172,38 @@ document.addEventListener("click", (event) => {
   if (action === "delete-message-audio") deleteMessageAudio(state.messages.find((message) => String(messageId(message)) === button.dataset.messageId));
 });
 
-// 软键盘处理（2026-09-13 修复）：安卓上部分浏览器/WebView 在输入法弹出时会压缩
-// 布局视口（高度变小、宽度不变），absolute 定位在容器底部的导航栏就被顶到键盘
-// 上方。这里以“宽度不变的前提下高度大幅缩短”识别键盘，把等量 inset 写回
-// --qy-keyboard-inset，CSS 用它把导航栏推回物理屏幕底部（藏在键盘后面），
-// 而不是浮在键盘上面；输入行仍随视口收缩保持在键盘上方。
+// 软键盘处理（2026-09-13 修复）：安卓各家内核对键盘的视口响应不一致——有的压缩
+// 布局视口（innerHeight 变小），有的只缩可视视口（visualViewport.height 变小），
+// 还有的 100dvh 滞后不缩，文档比可视区高出一截，输入行与键盘之间露出页面尾巴
+// （聊天流尾部/空背景）。这里以“宽度不变的前提下高度大幅缩短”识别键盘（放大
+// 视为缩放不算），统一按 visualViewport 实际可视高度重设对话屏高度，文档链路
+// （body/.device-shell/.app）同步收缩避免文档滚动；等量 inset 写入
+// --qy-keyboard-inset 让导航栏藏到键盘后。
 const KEYBOARD_INSET_THRESHOLD_PX = 150;
+const DEV_BANNER_FALLBACK_HEIGHT = 28;
+const KEYBOARD_MIN_APP_HEIGHT_PX = 120;
 let keyboardBaseline = { width: window.innerWidth, height: window.innerHeight };
 function syncKeyboardInset() {
-  const widthChanged = window.innerWidth !== keyboardBaseline.width;
-  if (widthChanged) keyboardBaseline = { width: window.innerWidth, height: window.innerHeight };
-  const shrink = Math.max(0, keyboardBaseline.height - window.innerHeight);
-  const inset = !widthChanged && shrink > KEYBOARD_INSET_THRESHOLD_PX ? shrink : 0;
-  if (inset === 0) keyboardBaseline.height = window.innerHeight;
-  document.documentElement.style.setProperty("--qy-keyboard-inset", `${inset}px`);
+  if (window.innerWidth !== keyboardBaseline.width) keyboardBaseline = { width: window.innerWidth, height: window.innerHeight };
+  const visual = window.visualViewport;
+  // 双指缩放时 visual.height 也会变小，scale>1 视为缩放而非键盘。
+  const zoomed = Number(visual?.scale ?? 1) > 1.01;
+  const shrink = Math.max(0,
+    keyboardBaseline.height - window.innerHeight,
+    visual && !zoomed ? keyboardBaseline.height - visual.height : 0,
+  );
+  const open = window.innerWidth === keyboardBaseline.width && shrink > KEYBOARD_INSET_THRESHOLD_PX;
+  const root = document.documentElement;
+  root.style.setProperty("--qy-keyboard-inset", open ? `${Math.round(shrink)}px` : "0px");
+  if (open && visual) {
+    const banner = document.querySelector(".dev-banner");
+    const chrome = banner?.offsetHeight || DEV_BANNER_FALLBACK_HEIGHT;
+    root.style.setProperty("--qy-app-height", `${Math.max(KEYBOARD_MIN_APP_HEIGHT_PX, Math.round(visual.height) - chrome)}px`);
+  } else {
+    root.style.removeProperty("--qy-app-height");
+  }
+  document.body.classList.toggle("qy-keyboard-open", open);
+  if (!open) keyboardBaseline.height = window.innerHeight;
 }
 window.addEventListener("resize", syncKeyboardInset);
 window.visualViewport?.addEventListener("resize", syncKeyboardInset);

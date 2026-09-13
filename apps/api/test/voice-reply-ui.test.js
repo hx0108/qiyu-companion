@@ -81,6 +81,23 @@ test('软键盘弹出时底部导航保持锚在物理屏幕底部，不被顶�
   assert.match(app, /visualViewport\?\.addEventListener\("resize", syncKeyboardInset\)/);
 });
 
+test('键盘打开时对话屏按可视视口收缩，输入行贴住键盘顶部不留空档', () => {
+  // 部分 WebView 100dvh 滞后：对话屏高度必须由 JS 按实际可视高度重设，
+  // 且 body/.device-shell/.app 链路同步收缩，否则文档高出一截被下滚露出空档。
+  const screenRule = rule('.qiyu-prototype.app-screen');
+  assert.match(screenRule, /height:\s*var\(--qy-app-height, calc\(100dvh - 28px\)\)/);
+  assert.match(screenRule, /min-height:\s*var\(--qy-app-height, calc\(100dvh - 28px\)\)/);
+  const wrap = rule('body.qy-keyboard-open .qiyu-prototype.app-screen .composer-wrap');
+  assert.match(wrap, /bottom:\s*0/);
+  const navHidden = rule('body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-nav');
+  assert.match(navHidden, /display:\s*none/);
+  assert.match(app, /--qy-app-height/);
+  assert.match(app, /qy-keyboard-open/);
+  const styles = fs.readFileSync(path.join(webRoot, 'styles.css'), 'utf8');
+  assert.match(styles, /body\.qy-keyboard-open \.app \{ min-height: var\(--qy-app-height/);
+  assert.match(styles, /body\.qy-keyboard-open \.device-shell \{ min-height: calc\(var\(--qy-app-height/);
+});
+
 test('人格表单提供角色性别选择，性别值随 persona 提交给服务端驱动男/女声', () => {
   assert.match(app, /name="persona_gender"/);
   assert.match(app, /genderOption\("female", "女性 · 女声"\)/);

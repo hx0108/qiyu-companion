@@ -118,6 +118,14 @@
 /* --qy-keyboard-inset 由 app.js 在软键盘压缩布局视口时写入等量高度：
    导航栏保持锚在物理屏幕底部（藏在键盘后面），不会被顶到键盘上方。 */
 .qiyu-prototype .bottom-nav { height: calc(64px + env(safe-area-inset-bottom)); display: flex; padding: 4px 10px env(safe-area-inset-bottom); position: absolute; z-index: 7; right: 0; bottom: calc(0px - var(--qy-keyboard-inset, 0px)); left: 0; border-top: 1px solid var(--qy-line); background: rgba(246,241,234,.92); backdrop-filter: blur(18px); }
+/* 键盘打开时对话屏高度改用实际可视高度（部分 WebView 100dvh 滞后不缩，
+   文档高出一截会在输入行与键盘之间露出聊天流尾巴）；body.qy-keyboard-open
+   同时收缩 styles.css 里的 body/.device-shell/.app 链路。 */
+.qiyu-prototype.app-screen { height: var(--qy-app-height, calc(100dvh - 28px)); min-height: var(--qy-app-height, calc(100dvh - 28px)); }
+/* 键盘打开时导航已被推走，输入行去掉导航预留位，贴住键盘顶部；
+   导航直接隐藏（display:none），避免它把文档撑出可滚动的一截。 */
+body.qy-keyboard-open .qiyu-prototype.app-screen .composer-wrap { bottom: 0; }
+body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-nav { display: none; }
 .qiyu-prototype .nav-item { min-height: 54px; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; color: #93868d; background: transparent; font-size: 9px; }.qiyu-prototype .nav-item.on { color: var(--qy-plum); }
 .qiyu-prototype.night { color: var(--qy-night-ink); background: linear-gradient(180deg, rgba(13,9,16,.22) 0%, rgba(16,11,18,.67) 48%, #151019 80%), url('/assets/qiyu-night-scene.png') center top/100% auto no-repeat #151019; }
 .qiyu-prototype.night .identity small, .qiyu-prototype.night .date-rule, .qiyu-prototype.night .scene-state small, .qiyu-prototype.night .memory-banner small { color: var(--qy-night-muted); }.qiyu-prototype.night .scene-state { border-color: rgba(255,255,255,.12); background: rgba(35,25,37,.68); backdrop-filter: blur(15px); }.qiyu-prototype.night .ai .bubble { background: rgba(33,29,36,.92); backdrop-filter: blur(15px); }.qiyu-prototype.night .memory-banner { border-color: rgba(229,192,203,.3); color: #f1d8df; background: rgba(125,77,105,.23); }.qiyu-prototype.night .composer-wrap { background: linear-gradient(180deg, transparent, #151019 28%); }.qiyu-prototype.night .composer { border-color: rgba(255,255,255,.12); background: rgba(37,28,39,.86); }.qiyu-prototype.night .composer input { color: #fff; }.qiyu-prototype.night .composer input::placeholder { color: #8d8089; }.qiyu-prototype.night .composer .icon-btn { color: #cfc2c9; }.qiyu-prototype.night .bottom-nav { border-color: rgba(255,255,255,.09); background: rgba(18,13,21,.9); }.qiyu-prototype.night .nav-item.on { color: #e8bec9; }.qiyu-prototype.night .icon-btn.soft { background: rgba(255,255,255,.08); }
