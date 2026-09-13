@@ -10,6 +10,59 @@ export function selectRecordingMimeType(MediaRecorderCtor = globalThis.MediaReco
 
 export function shouldCancelHold(startY, currentY) { return startY - currentY >= HOLD_CANCEL_DISTANCE_PX; }
 
+// 微信 XWEB 等定制内核裁掉 MediaRecorder 的 webm/opus、ogg/opus 编码器
+// （isTypeSupported 全为 false），但 getUserMedia + AudioContext 可用（通话页
+// 同一栈已真机验证）：直接从麦克风采 PCM 自封 WAV，不经 MediaRecorder 容器
+// 与 decodeAudioData，任何能开麦的 WebView 都能产出服务端原生支持的 audio/wav。
+export async function createPcmWavRecorder(stream) {
+  const AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!AudioContextCtor) throw new Error('AUDIO_CAPTURE_UNAVAILABLE');
+  const audioContext = new AudioContextCtor();
+  await audioContext.resume().catch(() => { /* 部分内核在手势栈内自动 running */ });
+  const source = audioContext.createMediaStreamSource(stream);
+  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  processor.onaudioprocess = (event) => { chunks.push(new Float32Array(event.inputBuffer.getChannelData(0))); };
+  source.connect(processor);
+  // ScriptProcessor 必须连到 destination 才会被驱动；直连会外放录音形成回声，
+  // 中间串一个零增益 GainNode 静音输出。
+  const mute = audioContext.createGain(); mute.gain.value = 0;
+  processor.connect(mute); mute.connect(audioContext.destination);
+  return {
+    async stop() {
+      try { processor.onaudioprocess = null; processor.disconnect(); source.disconnect(); mute.disconnect(); } catch { /* 已断开 */ }
+      const samples = mergeFloat32Chunks(chunks);
+      const sampleRate = audioContext.sampleRate;
+      await audioContext.close().catch(() => { /* 已关闭 */ });
+      if (!samples.length) throw new Error('AUDIO_EMPTY');
+      if (samples.length / sampleRate > 60.5) throw new Error('AUDIO_TOO_LONG');
+      return renderMonoWav(samples, sampleRate);
+    },
+  };
+}
+
+function mergeFloat32Chunks(chunks) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Float32Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { merged.set(chunk, offset); offset += chunk.length; }
+  return merged;
+}
+
+// 任意采样率单声道 PCM → OfflineAudioContext 重采样 16k → PCM16 WAV。
+async function renderMonoWav(samples, sourceRate) {
+  const OfflineCtor = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+  if (!OfflineCtor) throw new Error('AUDIO_DECODE_UNAVAILABLE');
+  const targetRate = 16_000;
+  const length = Math.max(1, Math.ceil(samples.length * targetRate / sourceRate));
+  const offline = new OfflineCtor(1, length, targetRate);
+  const buffer = offline.createBuffer(1, samples.length, sourceRate);
+  buffer.getChannelData(0).set(samples);
+  const node = offline.createBufferSource(); node.buffer = buffer; node.connect(offline.destination); node.start();
+  const rendered = await offline.startRendering();
+  return new Blob([encodePcm16Wav(rendered.getChannelData(0), targetRate)], { type: 'audio/wav' });
+}
+
 export async function recordingBlobToWav(blob) {
   const AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext;
   if (!AudioContextCtor) throw new Error('AUDIO_DECODE_UNAVAILABLE');
@@ -17,12 +70,7 @@ export async function recordingBlobToWav(blob) {
   try {
     const decoded = await audioContext.decodeAudioData(await blob.arrayBuffer());
     if (!decoded.duration || decoded.duration > 60.5) throw new Error(decoded.duration > 60.5 ? 'AUDIO_TOO_LONG' : 'AUDIO_EMPTY');
-    const targetRate = 16_000;
-    const length = Math.ceil(decoded.duration * targetRate);
-    const offline = new OfflineAudioContext(1, length, targetRate);
-    const source = offline.createBufferSource(); source.buffer = decoded; source.connect(offline.destination); source.start();
-    const rendered = await offline.startRendering();
-    return new Blob([encodePcm16Wav(rendered.getChannelData(0), targetRate)], { type: 'audio/wav' });
+    return await renderMonoWav(decoded.getChannelData(0), decoded.sampleRate);
   } finally { await audioContext.close().catch(() => {}); }
 }
 

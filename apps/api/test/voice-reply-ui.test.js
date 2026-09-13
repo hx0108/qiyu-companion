@@ -7,6 +7,7 @@ const webRoot = path.resolve(__dirname, '../../web');
 const css = fs.readFileSync(path.join(webRoot, 'prototype-restoration.css'), 'utf8');
 const app = fs.readFileSync(path.join(webRoot, 'app.js'), 'utf8');
 const session = fs.readFileSync(path.join(webRoot, 'encrypted-session.js'), 'utf8');
+const mediaInput = fs.readFileSync(path.join(webRoot, 'media-input.js'), 'utf8');
 
 function rule(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -128,8 +129,24 @@ test('人格表单提供角色性别选择，性别值随 persona 提交给服�
   assert.match(app, /gender:\s*\["male", "female"\]\.includes\(form\.elements\.persona_gender\?\.value\)/);
 });
 
-test('试用会话令牌保存在 localStorage：退出浏览器后邀请码不需重复输入', () => {
-  assert.match(session, /localStorage\.getItem\(storageKey\)/);
+test('微信 XWEB 等 MediaRecorder 不可用的内核：按住说话降级 AudioContext 直采 PCM 自封 WAV', () => {
+  // 根因（2026-09-14）：微信裁掉 webm/opus、ogg/opus 编码器，selectRecordingMimeType
+  // 返回 null 后旧代码直接 toast「不支持录音」，零请求发出（nginx 零 asr-jobs 记录）。
+  // getUserMedia 能开麦就必须能录：PCM 直采绕开 MediaRecorder 容器与 decodeAudioData。
+  assert.match(mediaInput, /export async function createPcmWavRecorder\(stream\)/);
+  assert.match(mediaInput, /createScriptProcessor/);
+  assert.match(mediaInput, /renderMonoWav/);
+  assert.match(mediaInput, /encodePcm16Wav/);
+  // 前端在无可用编码器时走 PCM 路径，且两条路径共用同一收尾（取消/太短/转码/上传）。
+  assert.match(app, /import \{[^}]*createPcmWavRecorder[^}]*\} from '\.\/media-input\.js'/);
+  assert.match(app, /const pcm = await createPcmWavRecorder\(stream\)/);
+  assert.match(app, /state: "recording",/);
+  // getUserMedia 缺失才拒绝；格式探测不再单独拦住录音入口。
+  assert.doesNotMatch(app, /!mimeType &{0,2}\s*\|\|\s*!navigator\.mediaDevices/);
+  assert.match(app, /if \(!navigator\.mediaDevices\?\.getUserMedia\)/);
+});
+
+test('试用会话令牌保存在 localStorage：退出浏览器后邀请码不需重复输入', () => {  assert.match(session, /localStorage\.getItem\(storageKey\)/);
   assert.match(session, /localStorage\.setItem\(storageKey/);
   assert.doesNotMatch(session, /sessionStorage/);
   // 主动退出试用会话仍要能清除凭据。

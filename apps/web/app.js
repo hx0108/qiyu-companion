@@ -1,5 +1,5 @@
 import { clearEncryptedSession, loadEncryptedSession, saveEncryptedSession } from './encrypted-session.js';
-import { MAX_RECORDING_MS, MIN_HOLD_MS, recordingBlobToWav, selectRecordingMimeType, shouldCancelHold } from './media-input.js';
+import { MAX_RECORDING_MS, MIN_HOLD_MS, createPcmWavRecorder, recordingBlobToWav, selectRecordingMimeType, shouldCancelHold } from './media-input.js';
 import { CallSessionClient } from './call-client.js';
 
 const API_BASE = "/api/v1";
@@ -1627,34 +1627,52 @@ function recordingMimeType() {
 }
 
 async function startAsrRecording() {
-  const mimeType = recordingMimeType();
-  if (!mimeType || !navigator.mediaDevices?.getUserMedia) {
+  if (!navigator.mediaDevices?.getUserMedia) {
     setToast("当前浏览器不支持录音；请导入 WAV、MP3、M4A、AAC 或 OGG 文件。");
     return;
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const chunks = [];
-    const recorder = new MediaRecorder(stream, { mimeType });
-    recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
+    const mimeType = recordingMimeType();
     const startedAt = Date.now();
     const timeout = setTimeout(() => stopAsrRecording(false, true), MAX_RECORDING_MS);
-    recorder.addEventListener("stop", async () => {
+    // 两条录音路径共用收尾：取消→提示；太短→提示；否则转 16k WAV 上传转写。
+    const finish = async (wavPromise) => {
       clearTimeout(timeout);
       stream.getTracks().forEach((track) => track.stop());
       state.asrRecording = null;
       const hold = state.asrHold;
       state.asrHold = null;
-      if (hold?.cancelled) { render(); setToast("已取消录音，浏览器未上传原始音频。"); return; }
-      if (Date.now() - startedAt < MIN_HOLD_MS || chunks.reduce((sum, chunk) => sum + chunk.size, 0) === 0) { render(); setToast("录音太短或为空，请按住后再说话。"); return; }
+      const durationMs = Date.now() - startedAt;
       try {
-        const wav = await recordingBlobToWav(new Blob(chunks, { type: mimeType }));
+        if (hold?.cancelled) { render(); setToast("已取消录音，浏览器未上传原始音频。"); return; }
+        const wav = await wavPromise;
+        if (durationMs < MIN_HOLD_MS) { render(); setToast("录音太短或为空，请按住后再说话。"); return; }
         setAsrFile(new File([wav], `qiyu-${Date.now()}.wav`, { type: "audio/wav" }));
         await createAsrJob();
-      } catch (error) { render(); setToast(error?.message === "AUDIO_TOO_LONG" ? "录音超过 60 秒，未上传。" : "无法解码这段录音，请重试或导入音频。"); }
-    }, { once: true });
-    state.asrRecording = recorder;
-    recorder.start(250);
+      } catch (error) {
+        render();
+        setToast(error?.message === "AUDIO_TOO_LONG" ? "录音超过 60 秒，未上传。"
+          : error?.message === "AUDIO_EMPTY" ? "录音太短或为空，请按住后再说话。"
+          : "无法解码这段录音，请重试或导入音频。");
+      }
+    };
+    if (mimeType) {
+      const chunks = [];
+      const recorder = new MediaRecorder(stream, { mimeType });
+      recorder.addEventListener("dataavailable", (event) => { if (event.data.size) chunks.push(event.data); });
+      recorder.addEventListener("stop", () => { finish(recordingBlobToWav(new Blob(chunks, { type: mimeType }))); }, { once: true });
+      state.asrRecording = recorder;
+      recorder.start(250);
+    } else {
+      // 微信 XWEB 等内核没有可用的 MediaRecorder 编码器（isTypeSupported 全
+      // false）：AudioContext 直采 PCM 自封 WAV，不再让用户卡在「不支持录音」。
+      const pcm = await createPcmWavRecorder(stream);
+      state.asrRecording = {
+        state: "recording",
+        stop() { finish(pcm.stop()).catch(() => { /* finish 内部已兜底 toast */ }); },
+      };
+    }
     if (state.asrHold?.released) queueMicrotask(() => stopAsrRecording(state.asrHold?.cancelled));
     render();
   } catch {
