@@ -98,6 +98,29 @@ test('键盘打开时对话屏按可视视口收缩，输入行贴住键盘顶�
   assert.match(styles, /body\.qy-keyboard-open \.device-shell \{ min-height: calc\(var\(--qy-app-height/);
 });
 
+test('聊天输入框是多行 textarea：随内容自动增高，Enter 发送、Shift+Enter 换行', () => {
+  // 单行 input 天生不能换行；用户长文本必须换行展示。上限后内部滚动。
+  assert.match(app, /<textarea name="message" rows="1" maxlength="2000"/);
+  assert.doesNotMatch(app, /<input name="message"/);
+  assert.match(app, /MESSAGE_INPUT_MAX_HEIGHT_PX/);
+  assert.match(app, /function autosizeMessageInput/);
+  // 增长量补进聊天滚动底部预留，输入行长高不盖住最后一条消息。
+  assert.match(app, /--qy-composer-extra/);
+  const scroll = rule('.qiyu-prototype .chat-scroll');
+  assert.match(scroll, /padding: 8px 18px calc\(155px \+ var\(--qy-composer-extra, 0px\)\)/);
+  const composer = rule('.qiyu-prototype .composer');
+  assert.match(composer, /min-height: 56px/);
+  assert.match(composer, /align-items: flex-end/);
+  const textarea = rule('.qiyu-prototype .composer textarea');
+  assert.match(textarea, /height: 44px/);
+  assert.match(textarea, /max-height: 112px/);
+  assert.match(textarea, /resize: none/);
+  // Enter=发送（与原单行 input 一致）；Shift+Enter 换行；输入法组字（isComposing/229）不误发。
+  assert.match(app, /event\.key !== "Enter" \|\| event\.shiftKey \|\| event\.isComposing \|\| event\.keyCode === 229/);
+  // 草稿同步进 state：流式回复逐 chunk 全量重渲染时不冲掉正在输入的文字。
+  assert.match(app, /state\.pendingTranscript = event\.target\.value/);
+});
+
 test('人格表单提供角色性别选择，性别值随 persona 提交给服务端驱动男/女声', () => {
   assert.match(app, /name="persona_gender"/);
   assert.match(app, /genderOption\("female", "女性 · 女声"\)/);

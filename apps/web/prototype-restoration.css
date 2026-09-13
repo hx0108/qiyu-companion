@@ -81,7 +81,7 @@
 .qiyu-prototype .ai-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--qy-rose); }
 .qiyu-prototype .icon-btn { width: 44px; height: 44px; min-width: 44px; display: grid; place-items: center; border: 0; border-radius: 50%; color: currentColor; background: transparent; }
 .qiyu-prototype .icon-btn.soft { background: rgba(91,54,83,.06); }
-.qiyu-prototype .chat-scroll { flex: 1; overflow: auto; padding: 8px 18px 155px; position: relative; z-index: 2; overflow-anchor: none; }
+.qiyu-prototype .chat-scroll { flex: 1; overflow: auto; padding: 8px 18px calc(155px + var(--qy-composer-extra, 0px)); position: relative; z-index: 2; overflow-anchor: none; }
 .qiyu-prototype .date-rule { display: flex; gap: 10px; align-items: center; margin: 7px 0 16px; color: #96888f; font-size: 9px; letter-spacing: .1em; }
 .qiyu-prototype .date-rule::before, .qiyu-prototype .date-rule::after { content: ""; height: 1px; flex: 1; background: var(--qy-line); }
 .qiyu-prototype .scene-state { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; padding: 13px 14px; border: 1px solid var(--qy-line); border-radius: 18px; background: rgba(255,255,255,.45); }
@@ -112,8 +112,11 @@
 @keyframes qy-voice-loading { 0%, 100% { transform: scale(1); opacity: .7; } 50% { transform: scale(1.14); opacity: 1; } }
 .qiyu-prototype .voice-audio { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
 .qiyu-prototype .composer-wrap { position: absolute; z-index: 5; right: 0; bottom: calc(63px + env(safe-area-inset-bottom)); left: 0; padding: 10px 14px 12px; background: linear-gradient(180deg, transparent, var(--qy-paper) 30%); }
-.qiyu-prototype .composer { height: 56px; display: flex; gap: 0; align-items: center; padding: 6px 6px 6px 8px; border: 1px solid var(--qy-line); border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 14px 30px rgba(66,41,54,.13); }
-.qiyu-prototype .composer input { min-width: 0; min-height: 0; flex: 1; padding: 0 10px; border: 0; border-radius: 0; color: var(--qy-ink); background: transparent; outline: 0; font-size: 13px; }
+.qiyu-prototype .composer { min-height: 56px; display: flex; gap: 0; align-items: flex-end; padding: 6px 6px 6px 8px; border: 1px solid var(--qy-line); border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 14px 30px rgba(66,41,54,.13); }
+.qiyu-prototype .composer input, .qiyu-prototype .composer textarea { min-width: 0; min-height: 0; flex: 1; padding: 0 10px; border: 0; border-radius: 0; color: var(--qy-ink); background: transparent; outline: 0; font-size: 13px; }
+/* 多行输入框：单行时与原 input 几何一致（44px 高、文字垂直居中），
+   随内容增高到上限后内部滚动；JS autosizeMessageInput 写内联 height。 */
+.qiyu-prototype .composer textarea { display: block; height: 44px; max-height: 112px; padding: 12px 10px; line-height: 1.5; resize: none; overflow-y: auto; }
 /* 微信式按住说话：语音模式下输入框整条替换为胶囊按钮，文字态由 ::after 随
    recording/cancel 类切换（按住=松开 结束，上滑取消区=红底 松开 取消）。 */
 .qiyu-prototype .hold-pill { touch-action: none; user-select: none; min-width: 0; flex: 1; height: 42px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 999px; color: var(--qy-ink); background: rgba(91,54,83,.08); font: 600 14px/1 var(--qy-font-serif); letter-spacing: .08em; transition: background .15s ease; }
@@ -140,7 +143,7 @@
 .qiyu-prototype .context-image-picker { display: grid; place-items: center; cursor: pointer; }
 .qiyu-prototype .inline-media-panel { display: flex; align-items: center; gap: 8px; margin: 0 4px 8px; padding: 8px 10px; border: 1px solid var(--qy-line); border-radius: 14px; background: rgba(255,255,255,.96); font-size: 11px; }.qiyu-prototype .inline-media-panel label { flex: 1; }.qiyu-prototype .inline-media-panel textarea { width: 100%; min-height: 48px; }.qiyu-prototype .inline-media-panel.error { color: #8a2738; }
 .qiyu-prototype .context-image-preview,.qiyu-prototype .context-image-thumb { display: block; max-width: 180px; max-height: 180px; object-fit: cover; border-radius: 12px; }.qiyu-prototype .context-image-preview { width: 52px; height: 52px; }.qiyu-prototype .context-image-status { margin-bottom: 6px; color: var(--qy-muted); font-size: 10px; }
-.qiyu-prototype .composer input::placeholder { color: #a89ba2; }
+.qiyu-prototype .composer input::placeholder, .qiyu-prototype .composer textarea::placeholder { color: #a89ba2; }
 .qiyu-prototype .composer .icon-btn { width: 42px; height: 42px; color: #6d5f66; }.qiyu-prototype .composer .send { width: 44px; height: 44px; color: #fff; background: var(--qy-plum); box-shadow: 0 8px 18px rgba(91,54,83,.28); }
 /* --qy-keyboard-inset 由 app.js 在软键盘压缩布局视口时写入等量高度：
    导航栏保持锚在物理屏幕底部（藏在键盘后面），不会被顶到键盘上方。 */
@@ -155,7 +158,7 @@ body.qy-keyboard-open .qiyu-prototype.app-screen .composer-wrap { bottom: 0; }
 body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-nav { display: none; }
 .qiyu-prototype .nav-item { min-height: 54px; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; color: #93868d; background: transparent; font-size: 9px; }.qiyu-prototype .nav-item.on { color: var(--qy-plum); }
 .qiyu-prototype.night { color: var(--qy-night-ink); background: linear-gradient(180deg, rgba(13,9,16,.22) 0%, rgba(16,11,18,.67) 48%, #151019 80%), url('/assets/qiyu-night-scene.png') center top/100% auto no-repeat #151019; }
-.qiyu-prototype.night .identity small, .qiyu-prototype.night .date-rule, .qiyu-prototype.night .scene-state small, .qiyu-prototype.night .memory-banner small { color: var(--qy-night-muted); }.qiyu-prototype.night .scene-state { border-color: rgba(255,255,255,.12); background: rgba(35,25,37,.68); backdrop-filter: blur(15px); }.qiyu-prototype.night .ai .bubble { background: rgba(33,29,36,.92); backdrop-filter: blur(15px); }.qiyu-prototype.night .memory-banner { border-color: rgba(229,192,203,.3); color: #f1d8df; background: rgba(125,77,105,.23); }.qiyu-prototype.night .composer-wrap { background: linear-gradient(180deg, transparent, #151019 28%); }.qiyu-prototype.night .composer { border-color: rgba(255,255,255,.12); background: rgba(37,28,39,.86); }.qiyu-prototype.night .composer input { color: #fff; }.qiyu-prototype.night .composer input::placeholder { color: #8d8089; }.qiyu-prototype.night .composer .icon-btn { color: #cfc2c9; }.qiyu-prototype.night .bottom-nav { border-color: rgba(255,255,255,.09); background: rgba(18,13,21,.9); }.qiyu-prototype.night .nav-item.on { color: #e8bec9; }.qiyu-prototype.night .icon-btn.soft { background: rgba(255,255,255,.08); }
+.qiyu-prototype.night .identity small, .qiyu-prototype.night .date-rule, .qiyu-prototype.night .scene-state small, .qiyu-prototype.night .memory-banner small { color: var(--qy-night-muted); }.qiyu-prototype.night .scene-state { border-color: rgba(255,255,255,.12); background: rgba(35,25,37,.68); backdrop-filter: blur(15px); }.qiyu-prototype.night .ai .bubble { background: rgba(33,29,36,.92); backdrop-filter: blur(15px); }.qiyu-prototype.night .memory-banner { border-color: rgba(229,192,203,.3); color: #f1d8df; background: rgba(125,77,105,.23); }.qiyu-prototype.night .composer-wrap { background: linear-gradient(180deg, transparent, #151019 28%); }.qiyu-prototype.night .composer { border-color: rgba(255,255,255,.12); background: rgba(37,28,39,.86); }.qiyu-prototype.night .composer input, .qiyu-prototype.night .composer textarea { color: #fff; }.qiyu-prototype.night .composer input::placeholder, .qiyu-prototype.night .composer textarea::placeholder { color: #8d8089; }.qiyu-prototype.night .composer .icon-btn { color: #cfc2c9; }.qiyu-prototype.night .bottom-nav { border-color: rgba(255,255,255,.09); background: rgba(18,13,21,.9); }.qiyu-prototype.night .nav-item.on { color: #e8bec9; }.qiyu-prototype.night .icon-btn.soft { background: rgba(255,255,255,.08); }
 .qiyu-prototype.night .ai .bubble { background: #1d1e20; backdrop-filter: none; }
 .qiyu-prototype.night .voice-trigger-visual { background: linear-gradient(180deg,#323337 0%,#28292c 100%); box-shadow: 0 3px 8px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.05); }
 

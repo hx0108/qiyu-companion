@@ -802,6 +802,7 @@ async function sendMessage(form) {
     });
     input.value = "";
     state.pendingTranscript = "";
+    autosizeMessageInput(input);
     if (imageAsset && state.contextImagePreviewUrl) state.imageUrls.set(imageAsset.asset_id, state.contextImagePreviewUrl);
     state.contextImageAsset = null; state.contextImagePreviewUrl = null;
     if (payload?.user_message) state.messages.push(payload.user_message);
@@ -843,6 +844,7 @@ async function sendMessage(form) {
         const index = state.messages.indexOf(streaming);
         if (index >= 0) state.messages.splice(index, 1);
         input.value = content;
+        autosizeMessageInput(input);
         const code = failure?.code ? `（${failure.code}）` : "";
         setToast(`回复生成失败${code}，内容已保留，请直接重试。`);
       }
@@ -1920,7 +1922,7 @@ function renderChat() {
     : `<button type="button" class="icon-btn" data-action="enter-voice-mode" aria-label="切换到语音输入">${prototypeIcon("mic", 20)}</button>`;
   const inputArea = voiceMode
     ? `<button type="button" class="hold-pill" data-action="hold-asr" aria-label="按住说话，手指上滑取消"></button>`
-    : `<input name="message" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" value="${escapeHtml(state.pendingTranscript)}" ${state.busy ? "disabled" : ""}>`;
+    : `<textarea name="message" rows="1" maxlength="2000" autocomplete="off" placeholder="和 ${escapeHtml(characterName)} 说点什么…" ${state.busy ? "disabled" : ""}>${escapeHtml(state.pendingTranscript)}</textarea>`;
   const sendButton = voiceMode ? "" : `<button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 17)}</button>`;
   const latestAssistantId = messageId([...state.messages].reverse().find((item) => (item.actor ?? item.role) === "ASSISTANT") ?? {});
   return `<section class="screen qiyu-prototype app-screen ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · ${isClosedTrial() ? "封闭试用" : "本地开发"}</small></div></div><div class="header-actions">${state.voiceCallEnabled && conversationId() ? `<button class="icon-btn soft" data-action="start-call" aria-label="发起语音通话">${prototypeIcon("phone", 19)}</button>` : ""}<button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题">${prototypeIcon(state.theme === "night" ? "sun" : "moon", 20)}</button></div></header><div class="chat-scroll"><div class="date-rule">本次会话 · API 事实驱动</div><button class="scene-state" data-action="open-world-state"><span class="glyph">${prototypeIcon(state.theme === "night" ? "moon" : "clock", 16)}</span><span><b>此刻的 ${escapeHtml(characterName)}</b><small>${escapeHtml(worldText)}</small></span></button>${paused}${memoryBanner}${ttsFailure}<section aria-label="对话消息">${state.messages.map((message) => messageMarkup(message, latestAssistantId)).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("image", 19)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</section>`;
@@ -2249,6 +2251,23 @@ function pinChatToBottom(scroller) {
   });
 }
 
+// 多行输入框（2026-09-14）：textarea 随内容自动增高，到上限后内部滚动。
+// 增长出的高度经 --qy-composer-extra 补进 .chat-scroll 的底部预留
+// （输入行是 absolute 悬浮，长高会盖住最后一条消息），跟随模式下贴底。
+const MESSAGE_INPUT_MAX_HEIGHT_PX = 112;
+const MESSAGE_INPUT_BASE_HEIGHT_PX = 44;
+function autosizeMessageInput(input = document.querySelector('#message-form textarea[name="message"]')) {
+  if (!input) return;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, MESSAGE_INPUT_MAX_HEIGHT_PX)}px`;
+  const extra = Math.max(0, input.offsetHeight - MESSAGE_INPUT_BASE_HEIGHT_PX);
+  document.documentElement.style.setProperty("--qy-composer-extra", `${extra}px`);
+  if (state.route === "chat" && chatFollowBottom) {
+    const scroller = app.querySelector(".chat-scroll");
+    if (scroller) pinChatToBottom(scroller);
+  }
+}
+
 function render() {
   document.documentElement.dataset.qyTheme = state.theme;
   if (state.booting) { app.innerHTML = '<div class="boot-state"><span class="spinner" aria-hidden="true"></span><p>正在读取服务端状态…</p></div>'; return; }
@@ -2299,6 +2318,7 @@ function render() {
     // 全量重渲染会销毁聚焦的输入框（键盘反复弹收、几何抖动）；
     // 若之前正在输入，恢复焦点且不触发滚动。
     if (hadFocusedMessageInput) app.querySelector('#message-form [name="message"]')?.focus({ preventScroll: true });
+    autosizeMessageInput();
     const holdButton = app.querySelector('[data-action="hold-asr"]');
     if (holdButton && state.asrRecording?.state === "recording") {
       holdButton.classList.add("recording");
@@ -2349,6 +2369,22 @@ document.addEventListener("pointercancel", () => { if (state.asrHold) stopAsrRec
 document.addEventListener("input", (event) => {
   if (event.target?.id === "candidate-edit") state.confirmEdit = event.target.value;
   if (event.target?.id === "asr-edit") state.asrEdit = event.target.value;
+  // 聊天草稿同步进 state：流式回复期间每次 chunk 都触发全量重渲染，
+  // 不同步的话正在输入的文字会被 value=pendingTranscript 重置冲掉。
+  if (event.target?.matches?.('#message-form textarea[name="message"]')) {
+    state.pendingTranscript = event.target.value;
+    autosizeMessageInput(event.target);
+  }
+});
+
+// textarea 的 Enter 默认是换行不再触发 submit：Enter=发送（与原 input 一致），
+// Shift+Enter 换行；isComposing/keyCode 229 是输入法组字确认，不能当发送。
+document.addEventListener("keydown", (event) => {
+  if (!event.target?.matches?.('#message-form textarea[name="message"]')) return;
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  if (state.busy) return;
+  event.target.closest("form")?.requestSubmit();
 });
 
 document.addEventListener("submit", (event) => {
