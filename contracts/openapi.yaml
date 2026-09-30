@@ -1019,6 +1019,204 @@ paths:
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }
         '404': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans:
+    post:
+      summary: 生成一份可编辑的计划草案（不建立计划、不开提醒）
+      description: 六项能力 A3。模型只产 1-5 步草案候选（失败兜底固定三步），接受才是建立计划；同事件旧草案被取代，已有进行中/暂停计划返回 409。ARTIFACT_CARDS 开启时同步产卡片身份与聊天卡片消息。开关 COMPANION_PLANS 关闭时按路由不存在处理。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [template_version, support_mode]
+              properties:
+                template_version: { type: string, enum: [INTERVIEW_PREP_V1] }
+                support_mode: { type: string, enum: [PRACTICE_TOGETHER, BREAK_DOWN_STEPS, LISTEN_ONLY], description: 只听模式不生成待办 }
+                event_id: { type: string, nullable: true, description: 可选绑定已确认事件；已取消/已删除事件拒绝 }
+                available_minutes: { type: integer, minimum: 0, maximum: 1440 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    get:
+      summary: 计划列表（可按事件筛选）
+      parameters:
+        - name: event_id
+          in: query
+          schema: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}:
+    get:
+      summary: 获取计划与步骤（草案过期惰性标注）
+      parameters: [ { $ref: '#/components/parameters/PlanId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}/accept:
+    post:
+      summary: 接受草案建立计划（不自动开启提醒）
+      description: 接受时可选 followup 子对象单独授权一条事件跟进（与直接开启提醒同一套校验；FOLLOWUP_DISPATCH 未开启而携带时 400）。草案超 30 天未接受返回 409 PLAN_DRAFT_EXPIRED。
+      parameters: [ { $ref: '#/components/parameters/PlanId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                followup:
+                  type: object
+                  description: 可选；字段与 PUT /life-events/{id}/followup 一致
+                  properties:
+                    followup_kind: { type: string, enum: [BEFORE_EVENT, AFTER_EVENT] }
+                    due_at: { type: string, format: date-time }
+                    allowed_from: { type: string, format: date-time }
+                    expires_at: { type: string, format: date-time }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}/pause:
+    post:
+      summary: 暂停计划并原子撤销随计划开启的那条提醒
+      description: 只撤销 linked 的那条许可与在途任务；同事件上用户独立开启的提醒不受影响。恢复不补发，只提示重新开启。
+      parameters: [ { $ref: '#/components/parameters/PlanId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}/resume:
+    post:
+      summary: 恢复暂停的计划（不补发提醒）
+      parameters: [ { $ref: '#/components/parameters/PlanId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}/cancel:
+    post:
+      summary: 取消计划（任意非终态；不要求完成率）
+      description: 随计划开启的提醒一并撤销；已发出的消息不撤回。
+      parameters: [ { $ref: '#/components/parameters/PlanId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}/complete:
+    post:
+      summary: 标记计划完成（需步骤全终态或显式确认）
+      description: 完成不按聊天情绪自动判断；仍有 TODO 步骤时须 confirm=true。随事件本身的提醒不受影响（提醒绑定事件，不绑定计划）。
+      parameters: [ { $ref: '#/components/parameters/PlanId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm: { type: boolean, description: 存在未完成步骤时显式确认提前结束 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/companion-plans/{planId}/steps/{stepId}:
+    patch:
+      summary: 编辑/完成/跳过一个步骤（计划聚合乐观锁）
+      description: expected_version 是计划版本（非步骤版本）；仅 DRAFT/ACTIVE 可编辑。开关 COMPANION_PLANS 关闭时按路由不存在处理。
+      parameters: [ { $ref: '#/components/parameters/PlanId' }, { $ref: '#/components/parameters/StepId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                title: { type: string, minLength: 1, maxLength: 80 }
+                estimated_minutes: { type: integer, minimum: 5, maximum: 180, nullable: true }
+                state: { type: string, enum: [TODO, DONE, SKIPPED] }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/artifacts/{artifactId}:
+    get:
+      summary: 获取卡片数据视图（现场渲染，不存第二份事实）
+      description: 固定组件 EVENT_V1/PLAN_V1/READING_LOG_V1；内容从事件/计划当前状态现场渲染，动作 ID 由服务端白名单计算。format=markdown 返回 text/markdown 导出。开关 ARTIFACT_CARDS 关闭时按路由不存在处理。
+      parameters:
+        - { $ref: '#/components/parameters/ArtifactId' }
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, markdown] }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/action-requests:
+    post:
+      summary: 创建动作候选审批（白名单外 400）
+      description: 六项能力 A3。角色提议≠执行：动作类型白名单首批仅 ACCEPT_PLAN；parameters_digest 对服务器规范化参数哈希，审批后参数变化必须重新批准。审批期限 15 分钟。开关 ACTION_EXECUTION 关闭时按路由不存在处理。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action_type, target_ref, idempotency_key]
+              properties:
+                action_type: { type: string, enum: [ACCEPT_PLAN] }
+                target_ref: { type: string }
+                target_version: { type: integer, minimum: 1, nullable: true }
+                parameters: { type: object, description: 服务器规范化后入哈希；正文不落库 }
+                idempotency_key: { type: string, description: 域级幂等键；同键重放返回既有行 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+  /api/v1/action-requests/{actionId}:
+    get:
+      summary: 查询审批与执行状态（超时先查原 action 的唯一入口）
+      description: 过期为惰性裁决：查询时超期未终态的行置 EXPIRED。
+      parameters: [ { $ref: '#/components/parameters/ActionId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/action-requests/{actionId}/approve:
+    post:
+      summary: 批准并执行（短事务重验）
+      description: 重验状态/参数哈希/过期/目标版本/账户准入；任何一项不符原审批作废须重新提议（409 ACTION_NOT_EXECUTABLE）。
+      parameters: [ { $ref: '#/components/parameters/ActionId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/action-requests/{actionId}/reject:
+    post:
+      summary: 拒绝审批
+      parameters: [ { $ref: '#/components/parameters/ActionId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/action-requests/{actionId}/cancel:
+    post:
+      summary: 取消审批
+      parameters: [ { $ref: '#/components/parameters/ActionId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
   /api/v1/memory-candidates/{candidateId}/reject:
     post:
       summary: 用户拒绝候选；拒绝项不能进入资产或召回
@@ -1455,6 +1653,10 @@ components:
     CandidateId: { name: candidateId, in: path, required: true, schema: { type: string } }
     AssetId: { name: assetId, in: path, required: true, schema: { type: string } }
     EventId: { name: eventId, in: path, required: true, schema: { type: string } }
+    PlanId: { name: planId, in: path, required: true, schema: { type: string } }
+    StepId: { name: stepId, in: path, required: true, schema: { type: string } }
+    ArtifactId: { name: artifactId, in: path, required: true, schema: { type: string } }
+    ActionId: { name: actionId, in: path, required: true, schema: { type: string } }
     DeletionJobId: { name: deletionJobId, in: path, required: true, schema: { type: string } }
   requestBodies:
     ExpectedVersion:

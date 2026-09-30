@@ -44,6 +44,26 @@ const A2_PROBES = [
   { method: 'DELETE', path: '/api/v1/life-events/levt_missing/followup', expectStatus: 404 },
 ];
 
+// A3：计划/卡片/审批（三个平级独立开关 COMPANION_PLANS/ARTIFACT_CARDS/
+// ACTION_EXECUTION）。伪造 id 探 RESOURCE_NOT_FOUND（路由存在）。
+const A3_PROBES = [
+  { method: 'GET', path: '/api/v1/companion-plans', expectStatus: 200 },
+  { method: 'POST', path: '/api/v1/companion-plans', expectStatus: 400, body: { template_version: 'INTERVIEW_PREP_V1' } },
+  { method: 'GET', path: '/api/v1/companion-plans/cpl_missing', expectStatus: 404 },
+  { method: 'POST', path: '/api/v1/companion-plans/cpl_missing/accept', expectStatus: 404, body: { expected_version: 1 } },
+  { method: 'POST', path: '/api/v1/companion-plans/cpl_missing/pause', expectStatus: 404, body: { expected_version: 1 } },
+  { method: 'POST', path: '/api/v1/companion-plans/cpl_missing/resume', expectStatus: 404, body: { expected_version: 1 } },
+  { method: 'POST', path: '/api/v1/companion-plans/cpl_missing/cancel', expectStatus: 404, body: { expected_version: 1 } },
+  { method: 'POST', path: '/api/v1/companion-plans/cpl_missing/complete', expectStatus: 404, body: {} },
+  { method: 'PATCH', path: '/api/v1/companion-plans/cpl_missing/steps/cstep_missing', expectStatus: 404, body: { expected_version: 1 } },
+  { method: 'GET', path: '/api/v1/artifacts/art_missing', expectStatus: 404 },
+  { method: 'POST', path: '/api/v1/action-requests', expectStatus: 400, body: { action_type: 'UNKNOWN', target_ref: 'x', idempotency_key: 'k' } },
+  { method: 'GET', path: '/api/v1/action-requests/arq_missing', expectStatus: 404 },
+  { method: 'POST', path: '/api/v1/action-requests/arq_missing/approve', expectStatus: 404 },
+  { method: 'POST', path: '/api/v1/action-requests/arq_missing/reject', expectStatus: 404 },
+  { method: 'POST', path: '/api/v1/action-requests/arq_missing/cancel', expectStatus: 404 },
+];
+
 async function startServer(devFlags) {
   const app = createApp({ store: new DevelopmentStore(), devFlags });
   await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
@@ -94,11 +114,36 @@ test('contract: A1 life-events 与 memory-references 路径已写入 openapi.yam
   }
 });
 
+test('contract: A3 companion-plans/artifacts/action-requests 路径已写入 openapi.yaml', () => {
+  const documented = documentedPathMethods();
+  const expected = [
+    ['/api/v1/companion-plans', 'POST'],
+    ['/api/v1/companion-plans', 'GET'],
+    ['/api/v1/companion-plans/{planId}', 'GET'],
+    ['/api/v1/companion-plans/{planId}/accept', 'POST'],
+    ['/api/v1/companion-plans/{planId}/pause', 'POST'],
+    ['/api/v1/companion-plans/{planId}/resume', 'POST'],
+    ['/api/v1/companion-plans/{planId}/cancel', 'POST'],
+    ['/api/v1/companion-plans/{planId}/complete', 'POST'],
+    ['/api/v1/companion-plans/{planId}/steps/{stepId}', 'PATCH'],
+    ['/api/v1/artifacts/{artifactId}', 'GET'],
+    ['/api/v1/action-requests', 'POST'],
+    ['/api/v1/action-requests/{actionId}', 'GET'],
+    ['/api/v1/action-requests/{actionId}/approve', 'POST'],
+    ['/api/v1/action-requests/{actionId}/reject', 'POST'],
+    ['/api/v1/action-requests/{actionId}/cancel', 'POST'],
+  ];
+  for (const [templatePath, method] of expected) {
+    assert.ok(documented.has(templatePath), `openapi.yaml 缺少路径 ${templatePath}`);
+    assert.ok(documented.get(templatePath).has(method), `openapi.yaml 的 ${templatePath} 缺少 ${method}`);
+  }
+});
+
 test('contract: 开关开启时新路由可达（不是 ROUTE_NOT_FOUND）且错误响应形状符合合同', async (t) => {
-  const devFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH' });
+  const devFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH,COMPANION_PLANS,ARTIFACT_CARDS,ACTION_EXECUTION' });
   const { app, base } = await startServer(devFlags);
   t.after(() => app.close());
-  for (const spec of [...A1_PROBES, ...A2_PROBES]) {
+  for (const spec of [...A1_PROBES, ...A2_PROBES, ...A3_PROBES]) {
     const { status, json } = await probe(base, spec);
     const code = json?.error?.code;
     assert.notEqual(code, 'ROUTE_NOT_FOUND', `${spec.method} ${spec.path} 应已接线（收到 ROUTE_NOT_FOUND 说明路由缺失）`);
@@ -117,7 +162,7 @@ test('contract: 开关开启时新路由可达（不是 ROUTE_NOT_FOUND）且错
 test('contract: 开关关闭时新路由按不存在处理（404 ROUTE_NOT_FOUND），不暴露功能存在', async (t) => {
   const { app, base } = await startServer(parseDevFlags({}));
   t.after(() => app.close());
-  for (const spec of [...A1_PROBES, ...A2_PROBES]) {
+  for (const spec of [...A1_PROBES, ...A2_PROBES, ...A3_PROBES]) {
     const { status, json } = await probe(base, spec);
     assert.equal(status, 404, `${spec.method} ${spec.path} 关闭时应 404`);
     assert.equal(json?.error?.code, 'ROUTE_NOT_FOUND', `${spec.method} ${spec.path} 关闭时应 ROUTE_NOT_FOUND`);

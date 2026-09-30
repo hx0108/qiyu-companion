@@ -21,7 +21,11 @@ const ACCOUNT_DOMAIN_TARGETS = Object.freeze([
   'MESSAGES', 'CONVERSATION_SUMMARIES', 'MEMORY_CANDIDATES',
   'RELATIONSHIP_ASSETS', 'RELATIONSHIP_ASSET_EMBEDDINGS', 'OC_IMPORTS',
   // 六项能力 A1（迁移 063/064）：事件投影/提取任务/引用快照随注销清理。
-  'LIFE_EVENTS', 'LIFE_EVENT_EXTRACTION_JOBS', 'MESSAGE_MEMORY_REFS'
+  'LIFE_EVENTS', 'LIFE_EVENT_EXTRACTION_JOBS', 'MESSAGE_MEMORY_REFS',
+  // 六项能力 A2 补欠账（迁移 065）：跟进许可/任务/每日槽位随注销清理。
+  'FOLLOWUP_GRANTS', 'FOLLOWUP_JOBS', 'PROACTIVE_DAILY_SLOTS',
+  // 六项能力 A3（迁移 066/067）：计划/步骤/卡片身份/审批记录随注销清理。
+  'COMPANION_PLANS', 'COMPANION_PLAN_STEPS', 'ARTIFACT_CARDS', 'ACTION_REQUESTS'
 ]);
 
 function registerDeletionTargets(store, deletionJob, targets, now = new Date().toISOString()) {
@@ -124,6 +128,40 @@ async function runAccountDeletionCleanup(store, account, deletionJob, { mediaSto
   }
   completeDeletionTarget(store, deletionJob, 'MESSAGE_MEMORY_REFS', undefined, { deleted_domain: 'message_memory_refs', completed_at: nowIso }, nowIso);
 
+  // 5c) 六项能力 A2 补欠账：跟进许可/任务/每日槽位物理删除（事件删除联动
+  // 不覆盖注销——注销必须清全部历史行，含已终态审计行）。
+  for (const [grantId, grant] of [...(store.followupGrants ?? new Map())]) {
+    if (grant.account_id === accountId) store.followupGrants.delete(grantId);
+  }
+  completeDeletionTarget(store, deletionJob, 'FOLLOWUP_GRANTS', undefined, { deleted_domain: 'followup_grants', completed_at: nowIso }, nowIso);
+  for (const [jobId, job] of [...(store.followupJobs ?? new Map())]) {
+    if (job.account_id === accountId) store.followupJobs.delete(jobId);
+  }
+  completeDeletionTarget(store, deletionJob, 'FOLLOWUP_JOBS', undefined, { deleted_domain: 'followup_jobs', completed_at: nowIso }, nowIso);
+  for (const slotKey of [...(store.proactiveDailySlots ?? new Map()).keys()]) {
+    if (slotKey.startsWith(`${accountId}:`)) store.proactiveDailySlots.delete(slotKey);
+  }
+  completeDeletionTarget(store, deletionJob, 'PROACTIVE_DAILY_SLOTS', undefined, { deleted_domain: 'proactive_daily_slots', completed_at: nowIso }, nowIso);
+
+  // 5d) 六项能力 A3：计划/步骤/卡片身份/审批记录物理删除（卡片是视图无正文；
+  // 审批只留状态行，参数正文本就不落库）。
+  for (const [planId, plan] of [...(store.companionPlans ?? new Map())]) {
+    if (plan.account_id === accountId) store.companionPlans.delete(planId);
+  }
+  completeDeletionTarget(store, deletionJob, 'COMPANION_PLANS', undefined, { deleted_domain: 'companion_plans', completed_at: nowIso }, nowIso);
+  for (const [stepId, step] of [...(store.companionPlanSteps ?? new Map())]) {
+    if (step.account_id === accountId) store.companionPlanSteps.delete(stepId);
+  }
+  completeDeletionTarget(store, deletionJob, 'COMPANION_PLAN_STEPS', undefined, { deleted_domain: 'companion_plan_steps', completed_at: nowIso }, nowIso);
+  for (const [artifactId, card] of [...(store.artifactCards ?? new Map())]) {
+    if (card.account_id === accountId) store.artifactCards.delete(artifactId);
+  }
+  completeDeletionTarget(store, deletionJob, 'ARTIFACT_CARDS', undefined, { deleted_domain: 'artifact_cards', completed_at: nowIso }, nowIso);
+  for (const [actionId, action] of [...(store.actionRequests ?? new Map())]) {
+    if (action.account_id === accountId) store.actionRequests.delete(actionId);
+  }
+  completeDeletionTarget(store, deletionJob, 'ACTION_REQUESTS', undefined, { deleted_domain: 'action_requests', completed_at: nowIso }, nowIso);
+
   // 6) 媒体对象：逐对象删除并写对象级回执；任一失败保留 FAILED 供重试。
   // LEDGER_REPLAY 模式（备份恢复重放）只对齐数据库行状态——对象存储与生产
   // 共用同一桶，主库删除时对象已删，重放不得再次外呼。
@@ -156,7 +194,7 @@ async function runAccountDeletionCleanup(store, account, deletionJob, { mediaSto
   const failed = targets.filter((target) => target.state === 'FAILED');
   deletionJob.physical_cleanup_state = failed.length === 0 ? 'PRODUCTION_CLEANUP_COMPLETED' : 'PARTIAL_CLEANUP_OBJECTS_PENDING_RETRY';
   deletionJob.note = failed.length === 0
-    ? `账户数据已按删除账本清理（消息、摘要、候选、关系资产、向量、OC 原文、媒体对象、生活事件、提取任务、引用快照）。备份最长保留至截止期后自动清除；供应商侧留存按合同删除条款执行。`
+    ? `账户数据已按删除账本清理（消息、摘要、候选、关系资产、向量、OC 原文、媒体对象、生活事件、提取任务、引用快照、跟进许可/任务/槽位、计划与步骤、卡片身份、审批记录）。备份最长保留至截止期后自动清除；供应商侧留存按合同删除条款执行。`
     : `${failed.length} 个删除目标失败（保留重试）；其余目标已清理。未把失败目标报告为完成。`;
   deletionJob.backup_deadline = new Date(now.getTime() + BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   deletionJob.receipt_version = RECEIPT_VERSION;
@@ -200,6 +238,8 @@ function registerConversationDeletionTargets(store, account, deletionJob, conver
     { target_type: 'RELATIONSHIP_ASSETS', target_ref: conversationId },
     // 六项能力 A1：会话内消息的引用快照与提取任务随行级清理；事件投影是
     // 账户级确认事实，不随会话删除（与关系资产同语义），只断开来源链接。
+    // 六项能力 A3 同决定：计划/卡片身份/审批是账户级确认事实不随会话删
+    //（卡片消息行随 messages 清理自然消失，卡片身份行保留供时间线重开）。
     { target_type: 'MESSAGE_MEMORY_REFS', target_ref: conversationId },
     { target_type: 'LIFE_EVENT_EXTRACTION_JOBS', target_ref: conversationId }
   ], now);

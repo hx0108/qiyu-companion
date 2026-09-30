@@ -5,7 +5,7 @@ const { randomUUID, createHash, createHmac, timingSafeEqual } = require('node:cr
 const { readFile } = require('node:fs/promises');
 const path = require('node:path');
 const { evaluateAccess } = require('./domain/access-policy');
-const { generateReply } = require('./domain/mock-adapter');
+const { generateReply, mockPlanProposer } = require('./domain/mock-adapter');
 const { assessSafety, responseForExistingSafetyMode } = require('./domain/safety-policy');
 const { assessModelOutputAuthority } = require('./domain/model-output-policy');
 const { DevelopmentStore } = require('./domain/store');
@@ -40,6 +40,13 @@ const { confirmLifeEventFromCandidate, listLifeEvents, getLifeEvent, reviseLifeE
 const { messageMemoryReferences, buildMemoryRefs, recordMessageMemoryRefs, clearExpiredMessageMemoryLinks } = require('./domain/memory-reference-service');
 const { validateFollowupGrantRequest } = require('./domain/followup-schema');
 const { grantFollowup, revokeFollowup, listFollowupStatus, invalidateFollowupsOnRevision, revokeFollowupsOnDeletion, publicFollowupGrant, publicFollowupJob, computeLocalDateInZone, claimDailySlot } = require('./domain/followup-service');
+// 六项能力 A3：计划/卡片/审批（方案 §4.4-4.6）。plan-service 是
+// companionPlans/Steps/artifactCards 投影唯一写者；action-gate 拥有动作白名单。
+const { validatePlanDraftRequest, validateStepPatch, validateAcceptRequest } = require('./domain/plan-schema');
+const { createPlanDraft, acceptPlan, pausePlan, resumePlan, cancelPlan, completePlan, patchPlanStep, listPlans, getPlan, findPlan: findCompanionPlan, planSteps, ensureArtifactCard, pausePlansOnEventCancellation, cleanupPlansOnEventDeletion, publicPlan, publicArtifactCard } = require('./domain/plan-service');
+const { buildEventCard, buildReadingLogCard, buildPlanCard, renderCardMarkdown, validateCardActions } = require('./domain/artifact-card');
+const { ACTION_TYPE_REGISTRY, canonicalParametersDigest, proposeAction, lapseIfExpired, approveAction, rejectAction, cancelAction, assertExecutable, recordTransparentAction, publicActionRequest } = require('./domain/action-gate');
+const { composePlanProposal } = require('./domain/plan-composer');
 const { assessMultimodalConsistency } = require('./domain/multimodal-consistency-gate');
 const { safeDevFlags, devFlagEnabled } = require('./development/dev-flags');
 const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
@@ -100,7 +107,7 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null, voiceCallEnabled = false, devFlags = null } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null, voiceCallEnabled = false, devFlags = null, planProposer = mockPlanProposer } = {}) {
   // 六项能力开发开关：未注入时全关，所有新路径惰性（既有行为零变化）。
   const resolvedDevFlags = devFlags || safeDevFlags();
   return http.createServer(async (req, res) => {
@@ -110,7 +117,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, devFlags: resolvedDevFlags, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, devFlags: resolvedDevFlags, planProposer, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -151,7 +158,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, devFlags } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, devFlags, planProposer } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -367,8 +374,47 @@ async function route(context) {
       return ok(references);
     }
   }
+  // ---- 共同计划（六项能力 A3，三平级独立开关：路径各有命名空间，无前缀
+  // 共享；跨能力依赖用语义校验表达——如 accept 带 followup 要求
+  // FOLLOWUP_DISPATCH 开）。----
+  if (devFlagOn(context, 'COMPANION_PLANS', account.account_id)) {
+    if (method === 'POST' && path === '/api/v1/companion-plans') {
+      return idempotent(context, account, () => createPlanDraftRoute(store, account, body, context, planProposer));
+    }
+    if (method === 'GET' && path === '/api/v1/companion-plans') {
+      return ok({ plans: listPlans({ store, accountId: account.account_id, eventId: url.searchParams.get('event_id') || null, now: new Date() }) });
+    }
+    if (method === 'GET' && /^\/api\/v1\/companion-plans\/[^/]+$/.test(path)) {
+      const plan = ownPlan(store, account.account_id, path.split('/')[4]);
+      return ok({ plan: publicPlan(plan, planSteps(store, plan.plan_id), { now: new Date() }) });
+    }
+    if (method === 'POST' && /^\/api\/v1\/companion-plans\/[^/]+\/(accept|pause|resume|cancel|complete)$/.test(path)) {
+      return idempotent(context, account, () => planActionRoute(store, account, path, body, context));
+    }
+    if (method === 'PATCH' && /^\/api\/v1\/companion-plans\/[^/]+\/steps\/[^/]+$/.test(path)) {
+      return idempotent(context, account, () => patchPlanStepRoute(store, account, path, body));
+    }
+  }
+  if (devFlagOn(context, 'ARTIFACT_CARDS', account.account_id)) {
+    // 卡片数据视图（§4.5）：内容现场渲染不落库；format=markdown 文本导出。
+    if (method === 'GET' && /^\/api\/v1\/artifacts\/[^/]+$/.test(path)) {
+      return getArtifactRoute(store, account, path, url);
+    }
+  }
+  if (devFlagOn(context, 'ACTION_EXECUTION', account.account_id)) {
+    if (method === 'POST' && path === '/api/v1/action-requests') {
+      return idempotent(context, account, () => createActionRequestRoute(store, account, body));
+    }
+    if (method === 'GET' && /^\/api\/v1\/action-requests\/[^/]+$/.test(path)) {
+      const action = ownActionRequest(store, account.account_id, path.split('/')[4]);
+      return ok({ action_request: publicActionRequest(lapseIfExpired(action, store)) });
+    }
+    if (method === 'POST' && /^\/api\/v1\/action-requests\/[^/]+\/(approve|reject|cancel)$/.test(path)) {
+      return idempotent(context, account, () => actionRequestDecisionRoute(store, account, path));
+    }
+  }
   if (method === 'POST' && /^\/api\/v1\/memory-candidates\/[^/]+\/(confirm|confirm-edited|reject|undo-reject)$/.test(path)) {
-    return idempotent(context, account, () => resolveCandidate(store, account, path, body));
+    return idempotent(context, account, () => resolveCandidate(store, account, path, body, context));
   }
   if (method === 'GET' && path === '/api/v1/relationship-assets') return ok({ assets: activeAssets(store, account.account_id) });
   if (method === 'GET' && path === '/api/v1/timeline') return ok({ entries: timelineEntries(store, account.account_id, url.searchParams.get('filter')) });
@@ -2876,7 +2922,7 @@ function updatePreferences(store, account, path, body) {
   return ok({ preferences: publicPreferences(record) });
 }
 
-function resolveCandidate(store, account, path, body) {
+function resolveCandidate(store, account, path, body, context = null) {
   authorize(account, 'WRITE_MEMORY', store);
   const parts = path.split('/');
   const candidate = ownCandidate(store, account.account_id, parts[4]);
@@ -2927,8 +2973,19 @@ function resolveCandidate(store, account, path, body) {
       candidate.normalized_value = confirmed.asset.value;
     }
     candidate.version += 1;
+    // A3：事件确认成功路径上急切建卡片身份行（一源一卡幂等；READING 类事件
+    // 走 READING_LOG_V1，其余 EVENT_V1）。ARTIFACT_CARDS 关闭时不产卡。
+    let card = null;
+    if (context && devFlagOn(context, 'ARTIFACT_CARDS', account.account_id)) {
+      card = publicArtifactCard(ensureArtifactCard({
+        store, accountId: account.account_id, characterId: confirmed.event.character_id,
+        type: confirmed.event.event_kind === 'READING' ? 'READING_LOG_V1' : 'EVENT_V1',
+        sourceType: 'LIFE_EVENT', sourceId: confirmed.event.event_id, sourceVersion: confirmed.event.version,
+        now: new Date()
+      }));
+    }
     // 确认生活事件不默认创建提醒（主动关心属 A2 跟进调度，须另行显式开启）。
-    return created({ candidate, asset: confirmed.asset, event: confirmed.event });
+    return created({ candidate, asset: confirmed.asset, event: confirmed.event, card });
   }
   if (action === 'confirm-edited') {
     candidate.display_text = requiredText(body.display_text, 'display_text');
@@ -3015,7 +3072,11 @@ function timelineEntries(store, accountId, filter) {
       version: event.version, created_at: event.created_at,
       // A2：事件卡「提醒我」开关的数据源（FOLLOWUP_DISPATCH 关闭时恒空，
       // 前端渲染为不可开启）。
-      followup: followupSummaryForTimeline(store, event)
+      followup: followupSummaryForTimeline(store, event),
+      // A3：事件卡「查看卡片」入口（卡片身份行不存在时 null——确认路径未产卡
+      // 或 ARTIFACT_CARDS 关闭）与事件绑定的计划概要。
+      artifact_id: artifactIdForSource(store, event.account_id, 'LIFE_EVENT', event.event_id),
+      plan: planSummaryForTimeline(store, event)
     }));
   return [...assetEntries, ...lifeEventEntries]
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
@@ -3030,6 +3091,21 @@ function followupSummaryForTimeline(store, event) {
     job.account_id === event.account_id && job.event_id === event.event_id
     && job.event_version === event.version && ['PENDING', 'LEASED', 'READY'].includes(job.state)) ?? null;
   return { enabled: Boolean(activeGrant), followup_kind: activeGrant?.followup_kind ?? null, due_at: pendingJob?.due_at ?? activeGrant?.allowed_from ?? null, job_state: pendingJob?.state ?? null };
+}
+
+// A3：一源一卡的 artifact_id 定位（无卡返回 null）与事件绑定计划概要。
+function artifactIdForSource(store, accountId, sourceType, sourceId) {
+  const card = [...(store.artifactCards?.values() ?? [])].find((item) =>
+    item.account_id === accountId && item.source_type === sourceType && item.source_id === sourceId);
+  return card ? card.artifact_id : null;
+}
+
+function planSummaryForTimeline(store, event) {
+  const plan = [...(store.companionPlans?.values() ?? [])].find((item) =>
+    item.account_id === event.account_id && item.event_id === event.event_id
+    && ['DRAFT', 'ACTIVE', 'PAUSED'].includes(item.state));
+  if (!plan) return null;
+  return { plan_id: plan.plan_id, state: plan.state, title: plan.title, version: plan.version };
 }
 
 function typeToFilter(type) {
@@ -3080,7 +3156,18 @@ function relationshipProfileExport(store, account) {
     characters: [...store.characters.values()].filter((item) => item.account_id === account.account_id).map(({ character_id, name, status, version }) => ({ character_id, name, status, version })),
     relationship_assets: activeAssets(store, account.account_id).map(({ asset_id, character_id, type, value, display_text, version, created_at }) => ({ asset_id, character_id, type, value, display_text, version, created_at })),
     conversations: conversations.map(({ conversation_id, character_id, created_at }) => ({ conversation_id, character_id, created_at })),
-    messages: [...store.messages.values()].filter((item) => conversationIds.has(item.conversation_id)).map(({ message_id, conversation_id, actor, text, ai_generated, provider, model_version, created_at }) => ({ message_id, conversation_id, actor, text, ai_generated, provider: provider || null, model_version: model_version || null, created_at: created_at || null }))
+    messages: [...store.messages.values()].filter((item) => conversationIds.has(item.conversation_id)).map(({ message_id, conversation_id, actor, text, ai_generated, provider, model_version, created_at }) => ({ message_id, conversation_id, actor, text, ai_generated, provider: provider || null, model_version: model_version || null, created_at: created_at || null })),
+    // A1/A2 补欠账 + A3 数据域（§6.3 删除矩阵导出面）：事件、跟进许可与
+    // 任务、计划（含步骤）、卡片身份、审批状态（无参数正文）。
+    life_events: [...(store.lifeEvents?.values() ?? [])].filter((item) => item.account_id === account.account_id && !item.deleted_at).map(publicLifeEvent),
+    followups: {
+      grants: [...(store.followupGrants?.values() ?? [])].filter((item) => item.account_id === account.account_id).map(publicFollowupGrant),
+      jobs: [...(store.followupJobs?.values() ?? [])].filter((item) => item.account_id === account.account_id).map(publicFollowupJob)
+    },
+    companion_plans: [...(store.companionPlans?.values() ?? [])].filter((item) => item.account_id === account.account_id)
+      .map((plan) => publicPlan(plan, planSteps(store, plan.plan_id))),
+    artifact_cards: [...(store.artifactCards?.values() ?? [])].filter((item) => item.account_id === account.account_id).map(publicArtifactCard),
+    action_requests: [...(store.actionRequests?.values() ?? [])].filter((item) => item.account_id === account.account_id).map(publicActionRequest)
   };
 }
 
@@ -3646,11 +3733,18 @@ function reviseLifeEventRoute(store, account, path, body) {
   // expected_version 是乐观锁控制字段，不进字段白名单校验。
   const { expected_version: expectedVersion, ...patch } = body ?? {};
   try {
+    const previousStatus = event.status;
     const result = reviseLifeEvent({ store, account, event, patch, expectedVersion, now: new Date() });
     // A2 联动：旧版本许可失效+在途任务取消（同请求事务）；计数供前端渲染
     //「为新时间重新开启提醒」确认卡。
     const followupInvalidated = invalidateFollowupsOnRevision({ store, event, previousVersion: expectedVersion, now: new Date() });
-    return ok({ ...result, followup_invalidated: followupInvalidated });
+    // A3 联动：事件转 CANCELLED 时派生计划暂停（ACTIVE→PAUSED/DRAFT→CANCELLED；
+    // 修订已使旧版本许可失效，无需再动 followup）。用域对象本身匹配——
+    // result.event 是 publicLifeEvent 投影，不含 account_id。
+    const plansPaused = previousStatus !== 'CANCELLED' && event.status === 'CANCELLED'
+      ? pausePlansOnEventCancellation({ store, event, now: new Date() })
+      : { plans_paused: 0, plans_cancelled: 0 };
+    return ok({ ...result, followup_invalidated: followupInvalidated, plans_paused: plansPaused });
   } catch (error) {
     if (error?.status === 409 && error.code === 'VERSION_CONFLICT') {
       error.details = { ...(error.details ?? {}), current_event: publicLifeEvent(event) };
@@ -3687,12 +3781,192 @@ function grantFollowupRoute(store, account, path, body) {
 
 // DELETE /life-events/{id}：软删资产 + 投影即刻不可见 + 删除账本/回执（202）。
 // A2 联动：许可撤销与待发送任务取消同请求事务（消息先提交则不撤回已见内容）。
+// A3 联动：派生计划非终态清理、卡片行下线（视图随源消失）。
 function deleteLifeEventRoute(store, account, path) {
   authorize(account, 'WRITE_MEMORY', store);
   const event = ownLifeEvent(store, account.account_id, path.split('/')[4]);
   const followup = revokeFollowupsOnDeletion({ store, event, now: new Date() });
+  const plansCleaned = cleanupPlansOnEventDeletion({ store, event, now: new Date() });
   const result = deleteLifeEvent({ store, account, event, now: new Date() });
-  return { status: 202, body: { ...result, followup_revoked: followup } };
+  return { status: 202, body: { ...result, followup_revoked: followup, plans_cleaned_up: plansCleaned } };
+}
+
+// ---- 共同计划路由（六项能力 A3）：路由体只做解析+authorize+域函数调用，
+// 业务全在 plan-service/plan-schema。----
+
+// 归属校验：不存在/跨账户统一 404，不区分原因。
+function ownPlan(store, accountId, id) { const plan = findCompanionPlan(store, accountId, id); if (!plan) throw apiError(404, 'RESOURCE_NOT_FOUND', '计划不存在'); return plan; }
+function ownArtifactCard(store, accountId, id) { const card = store.artifactCards.get(id); if (!card || card.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '卡片不存在'); return card; }
+function ownActionRequest(store, accountId, id) { const action = store.actionRequests.get(id); if (!action || action.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '行动请求不存在'); return action; }
+
+// POST /companion-plans：提议→草案（不建立计划、不开提醒）。事件可选；
+// 同事件旧 DRAFT supersede；卡片行/卡片消息以 ARTIFACT_CARDS 开关守卫
+//（关=不产卡，计划功能不受损）。
+async function createPlanDraftRoute(store, account, body, context, planProposer) {
+  authorize(account, 'WRITE_MEMORY', store);
+  const event = body?.event_id ? ownLifeEvent(store, account.account_id, body.event_id) : null;
+  const validation = validatePlanDraftRequest(body, { event });
+  if (!validation.ok) {
+    throw apiError(400, 'VALIDATION_ERROR', `计划草案字段不合法：${validation.errors.map((item) => `${item.field} ${item.reason}`).join('；')}`, { missing_fields: validation.errors.map((item) => item.field), field_errors: validation.errors });
+  }
+  const character = event ? store.characters.get(event.character_id) : store.activeCharacter(account.account_id);
+  const composed = await composePlanProposal({
+    templateVersion: validation.value.template_version, supportMode: validation.value.support_mode,
+    event, character: character ? { name: character.name } : null,
+    model: planProposer ?? null, now: new Date()
+  });
+  const draft = createPlanDraft({
+    store, account, event, validated: validation.value, proposal: composed, now: new Date(),
+    createCard: devFlagOn(context, 'ARTIFACT_CARDS', account.account_id)
+  });
+  return created({
+    plan: publicPlan(draft.plan, draft.steps),
+    card: draft.card ? publicArtifactCard(draft.card) : null,
+    superseded: draft.superseded,
+    note: '这是可编辑草案，接受后才建立计划；接受不自动开启提醒（提醒需在接受时单独勾选）。'
+  });
+}
+
+// 五条计划 action 路由共用：expected_version 乐观锁 + 状态机；ACTION_EXECUTION
+// 开启时成功后透明留痕（同一次用户确认=审批+执行两状态，§4.6；失败不占幂等
+// 键，关闭时计划照常工作只是不记录）。
+async function planActionRoute(store, account, path, body, context) {
+  authorize(account, 'WRITE_MEMORY', store);
+  const plan = ownPlan(store, account.account_id, path.split('/')[4]);
+  const action = path.split('/')[5];
+  const recordAction = devFlagOn(context, 'ACTION_EXECUTION', account.account_id);
+  const run = async () => {
+    if (action === 'accept') return acceptPlanRoute(store, account, plan, body, context);
+    if (action === 'pause') return pausePlan({ store, plan, now: new Date() });
+    if (action === 'resume') return resumePlan({ store, plan, now: new Date() });
+    if (action === 'cancel') return cancelPlan({ store, plan, now: new Date() });
+    return completePlan({ store, plan, confirm: body?.confirm === true, now: new Date() });
+  };
+  const result = await run();
+  if (recordAction) {
+    await recordTransparentAction({
+      store, accountId: account.account_id, characterId: plan.character_id,
+      actionType: `PLAN_${action.toUpperCase()}`, targetRef: plan.plan_id, targetVersion: plan.version,
+      parameters: { expected_version: body?.expected_version ?? null, confirm: body?.confirm === true },
+      idempotencyKey: `plan:${plan.plan_id}:${action}:${plan.version}`,
+      execute: async () => ({ result_ref: `companion-plans/${plan.plan_id}` }),
+      now: new Date()
+    }).catch(() => {/* 留痕失败不阻断已成功的用户操作 */});
+  }
+  return ok({
+    ...result,
+    action_recorded: recordAction,
+    note: action === 'resume' ? '已恢复；不补发暂停期间的提醒，如需到期提醒请重新开启。' : undefined
+  });
+}
+
+// accept 的专用分支：followup 子对象要求 FOLLOWUP_DISPATCH 开（依赖功能的
+// 独立开关，不静默降级也不悄悄替用户开提醒）。
+function acceptPlanRoute(store, account, plan, body, context) {
+  if (body?.followup != null && !devFlagOn(context, 'FOLLOWUP_DISPATCH', account.account_id)) {
+    throw apiError(400, 'VALIDATION_ERROR', '跟进调度未开启，不能在计划接受时附带提醒');
+  }
+  const event = plan.event_id ? ownLifeEvent(store, account.account_id, plan.event_id) : null;
+  const validation = validateAcceptRequest(body, { event, now: new Date() });
+  if (!validation.ok) {
+    throw apiError(400, 'VALIDATION_ERROR', `接受请求字段不合法：${validation.errors.map((item) => `${item.field} ${item.reason}`).join('；')}`, { missing_fields: validation.errors.map((item) => item.field), field_errors: validation.errors });
+  }
+  try {
+    return acceptPlan({ store, account, plan, validated: validation.value, event, now: new Date() });
+  } catch (error) {
+    if (error?.status === 409 && (error.code === 'VERSION_CONFLICT' || error.code === 'PLAN_DRAFT_EXPIRED' || error.code === 'PLAN_STATE_CONFLICT')) {
+      error.details = { ...(error.details ?? {}), current_plan: publicPlan(store.companionPlans.get(plan.plan_id), planSteps(store, plan.plan_id)) };
+    }
+    throw error;
+  }
+}
+
+// PATCH /companion-plans/{id}/steps/{stepId}：字段白名单 + 计划聚合锁。
+function patchPlanStepRoute(store, account, path, body) {
+  authorize(account, 'WRITE_MEMORY', store);
+  const plan = ownPlan(store, account.account_id, path.split('/')[4]);
+  const { expected_version: expectedVersion, ...patch } = body ?? {};
+  const validation = validateStepPatch(patch);
+  if (!validation.ok) {
+    throw apiError(400, 'VALIDATION_ERROR', `步骤字段不合法：${validation.errors.map((item) => `${item.field} ${item.reason}`).join('；')}`, { missing_fields: validation.errors.map((item) => item.field), field_errors: validation.errors });
+  }
+  try {
+    return ok(patchPlanStep({ store, plan, stepId: path.split('/')[6], expectedVersion, patch: validation.value, now: new Date() }));
+  } catch (error) {
+    if (error?.status === 409) {
+      error.details = { ...(error.details ?? {}), current_plan: publicPlan(store.companionPlans.get(plan.plan_id), planSteps(store, plan.plan_id)) };
+    }
+    throw error;
+  }
+}
+
+// GET /artifacts/{id}：现场渲染卡片（视图不落库）；format=markdown 文本导出。
+function getArtifactRoute(store, account, path, url) {
+  const card = ownArtifactCard(store, account.account_id, path.split('/')[4]);
+  let built;
+  if (card.source_type === 'COMPANION_PLAN') {
+    const plan = store.companionPlans.get(card.source_id);
+    if (!plan || plan.account_id !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '卡片来源不存在');
+    built = buildPlanCard({ card, plan, steps: planSteps(store, plan.plan_id) });
+  } else {
+    const event = store.lifeEvents.get(card.source_id);
+    if (!event || event.account_id !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '卡片来源不存在');
+    built = card.type === 'READING_LOG_V1' ? buildReadingLogCard({ card, event }) : buildEventCard({ card, event });
+  }
+  if (!built.ok) throw apiError(409, 'CARD_CONTENT_INVALID', `卡片内容不合法：${built.reason}（显示受控摘要，请重载）`, { fallback_summary: { artifact_id: card.artifact_id, type: card.type, schema_version: card.schema_version } });
+  const actionsValidation = validateCardActions(built.value.actions);
+  if (!actionsValidation.ok) throw apiError(409, 'CARD_ACTION_INVALID', actionsValidation.reason);
+  const format = url.searchParams.get('format');
+  if (format === 'markdown') {
+    return { status: 200, contentType: 'text/markdown; charset=utf-8', body: renderCardMarkdown(built.value) };
+  }
+  if (format && format !== 'json') throw apiError(400, 'VALIDATION_ERROR', 'format 只能是 json 或 markdown');
+  return ok({ card: built.value });
+}
+
+// POST /action-requests：显式审批入口——白名单外 400（模型/客户端不能发明
+// 动作）。首批仅 ACCEPT_PLAN；批准后的执行由 approve 路由触发。
+function createActionRequestRoute(store, account, body) {
+  const permission = ACTION_TYPE_REGISTRY[body?.action_type]?.permission;
+  if (!permission) {
+    throw apiError(400, 'ACTION_TYPE_UNKNOWN', `未知动作类型：${String(body?.action_type)}（白名单：${Object.keys(ACTION_TYPE_REGISTRY).join('/')}）`);
+  }
+  authorize(account, permission, store);
+  const idempotencyKey = requiredText(body?.idempotency_key, 'idempotency_key');
+  const { action, replayed } = proposeAction({
+    store, accountId: account.account_id,
+    characterId: store.activeCharacter(account.account_id)?.character_id ?? null,
+    actionType: body.action_type, targetRef: requiredText(body?.target_ref, 'target_ref'),
+    targetVersion: Number.isInteger(body?.target_version) ? body.target_version : null,
+    parameters: body?.parameters && typeof body.parameters === 'object' ? body.parameters : {},
+    idempotencyKey, now: new Date()
+  });
+  return created({ action_request: publicActionRequest(action), replayed, note: '审批期限 15 分钟；批准绑定当前参数与目标版本，参数变化后须重新提议。' });
+}
+
+// approve / reject / cancel。approve 短事务重验（assertExecutable：状态/digest/
+// 过期/目标版本/账户）后执行注册表动作——首批 ACCEPT_PLAN 委托
+// plan-service.acceptPlan（expected_version 用提议时绑定的 target_version）。
+function actionRequestDecisionRoute(store, account, path) {
+  const action = ownActionRequest(store, account.account_id, path.split('/')[4]);
+  const decision = path.split('/')[5];
+  const now = new Date();
+  if (decision === 'reject') return ok({ action_request: publicActionRequest(rejectAction({ store, action, now })) });
+  if (decision === 'cancel') return ok({ action_request: publicActionRequest(cancelAction({ store, action, now })) });
+  authorize(account, ACTION_TYPE_REGISTRY[action.action_type]?.permission ?? 'WRITE_MEMORY', store);
+  const approved = approveAction({ store, action, now });
+  const current = store.companionPlans.get(action.target_ref);
+  const verdict = assertExecutable({ action: approved, currentTargetVersion: current ? current.version : null, account, now });
+  if (!verdict.executable) {
+    const lapsed = verdict.reason === 'EXPIRED' ? lapseIfExpired(approved, store, now) : approved;
+    throw apiError(409, 'ACTION_NOT_EXECUTABLE', `执行前重验未通过：${verdict.reason}；请重新提议`, { action_request: publicActionRequest(lapsed), reason: verdict.reason });
+  }
+  if (action.action_type !== 'ACCEPT_PLAN') throw apiError(409, 'ACTION_NOT_EXECUTABLE', '该动作暂不支持站内执行');
+  const plan = ownPlan(store, account.account_id, action.target_ref);
+  const accepted = acceptPlan({ store, account, plan, validated: { expected_version: action.target_version, followup: null }, event: plan.event_id ? ownLifeEvent(store, account.account_id, plan.event_id) : null, now });
+  const executed = Object.freeze({ ...store.actionRequests.get(action.action_id), state: 'SUCCEEDED', result_ref: `companion-plans/${plan.plan_id}`, executed_at: now.toISOString(), updated_at: now.toISOString() });
+  store.actionRequests.set(action.action_id, executed);
+  return ok({ action_request: publicActionRequest(executed), result: accepted });
 }
 function ownAsset(store, accountId, id) { const item = store.assets.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '关系资产不存在'); return item; }
 function ownCandidates(store, accountId) { return [...store.candidates.values()].filter((item) => item.account_id === accountId && item.state === 'CANDIDATE' && new Date(item.expires_at).getTime() > Date.now()); }
