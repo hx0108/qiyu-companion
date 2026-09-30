@@ -45,3 +45,17 @@
 - **通话范围决定（产品负责人）**：通话按正式验收通道处理——文字非流式、SSE 流式、通话回合三条通道必须接入同一套事件提取、来源记录与输出规则，不静默跳过；通话关闭期间对应路径记录“不适用及关闭验证”。
 - **六项能力实施方案**：依据根目录《栖语陪伴_六项能力实施方案_v1.0.md》（2026-09-30）开工，首轮交付 A0 收口 + A1 事件与来源；本地真实 PG 隔离测试库实测纳入本轮验证范围。
 - **待人工复核项（登记指派，未销账）**：`development/eval/runs/qwen3.8-flash-conversation-persona-v1-r1/` 的 216 条真实模型运行包（215 条结构化完成、1 条 Schema 兜底）需双人独立盲评与事实依据复核，由产品/评审安排人员；在本完成前不据此宣布外部开放。
+
+## 2026-09-30 A1「生活事件与来源」交付登记（六项能力首轮：A0+A1）
+
+- **范围**：A1 完整闭环（事件提取→用户确认→注入与来源追溯→修订/删除→保留期与注销联动）+ A0 前置收口（见上一节）。A2 跟进调度、A3 计划/卡片/审批、B1 外部日历不在本轮。
+- **已实现并验证（本轮实跑）**：
+  - 域层与存储：`life-event-schema`/`life-event-service`（投影唯一写者）/`memory-reference-service`/`life-event-extraction-worker`；迁移 063/064（RLS 三段式、UNIQUE(message_id)、终态 CHECK、弱引用无外键）；三集合进 PostgresRequestStore load/flush（提取任务只载在途）。
+  - 三通道接线（通话=正式验收通道）：文字非流式、SSE（顺带修复该路径漏设 retention_expires_at）、通话回合（deps 注入）；开关关闭时三通道零任务行。
+  - 确认链与路由：confirm/confirm-edited（完整 life_event 字段集）、GET/PATCH/DELETE life-events（409 回传当前值、202 删除回执）、GET memory-references；错误码零新增。
+  - 注入与来源：开关开启时 contextPack 增补 asset_id/active_life_events(≤5)/memory_refs，关闭时与既有形状逐字一致（prompt 守门测试）；CONVERSATION_PROMPT_VERSION v1→v2（EVAL_BASELINE 已登记，既有 v1 冻结运行包不受影响）；qwen 提取器（隐私红线入提示词）+ mock 提取器（E2E）。
+  - 删除/保留期：retention sweep 联动（引用删/事件 source 置空/任务取消，事件本体保留）、注销账本追加三域、时间线 filter=event。
+  - Web：memory-panel 模块（候选确认日期区/来源面板/事件修订 409 保留草稿/删除回执）+ 「本轮参考」入口；三重登记并 bump 20260930-a1。
+- **测试（2026-09-30 实跑）**：`node --test` 433 通过 + 4 跳过（PG 专属）+ 0 失败；`test:pg-companion-continuity` 4/4（迁移可执行、RLS 生效、UNIQUE/乐观锁恰一胜、事务原子、20 并发×2000 次混合读写 P95=45-49ms，Docker 临时库 tmpfs）；`test:e2e-companion-continuity` 三轮稳定门禁通过；`test:e2e-browser` 16 步全过。
+- **如实登记边界**：事件提取仅以 mock 提取器与单测验证过域逻辑与接线；真实 Qwen 提取器的端到端效果未在本轮验收（无配额环境），上线前需按 EVAL_BASELINE 流程补真实模型运行包与人工盲评。PG 实测覆盖 RLS/约束/并发/原子性，未含多进程 Worker 竞争生产压测。
+- **操作口径**：开关（QIYU_DEV_FLAGS/QIYU_DEV_FLAG_ACCOUNTS，默认全关）与任务积压处置见 OPERATIONS_RUNBOOK「生活事件提取开关与任务积压」。

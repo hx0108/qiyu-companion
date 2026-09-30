@@ -21,6 +21,9 @@ const { createTencentCosPrivateImageStoreFromEnvironment } = require('../src/med
 const { createTencentCosPrivateMediaStoreFromEnvironment } = require('../src/media/tencent-cos-private-media-store');
 const { fetchTencentGeneratedImage } = require('../src/media/tencent-image-result-fetcher');
 const { MediaEntitlementService } = require('../src/domain/media-entitlement-service');
+const { mockLifeEventExtractor } = require('../src/domain/mock-adapter');
+const { startLifeEventExtractionWorker } = require('../src/domain/life-event-extraction-worker');
+const { parseDevFlags } = require('../src/development/dev-flags');
 const { createControlledPng } = require('./controlled-probe-png');
 
 // 2 秒 16k PCM16 连续正弦（640Hz、幅值 0.25）：Chromium 以 --use-file-for-
@@ -57,7 +60,11 @@ async function main() {
   const replyGenerator = realQwen ? createQwenReplyGenerator(process.env) : null;
   if (realQwen && !replyGenerator) throw new Error('QIYU_E2E_REAL_QWEN=1 requires QIYU_LLM_PROVIDER=qwen and QWEN_API_KEY.');
   const providerRuntime = realTencentMedia ? createTencentMediaRuntime(process.env, store) : createMockContextImageRuntime();
-  const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true });
+  // 六项能力 A1：陪伴连续性场景走确定性 mock 提取器（关键词→固定候选），
+  // 开关全开；内存 worker 500ms 轮询，页面轮询等候选横幅。
+  const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES' });
+  const a1Worker = startLifeEventExtractionWorker(store, mockLifeEventExtractor, { intervalMs: 500 });
+  const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true, devFlags: a1DevFlags });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${fakeMicWav.replace(/\\/g, '/')}`] });
@@ -84,7 +91,19 @@ async function main() {
     await page.waitForSelector('nav.bottom-nav', { timeout: 10_000 });
   };
   const steps = [];
+  // --only <scenario>：只跑该场景的前置 setup 与场景步骤（其余记 SKIP，
+  // 门禁判定不计失败）。npm run test:e2e-companion-continuity 用它。
+  const cliArgs = process.argv.slice(2);
+  const onlyIndex = cliArgs.indexOf('--only');
+  const onlyScenario = onlyIndex >= 0 ? cliArgs[onlyIndex + 1] : null;
+  const ONLY_SCENARIO_STEPS = {
+    'companion-continuity': ['必要告知', '年龄声明', '角色创建', '对话：', 'A1 ']
+  };
   const step = async (name, run) => {
+    if (onlyScenario && ONLY_SCENARIO_STEPS[onlyScenario] && !ONLY_SCENARIO_STEPS[onlyScenario].some((prefix) => name.startsWith(prefix))) {
+      steps.push({ name, status: 'SKIP', detail: `--only ${onlyScenario}` });
+      return;
+    }
     try {
       await run();
       steps.push({ name, status: 'PASS', detail: '' });
@@ -315,7 +334,85 @@ async function main() {
       });
     }
 
+    // ---- 陪伴连续性（六项能力 A1）：提取→确认→来源→修订→删除 全链路 ----
+    // mock 提取器关键词触发；worker 500ms 轮询，页面等横幅最多 10 秒。
+    await step('A1 提取确认：说“周五面试”→候选卡→补具体时间保存确认', async () => {
+      await backToChat();
+      await page.locator('#message-form [name="message"]').fill('我周五要去面试，好紧张');
+      await page.locator('#message-form .send').click();
+      // Node 侧先等提取 worker 产出 life_event 候选（500ms 轮询 worker 与 UI
+      // 刷新存在时序差；不等的话横幅轮询会抢在候选落库前超时）。
+      await new Promise((resolve, reject) => {
+        const started = Date.now();
+        const timer = setInterval(() => {
+          if ([...store.candidates.values()].some((item) => item.type === 'life_event' && item.state === 'CANDIDATE')) { clearInterval(timer); resolve(); }
+          else if (Date.now() - started > 10_000) { clearInterval(timer); reject(new Error('提取 worker 未在 10 秒内产出 life_event 候选')); }
+        }, 200);
+      });
+      await page.waitForSelector('.memory-banner', { timeout: 10_000 });
+      await page.locator('.memory-banner').click();
+      // 同一条消息会先产生普通 dev-note 候选（回复生成器附带）再产生生活事件
+      // 候选（提取 worker）；横幅一次只显示一个，先确认掉普通候选直到
+      // life_event 专用 sheet 出现（确认 dev-note 无害——它只是普通记忆）。
+      for (let attempt = 0; attempt < 4 && (await page.locator('#life-event-title').count()) === 0; attempt += 1) {
+        assert((await page.locator('[data-action="confirm-candidate"]').count()) > 0, '普通候选应可确认');
+        await page.locator('[data-action="confirm-candidate"]').click();
+        await page.waitForSelector('#message-form', { timeout: 10_000 });
+        await page.waitForSelector('.memory-banner', { timeout: 10_000 });
+        await page.locator('.memory-banner').click();
+      }
+      await page.waitForSelector('#life-event-title', { timeout: 10_000 });
+      assert((await page.locator('#life-event-title').inputValue()).includes('面试'), '候选标题应含面试');
+      await page.locator('#life-event-scheduled-at').fill('2026-10-02T14:30');
+      await page.locator('[data-action="confirm-edited-candidate"]').click();
+      await page.waitForSelector('#message-form', { timeout: 10_000 });
+      const events = [...store.lifeEvents.values()].filter((event) => !event.deleted_at);
+      assert(events.length === 1, `应恰好确认一个生活事件，实际 ${events.length}`);
+      assert(events[0].scheduled_at === '2026-10-02T06:30:00.000Z', `补时间应固化为 UTC ISO（本地 +08:00），实际 ${events[0].scheduled_at}`);
+      assert(events[0].clarification_required === false, '补全日期后不应再要求澄清');
+    });
+
+    await step('A1 来源与注入：新回复“本轮参考”面板显示事件可用；时间线筛选事件可见', async () => {
+      await page.locator('#message-form [name="message"]').fill('帮我加油打打气');
+      await page.locator('#message-form .send').click();
+      await page.waitForSelector('.memory-refs-trigger', { timeout: 15_000 });
+      await page.locator('.memory-refs-trigger').last().click();
+      await page.waitForSelector('.memory-ref-row.available', { timeout: 10_000 });
+      const refText = await page.locator('.memory-ref-list').innerText();
+      assert(refText.includes('面试'), '来源面板应显示已确认事件');
+      await page.locator('[data-action="close-memory-refs"]').click();
+      await backToChat();
+      await page.locator('nav.bottom-nav [data-action="open-assets"]').click();
+      await page.waitForSelector('[data-timeline-filter="event"]', { timeout: 10_000 });
+      await page.locator('[data-timeline-filter="event"]').click();
+      await page.waitForSelector('[data-entry-type="LIFE_EVENT"]', { timeout: 10_000 });
+    });
+
+    await step('A1 修订与删除：时间线改期成功；删除带回执且列表即刻不可见', async () => {
+      page.on('dialog', (dialog) => dialog.accept().catch(() => {}));
+      const lifeEventResponses = [];
+      page.on('response', (response) => {
+        if (response.url().includes('/life-events/')) lifeEventResponses.push(`${response.request().method()} ${response.status()}`);
+      });
+      await page.locator('[data-entry-type="LIFE_EVENT"] [data-action="revise-event"]').click();
+      await page.waitForSelector('#event-revise-scheduled-at', { timeout: 10_000 });
+      await page.locator('#event-revise-scheduled-at').fill('2026-10-05T09:00');
+      await page.locator('[data-action="submit-event-revision"]').click();
+      await page.waitForFunction(() => document.body.innerText.includes('事件已修订'), null, { timeout: 10_000 }).catch(() => {
+        throw new Error(`修订未生效；life-events 响应：${lifeEventResponses.join('、') || '无请求发出'}`);
+      });
+      const revised = [...store.lifeEvents.values()].find((event) => !event.deleted_at);
+      assert(revised?.version === 2, `修订后投影版本应为 2，实际 ${revised?.version}`);
+      assert(revised?.scheduled_at === '2026-10-05T01:00:00.000Z', `改期应固化为 UTC ISO，实际 ${revised?.scheduled_at}`);
+
+      await page.locator('[data-entry-type="LIFE_EVENT"] [data-action="delete-event"]').click();
+      assert([...store.lifeEvents.values()].every((event) => event.deleted_at), '删除后所有事件投影都应标记 deleted');
+      await page.waitForFunction(() => !document.querySelector('[data-entry-type="LIFE_EVENT"]'), null, { timeout: 10_000 });
+    });
+
+
     await step(realTencentMedia ? 'TTS：真实腾讯语音生成并由鉴权媒体接口播放' : 'TTS 未启用降级：受控失败视图且文字保留', async () => {
+      await backToChat(); // A1 场景结束在时间线页；语音按钮在聊天流里。
       const ttsButton = page.locator('[data-action="synthesize-message-audio"]').first();
       assert(await ttsButton.count() > 0, '助手回复应提供语音按钮');
       await ttsButton.click();
@@ -461,7 +558,7 @@ async function main() {
 
   const unexpectedConsoleErrors = consoleErrors.filter((text) => !text.includes('tts') && !text.includes('Failed to load resource'));
   const unexpectedServerErrors = expectedFailures;
-  const passed = steps.every((item) => item.status === 'PASS') && unexpectedConsoleErrors.length === 0 && unexpectedServerErrors.length === 0;
+  const passed = steps.every((item) => item.status !== 'FAIL') && unexpectedConsoleErrors.length === 0 && unexpectedServerErrors.length === 0;
   const report = renderReport(steps, consoleErrors, unexpectedServerErrors, passed, realQwen, realTencentMedia);
   console.log(report);
   const outputDir = path.resolve(__dirname, '../../../development/eval');

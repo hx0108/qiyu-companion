@@ -37,3 +37,8 @@ rule_files: [monitoring/prometheus-rules.yml]
 
 ### 图片任务滞留
 - 检查 Worker 图片推进（依赖腾讯图片管线环境变量齐全，缺失时队列跳过）；`docker compose logs qiyu-worker` 过滤 `图片任务`。
+
+### 生活事件提取开关与任务积压（六项能力 A1）
+- 关闭开关：清掉 `QIYU_DEV_FLAGS` 里的 `LIFE_EVENTS`/`MEMORY_REFERENCES` 并重启——提取立即停止（三通道不再入队）、事件/引用路由按不存在处理；已确认事件与引用快照作为用户数据保留（数据权利不随开关变化）。
+- 任务积压：`SELECT account_id, count(*) FROM life_event_extraction_jobs WHERE state='PENDING' GROUP BY 1;`（PG 模式）。run-workers 未配置提取模型（QIYU_LLM_PROVIDER/QWEN_API_KEY）时跳过提取队列，任务会等待模型可用或被保留期清扫取消（`CANCELLED`，原因 `source message retention expired`）。
+- `FAILED` 任务（3 次退避耗尽）留在 `life_event_extraction_jobs` 表供任务台查询；不自动重放，人工确认原因后可按 message_id 手工补录候选。提取失败不阻塞聊天主链路。

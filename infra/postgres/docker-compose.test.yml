@@ -1,0 +1,28 @@
+# 六项能力 A1 隔离测试库（方案 §5 验证通道）：每次 up 都是全新库——数据落在
+# tmpfs（容器删除即消失，零污染、不占磁盘），迁移与 init 和正式 compose 同
+# 一份挂载，保证测的就是将部署的 DDL。端口 54329 避开本机 5432。
+# 用法：由 apps/api/scripts/run-pg-companion-continuity.js 编排 up --wait /
+# down -v；不要手动长期运行（tmpfs 内存换隔离）。
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    container_name: qiyu-postgres-a1-test
+    environment:
+      POSTGRES_DB: qiyu_a1_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: qiyu-a1-test-only
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      - ./migrations:/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d qiyu_a1_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 8s

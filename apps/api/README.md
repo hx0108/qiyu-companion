@@ -56,6 +56,13 @@ node --test test\*.test.js
 
 服务默认只监听 `http://127.0.0.1:3000`。打开该地址即可得到 `apps/web` 的同源开发壳；可用 `$env:PORT=3100; node src\server.js` 更改端口。
 
+### 六项能力 A1（生活事件与来源）测试命令
+
+- `npm run test:e2e-companion-continuity`：浏览器 E2E 的陪伴连续性场景（提取→确认→来源→修订→删除，走确定性 mock 提取器）。
+- `npm run test:pg-companion-continuity`：PG 隔离库实测（Docker 临时库：迁移 063/064、RLS、UNIQUE、乐观锁、事务原子性、混合读写 P95；Docker 不可用时如实跳过）。
+
+功能由开发开关控制（与生产 feature-flags 完全分离）：`QIYU_DEV_FLAGS="LIFE_EVENTS,MEMORY_REFERENCES"`、可选 `QIYU_DEV_FLAG_ACCOUNTS="acct_dev_alice"` 白名单；默认全关——路由按不存在处理，三通道（文字/SSE/通话）不产生提取任务，上下文包与 prompt 同既有形状逐字一致。
+
 ### Qwen3.8-Flash 本地开发接线
 
 已实现 Qwen OpenAI-兼容 Chat Completions Adapter。它只在 `QIYU_LLM_PROVIDER=qwen` 时启用，且只从进程环境读取 `QWEN_API_KEY`（或 `DASHSCOPE_API_KEY`）；密钥不会写入项目、响应或日志。项目外的凭据文件可通过下列启动器加载到**当前进程**：
