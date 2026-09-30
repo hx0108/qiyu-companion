@@ -534,6 +534,43 @@ function createQwenLifeEventExtractor(environment = process.env, dependencies = 
   return extractor;
 }
 
+// 跟进措辞器（六项能力 A2）：规则引擎放行后，把模板槽交给模型组织语言。
+// 输出必须含事件标题（防脱 fact）；失败/未配置由调用方回退固定模板。
+const FOLLOWUP_COMPOSITION_PROMPT_VERSION = 'followup-composition.v1';
+
+function createQwenFollowupComposer(environment = process.env, dependencies = {}) {
+  if (environment.QIYU_LLM_PROVIDER !== 'qwen') return null;
+  const adapter = new QwenAdapter({
+    apiKey: environment.QWEN_API_KEY || environment.DASHSCOPE_API_KEY,
+    baseUrl: environment.QWEN_BASE_URL || environment.DASHSCOPE_BASE_URL || DEFAULT_BASE_URL,
+    model: environment.QWEN_MODEL || DEFAULT_MODEL,
+    fetchImpl: dependencies.fetchImpl || globalThis.fetch,
+    timeoutMs: positiveTimeout(environment.QWEN_FOLLOWUP_TIMEOUT_MS || 10000)
+  });
+  const composer = async ({ event, character, template, now } = {}) => {
+    if (!event?.title) throw new QwenProviderError('QWEN_FOLLOWUP_INPUT_INVALID', '跟进措辞需要事件标题');
+    const result = await adapter.generate({
+      text: [
+        `你是 AI 陪伴角色${character?.name ? `「${character.name}」` : ''}，要给用户发一条事先约定过的主动提醒。`,
+        `基准模板：「${template.replaceAll('{title}', event.title)}」`,
+        '请用你自己的口吻改写这条提醒：保持模板的事实（事件名、提醒意图）不变，温和自然、一两句话即可；不得新增模板外的事实或要求，不得使用内疚、惩罚、催促话术，不得索要回复。',
+        `事件：${event.title}${event.scheduled_at ? `（时间 ${event.scheduled_at}）` : ''}`,
+        '只输出一个 JSON 对象：{"text":"..."}'
+      ].join('\n'),
+      context: { followup_composition: true, response_schema: true }
+    });
+    let parsed;
+    try { parsed = JSON.parse(extractJsonObject(result.text)); } catch {
+      throw new QwenProviderError('QWEN_FOLLOWUP_OUTPUT_INVALID', 'Qwen 跟进措辞输出格式无效');
+    }
+    return { text: typeof parsed?.text === 'string' ? parsed.text : '', provider: 'qwen', modelVersion: result.modelVersion, usage: result.usage };
+  };
+  composer.provider = 'qwen';
+  composer.modelVersion = adapter.model;
+  composer.promptVersion = FOLLOWUP_COMPOSITION_PROMPT_VERSION;
+  return composer;
+}
+
 // 语义 Embedding 工厂（P1-4 记忆检索质量）：资产索引侧与召回查询侧共用同一
 // provider，保证向量同源同版本（不同 model_version 的向量不得混算余弦）。
 // 兼容 DashScope OpenAI-compatible 的 /embeddings 端点；dimensions 参数仅
@@ -589,4 +626,4 @@ function createQwenEmbeddingProvider(environment = process.env, dependencies = {
   return provider;
 }
 
-module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, CONVERSATION_PROMPT_VERSION, LIFE_EVENT_EXTRACTION_PROMPT_VERSION, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator, fallbackCompanionReply, lifeEventExtractionPrompt, parseCompanionReply, parseEmotionJudgeReply, summaryPrompt };
+module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, CONVERSATION_PROMPT_VERSION, LIFE_EVENT_EXTRACTION_PROMPT_VERSION, FOLLOWUP_COMPOSITION_PROMPT_VERSION, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenFollowupComposer, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator, fallbackCompanionReply, lifeEventExtractionPrompt, parseCompanionReply, parseEmotionJudgeReply, summaryPrompt };

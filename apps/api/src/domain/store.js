@@ -18,6 +18,9 @@ class DevelopmentStore {
     this.lifeEvents = new Map();
     this.lifeEventExtractionJobs = new Map();
     this.messageMemoryRefs = new Map();
+    this.followupGrants = new Map();
+    this.followupJobs = new Map();
+    this.proactiveDailySlots = new Map();
     this.mediaJobs = new Map();
     this.mediaAssets = new Map();
     this.callSessions = new Map();

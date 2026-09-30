@@ -188,10 +188,18 @@ class PostgresRequestStore extends DevelopmentStore {
         FROM life_event_extraction_jobs WHERE account_id = $1 AND state IN ('PENDING', 'PROCESSING')`, [accountId]]
       , [`SELECT ref_id, message_id, account_id, character_id, conversation_id, refs_json, context_bundle_version, created_at
         FROM message_memory_refs WHERE account_id = $1`, [accountId]]
+      // 六项能力 A2（迁移 065）：许可全量（账户内量小）；任务只载在途
+      //（终态行留库审计）；槽位仅当日附近行（历史槽位无读取方）。
+      , [`SELECT grant_id, account_id, character_id, event_id, event_version, followup_kind, channel, allowed_from, expires_at,
+        version, state, consented_at, revoked_at, created_at, updated_at FROM followup_grants WHERE account_id = $1`, [accountId]]
+      , [`SELECT job_id, account_id, character_id, event_id, event_version, grant_id, followup_kind, due_at, expires_at, local_date,
+        state, lease_owner, lease_expires_at, attempts, next_attempt_at, last_error, created_at, published_at
+        FROM followup_jobs WHERE account_id = $1 AND state IN ('PENDING', 'LEASED', 'READY')`, [accountId]]
+      , [`SELECT account_id, local_date, claimed_by, created_at FROM proactive_daily_slots WHERE account_id = $1 AND local_date >= CURRENT_DATE - INTERVAL '2 days'`, [accountId]]
     ];
     const results = [];
     for (const [sql, values] of queries) results.push(await client.query(sql, values));
-    const [accountRows, noticeRows, characterRows, personaVersionRows, worldStateRows, worldStateEventRows, conversationRows, messageRows, conversationSummaryRows, conversationSummaryJobRows, outboxEventRows, candidateRows, assetRows, mediaJobRows, mediaAssetRows, entitlementLedgerRows, subscriptionRows, subscriptionOrderRows, paymentEventRows, paymentQuarantineRows, deletionRows, deletionTargetRows, contactRows, complaintRows, proactiveEventRows, proactiveMessageRows, dailyUsageRows, operationMetricRows, idempotencyRows, messageFeedbackRows, ocImportRows, contentRightsReviewRows, contentRightsAppealRows, contentRightsDecisionRows, ageReviewDecisionRows, assetEmbeddingJobRows, assetEmbeddingDeadLetterRows, assetEmbeddingRows, trialFeedbackRows, notificationRows, userPreferenceRows, callSessionRows, callTurnRows, lifeEventRows, lifeEventExtractionJobRows, messageMemoryRefRows] = results.map((result) => result.rows);
+    const [accountRows, noticeRows, characterRows, personaVersionRows, worldStateRows, worldStateEventRows, conversationRows, messageRows, conversationSummaryRows, conversationSummaryJobRows, outboxEventRows, candidateRows, assetRows, mediaJobRows, mediaAssetRows, entitlementLedgerRows, subscriptionRows, subscriptionOrderRows, paymentEventRows, paymentQuarantineRows, deletionRows, deletionTargetRows, contactRows, complaintRows, proactiveEventRows, proactiveMessageRows, dailyUsageRows, operationMetricRows, idempotencyRows, messageFeedbackRows, ocImportRows, contentRightsReviewRows, contentRightsAppealRows, contentRightsDecisionRows, ageReviewDecisionRows, assetEmbeddingJobRows, assetEmbeddingDeadLetterRows, assetEmbeddingRows, trialFeedbackRows, notificationRows, userPreferenceRows, callSessionRows, callTurnRows, lifeEventRows, lifeEventExtractionJobRows, messageMemoryRefRows, followupGrantRows, followupJobRows, proactiveDailySlotRows] = results.map((result) => result.rows);
     const account = accountRows[0];
     if (!account) throw new Error('Scoped development account was not available after seed');
     store.accounts.set(account.account_id, {
@@ -233,6 +241,9 @@ class PostgresRequestStore extends DevelopmentStore {
     for (const row of lifeEventRows) store.lifeEvents.set(row.event_id, { event_id: row.event_id, account_id: row.account_id, character_id: row.character_id, current_asset_id: row.current_asset_id, asset_version: Number(row.asset_version), version: Number(row.version), domain: row.domain, event_kind: row.event_kind, title: row.title, scheduled_at: row.scheduled_at ? dateTimeValue(row.scheduled_at) : null, timezone: row.timezone ?? null, time_precision: row.time_precision, status: row.status, clarification_required: Boolean(row.clarification_required), source_message_id: row.source_message_id ?? null, created_at: dateTimeValue(row.created_at), updated_at: dateTimeValue(row.updated_at), deleted_at: row.deleted_at ? dateTimeValue(row.deleted_at) : null });
     for (const row of lifeEventExtractionJobRows) store.lifeEventExtractionJobs.set(row.job_id, { job_id: row.job_id, account_id: row.account_id, character_id: row.character_id, conversation_id: row.conversation_id, message_id: row.message_id, captured_revocation_epoch: Number(row.captured_revocation_epoch), state: row.state, attempt_count: Number(row.attempt_count), next_attempt_at: dateTimeValue(row.next_attempt_at), exhausted_at: row.exhausted_at ? dateTimeValue(row.exhausted_at) : null, last_error: row.last_error ?? null, created_at: dateTimeValue(row.created_at), completed_at: row.completed_at ? dateTimeValue(row.completed_at) : null });
     for (const row of messageMemoryRefRows) store.messageMemoryRefs.set(row.ref_id, { ref_id: row.ref_id, message_id: row.message_id, account_id: row.account_id, character_id: row.character_id, conversation_id: row.conversation_id, refs_json: parseJson(row.refs_json) ?? { refs: [] }, context_bundle_version: row.context_bundle_version, created_at: dateTimeValue(row.created_at) });
+    for (const row of followupGrantRows) store.followupGrants.set(row.grant_id, { grant_id: row.grant_id, account_id: row.account_id, character_id: row.character_id, event_id: row.event_id, event_version: Number(row.event_version), followup_kind: row.followup_kind, channel: row.channel, allowed_from: dateTimeValue(row.allowed_from), expires_at: dateTimeValue(row.expires_at), version: Number(row.version), state: row.state, consented_at: dateTimeValue(row.consented_at), revoked_at: row.revoked_at ? dateTimeValue(row.revoked_at) : null, created_at: dateTimeValue(row.created_at), updated_at: dateTimeValue(row.updated_at) });
+    for (const row of followupJobRows) store.followupJobs.set(row.job_id, { job_id: row.job_id, account_id: row.account_id, character_id: row.character_id, event_id: row.event_id, event_version: Number(row.event_version), grant_id: row.grant_id, followup_kind: row.followup_kind, due_at: dateTimeValue(row.due_at), expires_at: dateTimeValue(row.expires_at), local_date: databaseDate(row.local_date), state: row.state, lease_owner: row.lease_owner ?? null, lease_expires_at: row.lease_expires_at ? dateTimeValue(row.lease_expires_at) : null, attempts: Number(row.attempts), next_attempt_at: dateTimeValue(row.next_attempt_at), last_error: row.last_error ?? null, created_at: dateTimeValue(row.created_at), published_at: row.published_at ? dateTimeValue(row.published_at) : null });
+    for (const row of proactiveDailySlotRows) store.proactiveDailySlots.set(`${row.account_id}:${databaseDate(row.local_date)}`, { account_id: row.account_id, local_date: databaseDate(row.local_date), claimed_by: row.claimed_by, created_at: dateTimeValue(row.created_at) });
     for (const row of conversationRows) store.conversations.set(row.conversation_id, { conversation_id: row.conversation_id, account_id: row.account_id, character_id: row.character_id, status: mapConversationState(row.status), created_at: row.created_at });
     for (const row of messageRows) store.messages.set(row.message_id, { message_id: row.message_id, conversation_id: row.conversation_id, actor: row.actor, text: row.text, attachments: parseJson(row.attachments) ?? [], provider: row.provider, model_version: row.model_version, ai_generated: row.ai_generated, world_state_id: row.world_state_id, world_state_version: row.world_state_version === null ? null : Number(row.world_state_version), call_session_id: row.call_session_id ?? null, created_at: row.created_at, retention_expires_at: row.retention_expires_at ? dateTimeValue(row.retention_expires_at) : null });
     for (const row of conversationSummaryRows) store.conversationSummaries.set(row.summary_id, { summary_id: row.summary_id, account_id: row.account_id, conversation_id: row.conversation_id, source_from_id: row.source_from_id, source_to_id: row.source_to_id, text: row.text, model_route_id: row.model_route_id, prompt_version: row.prompt_version, source_checksum: row.source_checksum, revocation_epoch: Number(row.revocation_epoch), state: row.state, created_at: dateTimeValue(row.created_at), invalidated_at: row.invalidated_at ? dateTimeValue(row.invalidated_at) : null, retention_expires_at: dateTimeValue(row.retention_expires_at) });
@@ -292,6 +303,21 @@ class PostgresRequestStore extends DevelopmentStore {
   }
 
   next() { return randomUUID(); }
+
+  // A2 每日槽位原子竞争（请求侧，手动触发与 Worker 共享每日一条）：INSERT ON
+  // CONFLICT 返回布尔，不查数量、不依赖进程内锁；同步写 Map 防 flush 重复。
+  // 内存模式由域层 claimDailySlot 承担同语义。
+  async claimProactiveDailySlot(localDate, claimedBy) {
+    const key = `${this.accountId}:${localDate}`;
+    if (this.proactiveDailySlots.has(key)) return false;
+    const result = await this.client.query(`INSERT INTO proactive_daily_slots (account_id, local_date, claimed_by)
+      VALUES ($1, $2::date, $3) ON CONFLICT (account_id, local_date) DO NOTHING RETURNING account_id`, [this.accountId, localDate, claimedBy]);
+    if (result.rowCount === 1) {
+      this.proactiveDailySlots.set(key, Object.freeze({ account_id: this.accountId, local_date: localDate, claimed_by: claimedBy, created_at: new Date().toISOString() }));
+      return true;
+    }
+    return false;
+  }
 
   // 语义向量召回（P1-4）：向量维度随 provider 声明（开发 256 / Qwen 1024 等），
   // 但查询向量与存储向量必须同 embedding_model_version——不同版本的向量空间
@@ -380,6 +406,12 @@ class PostgresRequestStore extends DevelopmentStore {
     await syncRows(this.client, this.lifeEvents, before.lifeEvents, persistLifeEvent);
     await syncRows(this.client, this.lifeEventExtractionJobs, before.lifeEventExtractionJobs, persistLifeEventExtractionJob);
     await syncRows(this.client, this.messageMemoryRefs, before.messageMemoryRefs, persistMessageMemoryRef, deleteMessageMemoryRef);
+    // 六项能力 A2：许可/任务/槽位。任务 UPDATE 守卫在途三态——0 行说明独立
+    // Worker 已终结该任务（PUBLISHED 等），取消落空是合法竞态结果，跳过不回写
+    //（方案：消息先提交则不声称能撤回已被看到的内容）。
+    await syncRows(this.client, this.followupGrants, before.followupGrants, persistFollowupGrant);
+    await syncRows(this.client, this.followupJobs, before.followupJobs, persistFollowupJob);
+    await syncRows(this.client, this.proactiveDailySlots, before.proactiveDailySlots, persistProactiveDailySlot);
     await syncRows(this.client, this.mediaAssets, before.mediaAssets, persistMediaAsset);
     assertAppendOnly(before.entitlementLedgers, this.entitlementLedgers);
     await syncRows(this.client, this.entitlementLedgers, before.entitlementLedgers, persistEntitlementLedger);
@@ -687,6 +719,33 @@ async function persistMessageMemoryRef(client, item, exists) {
 async function deleteMessageMemoryRef(client, item) {
   return client.query('DELETE FROM message_memory_refs WHERE ref_id = $1 AND account_id = $2', [item.ref_id, item.account_id]);
 }
+async function persistFollowupGrant(client, item, exists) {
+  if (exists) return client.query(`UPDATE followup_grants SET event_version = $2, allowed_from = $3::timestamptz, expires_at = $4::timestamptz,
+    version = $5, state = $6, revoked_at = $7::timestamptz, updated_at = CURRENT_TIMESTAMP
+    WHERE grant_id = $1 AND account_id = $8`,
+  [item.grant_id, item.event_version, item.allowed_from, item.expires_at, item.version, item.state, item.revoked_at || null, item.account_id]);
+  return client.query(`INSERT INTO followup_grants (grant_id, account_id, character_id, event_id, event_version, followup_kind, channel,
+    allowed_from, expires_at, version, state, consented_at, revoked_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10, $11, $12::timestamptz, $13::timestamptz)`,
+  [item.grant_id, item.account_id, item.character_id, item.event_id, item.event_version, item.followup_kind, item.channel || 'IN_APP', item.allowed_from, item.expires_at, item.version, item.state, item.consented_at, item.revoked_at || null]);
+}
+async function persistFollowupJob(client, item, exists) {
+  if (exists) return client.query(`UPDATE followup_jobs SET state = $2, lease_owner = $3, lease_expires_at = $4::timestamptz,
+    attempts = $5, next_attempt_at = $6::timestamptz, last_error = $7, published_at = $8::timestamptz
+    WHERE job_id = $1 AND account_id = $9 AND state IN ('PENDING', 'LEASED', 'READY')`,
+  [item.job_id, item.state, item.lease_owner || null, item.lease_expires_at, item.attempts, item.next_attempt_at, item.last_error || null, item.published_at || null, item.account_id]);
+  // ON CONFLICT (唯一键)：跨请求/重启重放同 (event,version,kind,due_at) 幂等。
+  return client.query(`INSERT INTO followup_jobs (job_id, account_id, character_id, event_id, event_version, grant_id, followup_kind,
+    due_at, expires_at, local_date, state, lease_owner, lease_expires_at, attempts, next_attempt_at, last_error, published_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::date, $11, $12, $13::timestamptz, $14, $15::timestamptz, $16, $17::timestamptz)
+    ON CONFLICT (event_id, event_version, followup_kind, due_at) DO NOTHING`,
+  [item.job_id, item.account_id, item.character_id, item.event_id, item.event_version, item.grant_id, item.followup_kind, item.due_at, item.expires_at, item.local_date, item.state, item.lease_owner || null, item.lease_expires_at, item.attempts, item.next_attempt_at, item.last_error || null, item.published_at || null]);
+}
+async function persistProactiveDailySlot(client, item) {
+  return client.query(`INSERT INTO proactive_daily_slots (account_id, local_date, claimed_by)
+    VALUES ($1, $2::date, $3) ON CONFLICT (account_id, local_date) DO NOTHING`,
+  [item.account_id, item.local_date, item.claimed_by]);
+}
 async function persistOperationMetric(client, item, exists) {
   if (exists) throw new Error('Operation metrics are append-only');
   return client.query(`INSERT INTO operation_metrics (metric_id, account_id, capability, provider, model_version, input_tokens, output_tokens, latency_ms, outcome, created_at)
@@ -695,7 +754,7 @@ async function persistOperationMetric(client, item, exists) {
 }
 async function syncIdempotency(client, store, previous) { for (const [storageKey, item] of store.idempotency) { if (previous.has(storageKey)) continue; const segments = storageKey.split(':'); const method = segments[1]; const requestPath = segments[2]; const key = segments.slice(3).join(':'); await client.query(`INSERT INTO idempotency_keys (account_id, request_method, request_path, idempotency_key, request_hash, response_status, response_body) VALUES ($1, $2, $3, $4, decode($5, 'hex'), $6, $7::jsonb)`, [store.accountId, method, requestPath, key, item.bodyHash, item.result.status, JSON.stringify(item.result.body)]); } }
 
-function snapshot(store) { return Object.freeze({ accounts: cloneMap(store.accounts), characters: cloneMap(store.characters), worldStates: cloneMap(store.worldStates), worldStateEvents: cloneMap(store.worldStateEvents), userPreferences: cloneMap(store.userPreferences), conversations: cloneMap(store.conversations), messages: cloneMap(store.messages), conversationSummaries: cloneMap(store.conversationSummaries), conversationSummaryJobs: cloneMap(store.conversationSummaryJobs), outboxEvents: cloneMap(store.outboxEvents), candidates: cloneMap(store.candidates), assets: cloneMap(store.assets), mediaJobs: cloneMap(store.mediaJobs), mediaAssets: cloneMap(store.mediaAssets), callSessions: cloneMap(store.callSessions), callTurns: cloneMap(store.callTurns), entitlementLedgers: cloneMap(store.entitlementLedgers), subscriptions: cloneMap(store.subscriptions), subscriptionOrders: cloneMap(store.subscriptionOrders), paymentEvents: cloneMap(store.paymentEvents), paymentEventQuarantines: cloneMap(store.paymentEventQuarantines), deletionJobs: cloneMap(store.deletionJobs), deletionTargets: cloneMap(store.deletionTargets), complaints: cloneMap(store.complaints), proactiveEvents: cloneMap(store.proactiveEvents), proactiveMessages: cloneMap(store.proactiveMessages), dailyChatUsage: cloneMap(store.dailyChatUsage), operationMetrics: cloneMap(store.operationMetrics), messageFeedback: cloneMap(store.messageFeedback), trialFeedback: cloneMap(store.trialFeedback), notifications: cloneMap(store.notifications), ocImports: cloneMap(store.ocImports), contentRightsReviews: cloneMap(store.contentRightsReviews), contentRightsAppeals: cloneMap(store.contentRightsAppeals), contentRightsDecisions: cloneMap(store.contentRightsDecisions), ageReviewDecisions: cloneMap(store.ageReviewDecisions), assetEmbeddingJobs: cloneMap(store.assetEmbeddingJobs), assetEmbeddings: cloneMap(store.assetEmbeddings), assetEmbeddingDeadLetters: cloneMap(store.assetEmbeddingDeadLetters), lifeEvents: cloneMap(store.lifeEvents), lifeEventExtractionJobs: cloneMap(store.lifeEventExtractionJobs), messageMemoryRefs: cloneMap(store.messageMemoryRefs), idempotency: cloneMap(store.idempotency) }); }
+function snapshot(store) { return Object.freeze({ accounts: cloneMap(store.accounts), characters: cloneMap(store.characters), worldStates: cloneMap(store.worldStates), worldStateEvents: cloneMap(store.worldStateEvents), userPreferences: cloneMap(store.userPreferences), conversations: cloneMap(store.conversations), messages: cloneMap(store.messages), conversationSummaries: cloneMap(store.conversationSummaries), conversationSummaryJobs: cloneMap(store.conversationSummaryJobs), outboxEvents: cloneMap(store.outboxEvents), candidates: cloneMap(store.candidates), assets: cloneMap(store.assets), mediaJobs: cloneMap(store.mediaJobs), mediaAssets: cloneMap(store.mediaAssets), callSessions: cloneMap(store.callSessions), callTurns: cloneMap(store.callTurns), entitlementLedgers: cloneMap(store.entitlementLedgers), subscriptions: cloneMap(store.subscriptions), subscriptionOrders: cloneMap(store.subscriptionOrders), paymentEvents: cloneMap(store.paymentEvents), paymentEventQuarantines: cloneMap(store.paymentEventQuarantines), deletionJobs: cloneMap(store.deletionJobs), deletionTargets: cloneMap(store.deletionTargets), complaints: cloneMap(store.complaints), proactiveEvents: cloneMap(store.proactiveEvents), proactiveMessages: cloneMap(store.proactiveMessages), dailyChatUsage: cloneMap(store.dailyChatUsage), operationMetrics: cloneMap(store.operationMetrics), messageFeedback: cloneMap(store.messageFeedback), trialFeedback: cloneMap(store.trialFeedback), notifications: cloneMap(store.notifications), ocImports: cloneMap(store.ocImports), contentRightsReviews: cloneMap(store.contentRightsReviews), contentRightsAppeals: cloneMap(store.contentRightsAppeals), contentRightsDecisions: cloneMap(store.contentRightsDecisions), ageReviewDecisions: cloneMap(store.ageReviewDecisions), assetEmbeddingJobs: cloneMap(store.assetEmbeddingJobs), assetEmbeddings: cloneMap(store.assetEmbeddings), assetEmbeddingDeadLetters: cloneMap(store.assetEmbeddingDeadLetters), lifeEvents: cloneMap(store.lifeEvents), lifeEventExtractionJobs: cloneMap(store.lifeEventExtractionJobs), messageMemoryRefs: cloneMap(store.messageMemoryRefs), followupGrants: cloneMap(store.followupGrants), followupJobs: cloneMap(store.followupJobs), proactiveDailySlots: cloneMap(store.proactiveDailySlots), idempotency: cloneMap(store.idempotency) }); }
 function cloneMap(map) { return new Map([...map].map(([key, value]) => [key, JSON.parse(JSON.stringify(value))])); }
 function changed(previous, current) { return JSON.stringify(previous) !== JSON.stringify(current); }
 function noticeIdFor(accountId) { return accountId === DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice ? '00000000-0000-7000-8000-0000000000a3' : '00000000-0000-7000-8000-0000000000b3'; }

@@ -18,9 +18,10 @@
 // 用法：DATABASE_URL=... node scripts/run-workers.js [--once] [--interval-ms 5000]
 
 const { createPersistenceFromEnvironment } = require('../src/persistence/composition');
-const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenLifeEventExtractor } = require('../src/providers/qwen-adapter');
+const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenFollowupComposer, createQwenLifeEventExtractor } = require('../src/providers/qwen-adapter');
 const { runNextConversationSummaryJob } = require('../src/domain/conversation-summary-worker');
 const { runNextLifeEventExtractionJob } = require('../src/domain/life-event-extraction-worker');
+const { PostgresFollowupRepository } = require('../src/persistence/postgres-followup-repository');
 const { deterministicEmbedding, DEVELOPMENT_EMBEDDING_MODEL_VERSION } = require('../src/domain/asset-embedding-worker');
 const { advanceImageJob } = require('../src/domain/image-job-advance');
 const { runRetentionSweep } = require('../src/domain/retention-worker');
@@ -73,6 +74,10 @@ async function main() {
   const embeddingProvider = createQwenEmbeddingProvider(process.env) || null;
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
   const embeddingRepository = new PostgresAssetEmbeddingRepository({ pool });
+  // 跟进调度（六项能力 A2）：BYPASSRLS 专用角色跨账户领取，无需账户发现；
+  // composer 未配置时模板回退（投递决策仍在域层 evaluateFollowupPublish）。
+  const followupComposer = createQwenFollowupComposer(process.env) || null;
+  const followupRepository = new PostgresFollowupRepository({ pool });
   const imageDeps = buildImageDepsFromEnvironment(process.env);
   // 注销清理用的私有媒体存储：优先 COS，未配置时退回本地开发库（与 API
   // 进程 createApp 的默认 LocalPrivateMediaStore 同一根目录）。
@@ -174,6 +179,20 @@ async function main() {
     if (embeddings > 0) console.log(`[worker] 向量 +${embeddings}`);
     worked += embeddings;
 
+    // 跟进调度（六项能力 A2）：到期任务领取→事务外措辞→短事务发布；每日
+    // 一条/静默/竞态防线在 repository 内部（与内存 Worker 同语义）。
+    let followups = 0;
+    for (let round = 0; round < 20; round += 1) {
+      const outcome = await followupRepository.runNext({ composer: followupComposer, workerId: 'run-workers' }).catch((error) => {
+        console.error('[worker] 跟进调度失败：', error.message);
+        return { state: 'FAILED' };
+      });
+      if (outcome.state !== 'PUBLISHED') break;
+      followups += 1;
+    }
+    if (followups > 0) console.log(`[worker] 跟进调度 +${followups}`);
+    worked += followups;
+
     if (imageDeps) {
       const imageAccounts = await discoverAccounts(`
         SELECT DISTINCT account_id FROM media_jobs
@@ -274,7 +293,7 @@ async function main() {
     return worked;
   }
 
-  console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；生活事件提取：${lifeEventExtractor ? `qwen（${lifeEventExtractor.promptVersion}）` : '未配置——跳过提取队列'}；资产向量：${embeddingProvider ? `qwen ${embeddingProvider.modelVersion}（${embeddingProvider.dimensions} 维）` : '确定性开发嵌入'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}）。`);
+  console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；生活事件提取：${lifeEventExtractor ? `qwen（${lifeEventExtractor.promptVersion}）` : '未配置——跳过提取队列'}；资产向量：${embeddingProvider ? `qwen ${embeddingProvider.modelVersion}（${embeddingProvider.dimensions} 维）` : '确定性开发嵌入'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}；跟进调度：${followupComposer ? `qwen（${followupComposer.promptVersion}）` : '模板回退（未配置模型）'}）。`);
   let running = true;
   process.on('SIGINT', () => { running = false; });
 
