@@ -171,3 +171,25 @@ body.qy-keyboard-open .app { min-height: var(--qy-app-height, calc(100dvh - 28px
 .proactive-flag {
   margin: 0 0 4px; padding: 1px 8px; border: 1px solid currentColor; border-radius: 999px;
 }
+
+/* ---- 六项能力 A3：聊天内卡片 + 计划页（复用既有 bubble/card/btn 体系） ---- */
+.companion-card {
+  margin-top: 8px; border: 1px solid var(--line, rgba(0,0,0,.1)); border-radius: 14px; padding: 10px 12px;
+}
+.companion-card-loading { color: var(--muted, #8a8a8a); font-size: 13px; }
+.companion-card-body header { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.companion-card-body header b { font-size: 15px; }
+.companion-card-body header small { color: var(--muted, #8a8a8a); }
+.plan-step-list { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.plan-step-row { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+.plan-step-row small { color: var(--muted, #8a8a8a); margin-left: auto; white-space: nowrap; }
+.step-state { flex: none; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.step-state.DONE { opacity: .55; text-decoration: none; }
+.step-state.SKIPPED { opacity: .45; }
+.step-toggle { background: none; border: 1px solid var(--line, rgba(0,0,0,.15)); border-radius: 8px; padding: 2px 6px; cursor: pointer; min-height: 44px; min-width: 44px; }
+.card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.card-fictional-tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px dashed currentColor; display: inline-block; }
+.companion-card-fallback { display: flex; align-items: center; gap: 8px; color: var(--muted, #8a8a8a); font-size: 13px; }
+.companion-card-sheet-body { padding: 4px 0 12px; }
+.plan-card header { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.plan-reminder-optin { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }

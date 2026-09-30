@@ -2,6 +2,7 @@ import { clearEncryptedSession, loadEncryptedSession, saveEncryptedSession } fro
 import { MAX_RECORDING_MS, MIN_HOLD_MS, createPcmWavRecorder, recordingBlobToWav, selectRecordingMimeType, shouldCancelHold } from './media-input.js';
 import { CallSessionClient } from './call-client.js';
 import { lifeEventCandidateSheet, collectLifeEventCandidateFields, memoryReferenceSheet, lifeEventTimelineCard, lifeEventReviseForm, fromLocalInputValue } from './memory-panel.js';
+import { companionCardShell, companionCardBody, companionCardFallback, eventCardSheet, planPageCard } from './companion-cards.js';
 
 const API_BASE = "/api/v1";
 const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
@@ -43,6 +44,11 @@ const state = {
   eventDraft: null,
   // 六项能力 A2：改期联动撤销提醒后的「为新时间重新开启」待确认状态。
   pendingFollowupRegrant: null,
+  // 六项能力 A3：计划页数据、卡片缓存（artifact_id → 卡片数据或 {failed}）、
+  // 时间线「查看卡片」bottom-sheet。
+  plans: [],
+  cardCache: new Map(),
+  cardSheet: null,
   eventDeletionReceipt: null,
   asrFile: null,
   asrJob: null,
@@ -1434,6 +1440,36 @@ async function openProactive() {
   } finally { setBusy(false); }
 }
 
+// 六项能力 A3 计划页：草案可编辑可接受（接受≠自动开提醒）；进行中可暂停/
+// 恢复/完成/取消。404 = COMPANION_PLANS 未开启，如实提示不伪装空列表。
+async function openPlans() {
+  setBusy(true);
+  try {
+    const payload = await api("/companion-plans");
+    state.plans = unwrap(payload, "plans", "plans") ?? [];
+    state.route = "plans";
+  } catch (error) {
+    if (error?.status === 404) setToast("计划能力未开启（开发开关 COMPANION_PLANS）。");
+    else setToast(serverMessage(error));
+  } finally { setBusy(false); }
+}
+
+async function refreshPlans() {
+  try {
+    const payload = await api("/companion-plans");
+    state.plans = unwrap(payload, "plans", "plans") ?? [];
+  } catch { /* 计划页之外不主动报错 */ }
+}
+
+function renderPlans() {
+  const plans = state.plans ?? [];
+  const intro = '<section class="card"><b>共同小计划</b><p class="muted">角色提议只是草案——你可以改、可以不接受、可以只让 TA 陪着。接受计划不会自动开提醒；暂停随时可用，不要求完成率。</p></section>';
+  const list = plans.length > 0
+    ? plans.map((plan) => planPageCard(plan, { busy: state.busy })).join("")
+    : '<section class="card"><p class="muted">还没有计划。在时间线的事件卡上点「一起准备」，或在聊天里让 TA 提议一份。</p></section>';
+  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button></div>${intro}${list}${prototypeNav("plans")}`);
+}
+
 async function saveProactivePreferences(form) {
   setBusy(true);
   try {
@@ -1863,6 +1899,12 @@ function messageMarkup(message, latestAssistantId = null) {
   // 也没有 AI 生成标识（ai_generated=false）。
   if (message.provider === "call-record") {
     return `<article class="message call-record"><div class="call-record-card">${prototypeIcon("phone", 15)}<span>${escapeHtml(message.content ?? message.text ?? "")}</span></div></article>`;
+  }
+  // 计划卡片消息（六项能力 A3）：消息本体是受控摘要，卡片内容经
+  // GET /artifacts/{id} 惰性水合——定点替换 [data-artifact-id] 节点，绝不
+  // 整树重渲染（保输入法组合态与滚动位置）。
+  if (message.provider === "companion-card") {
+    return companionCardShell(message);
   }
   const actor = message.actor ?? message.role ?? "assistant";
   const isUser = actor === "user" || actor === "USER";
@@ -2312,6 +2354,146 @@ async function regrantFollowup() {
   } finally { setBusy(false); render(); }
 }
 
+// ---- 六项能力 A3：计划与卡片操作 ----
+
+// 接受草案：确认≠开提醒——只有勾选了「到期提醒我」才附带 followup 子对象
+//（与单独开提醒同一套服务端校验）。
+async function planAccept(button) {
+  const planId = button.dataset.planId;
+  const expectedVersion = Number(button.dataset.expectedVersion);
+  if (!planId || !Number.isFinite(expectedVersion)) return;
+  const checkbox = button.closest(".plan-card")?.querySelector(".plan-followup-checkbox");
+  const body = { expected_version: expectedVersion };
+  if (checkbox?.checked) body.followup = { followup_kind: "BEFORE_EVENT" };
+  setBusy(true);
+  try {
+    const payload = await api(`/companion-plans/${encodeURIComponent(planId)}/accept`, { method: "POST", idempotent: uuid(), body });
+    setToast(payload?.linked_grant ? "计划已开始；到期提醒也开好了（每天最多一条，可随时关）。" : "计划已开始；没有开启提醒——想开的话在事件卡上点「提醒我」。");
+    await refreshPlans();
+  } catch (error) {
+    setToast(planConflictMessage(error, "接受"));
+  } finally { setBusy(false); render(); }
+}
+
+// 暂停/恢复/完成/取消（都是计划本身的操作；暂停会停掉随计划开的那条提醒）。
+async function planAction(button) {
+  const planId = button.dataset.planId;
+  const actionName = button.dataset.planAction;
+  const expectedVersion = Number(button.dataset.expectedVersion);
+  if (!planId || !actionName || !Number.isFinite(expectedVersion)) return;
+  setBusy(true);
+  try {
+    const payload = await api(`/companion-plans/${encodeURIComponent(planId)}/${actionName}`, {
+      method: "POST", idempotent: uuid(),
+      body: actionName === "complete" ? { expected_version: expectedVersion, confirm: true } : { expected_version: expectedVersion }
+    });
+    setToast(payload?.note ?? PLAN_ACTION_TOASTS[actionName] ?? "已更新。");
+    await refreshPlans();
+    await refreshMemoryAndAssets();
+  } catch (error) {
+    setToast(planConflictMessage(error, PLAN_ACTION_VERBS[actionName] ?? "操作"));
+  } finally { setBusy(false); render(); }
+}
+
+const PLAN_ACTION_TOASTS = { pause: "计划已暂停；随计划开的提醒也停了（不补发）。", resume: "计划已恢复。", cancel: "计划已取消，不勉强。", complete: "标记完成——这一步走得很好。" };
+const PLAN_ACTION_VERBS = { pause: "暂停", resume: "恢复", cancel: "取消", complete: "完成" };
+
+function planConflictMessage(error, verb) {
+  if (error?.status === 409) return `计划刚被修改或状态不允许${verb}；已刷新，请再看一眼。`;
+  if (error?.status === 404) return "计划能力未开启（开发开关 COMPANION_PLANS）。";
+  return serverMessage(error);
+}
+
+// 步骤勾选：TODO↔DONE 走 PATCH（计划聚合乐观锁；服务端 bump 版本）。
+async function togglePlanStep(button) {
+  const planId = button.dataset.planId;
+  const stepId = button.dataset.stepId;
+  const nextState = button.dataset.stepState === "TODO" ? "DONE" : "TODO";
+  const expectedVersion = Number(button.dataset.expectedVersion);
+  if (!planId || !stepId || !Number.isFinite(expectedVersion)) return;
+  setBusy(true);
+  try {
+    await api(`/companion-plans/${encodeURIComponent(planId)}/steps/${encodeURIComponent(stepId)}`, {
+      method: "PATCH", idempotent: uuid(), body: { expected_version: expectedVersion, state: nextState }
+    });
+    await refreshPlans();
+  } catch (error) {
+    setToast(planConflictMessage(error, "更新步骤"));
+  } finally { setBusy(false); render(); }
+}
+
+// 让角色提议一份草案（时间线事件卡入口 / 过期草案重提）。
+async function createPlanForEvent(eventId) {
+  setBusy(true);
+  try {
+    const payload = await api("/companion-plans", {
+      method: "POST", idempotent: uuid(),
+      body: { template_version: "INTERVIEW_PREP_V1", support_mode: "PRACTICE_TOGETHER", ...(eventId ? { event_id: eventId } : {}) }
+    });
+    const plan = payload?.plan;
+    state.cardCache.delete(payload?.card?.artifact_id);
+    setToast(plan ? `TA 拟了一份草案：「${plan.title}」——可编辑，接受才开始。` : "草案已生成，到「计划」里看看。");
+    await refreshPlans();
+    await refreshMemoryAndAssets();
+  } catch (error) {
+    if (error?.status === 409) setToast("这件事已有一个进行中或暂停中的计划；先处理它，再重新开始。");
+    else if (error?.status === 404) setToast("计划能力未开启（开发开关 COMPANION_PLANS）。");
+    else setToast(serverMessage(error));
+  } finally { setBusy(false); render(); }
+}
+
+// 卡片上的动作按钮：动作 ID 来自服务端白名单；这里只映射到既有入口。
+// 卡片不带 expected_version——先拉当前计划，以服务端最新版本执行。
+async function runCardAction(button) {
+  const action = button.dataset.cardAction;
+  const planId = button.dataset.planId;
+  if (action === "OPEN_PLAN") { await openPlans(); return; }
+  if (action === "OPEN_EVENT") { state.route = "assets"; await refreshMemoryAndAssets(); render(); return; }
+  const mapped = { ACCEPT_PLAN: "accept", PAUSE_PLAN: "pause", RESUME_PLAN: "resume", CANCEL_PLAN: "cancel", COMPLETE_PLAN: "complete" }[action];
+  if (mapped && planId) {
+    try {
+      const payload = await api(`/companion-plans/${encodeURIComponent(planId)}`);
+      const plan = unwrap(payload, "plan", "plan");
+      if (!plan) { setToast("计划不存在或已被处理。"); return; }
+      if (mapped === "accept") await planAccept({ dataset: { planId, expectedVersion: String(plan.version) }, closest: () => null });
+      else await planAction({ dataset: { planId, planAction: mapped, expectedVersion: String(plan.version) } });
+    } catch (error) { setToast(planConflictMessage(error, "操作")); }
+    return;
+  }
+  setToast("这个动作当前不可用。");
+}
+
+// 时间线「查看卡片」：拉卡片数据开 bottom-sheet（EVENT_V1/READING_LOG_V1）。
+async function openEventCard(artifactId) {
+  if (!artifactId) return;
+  setBusy(true);
+  try {
+    const payload = await api(`/artifacts/${encodeURIComponent(artifactId)}`);
+    state.cardSheet = unwrap(payload, "card", "card") ?? null;
+    if (!state.cardSheet) setToast("卡片内容暂不可用。");
+  } catch (error) {
+    setToast(error?.status === 404 ? "卡片已随事件下线。" : serverMessage(error));
+  } finally { setBusy(false); render(); }
+}
+
+// 卡片导出：format=markdown 文本下载（Blob + a.download，不进缓存）。
+async function exportCard(artifactId) {
+  try {
+    const response = await fetch(`${API_BASE}/artifacts/${encodeURIComponent(artifactId)}?format=markdown`, { headers: { authorization: `Bearer ${bearerToken()}` } });
+    if (!response.ok) throw Object.assign(new Error("导出失败"), { status: response.status });
+    const markdown = await response.text();
+    const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${artifactId}.md`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setToast("卡片已导出为 Markdown；文件生成≠已加入你的日历或其他系统。");
+  } catch (error) {
+    setToast(error?.status === 404 ? "卡片已下线，无法导出。" : serverMessage(error));
+  }
+}
+
 async function undoCandidateRejection() {  const rejected = state.lastRejectedCandidate;
   if (!rejected) return;
   setBusy(true);
@@ -2366,6 +2548,7 @@ const PROTOTYPE_ICON_PATHS = Object.freeze({
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/>', chev: '<path d="M9 18l6-6-6-6"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
   phone: '<path d="M6.6 3h3l1.5 4.5-2 1.5a12 12 0 006 6l1.5-2L21 14.5v3A2.5 2.5 0 0118.2 20 15.5 15.5 0 014 5.8 2.5 2.5 0 016.6 3z"/>',
   bell: '<path d="M18 16H6c1.5-1.4 2.2-3.2 2.2-6a3.8 3.8 0 017.6 0c0 2.8.7 4.6 2.2 6z"/><path d="M10.3 19a1.8 1.8 0 003.4 0"/>',
+  planList: '<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2"/><path d="M9 10h.01M12 10h.01M15 10h.01M9 14h.01M12 14h.01M15 14h.01M9 18h4"/>',
   lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>', download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>', trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/>'
 });
 
@@ -2380,7 +2563,7 @@ function prototypeShell(content, step) {
 function prototypeNav(active) {
   const items = [
     ["chat", "chat", "对话", "back-chat"], ["timeline", "clock", "时间线", "open-assets"],
-    ["proactive", "bell", "主动", "open-proactive"],
+    ["proactive", "bell", "主动", "open-proactive"], ["plans", "planList", "计划", "open-plans"],
     ["relation", "heart", "关系", "open-character-profile"], ["profile", "user", "我的", "open-data"]
   ];
   return `<nav class="bottom-nav" aria-label="主导航">${items.map(([id, icon, label, action]) => `<button type="button" class="nav-item ${active === id ? "on" : ""}" data-action="${action}">${prototypeIcon(icon, 20)}<span>${label}</span></button>`).join("")}</nav>`;
@@ -2453,6 +2636,7 @@ function render() {
     : state.route === "safety" ? renderSafety()
     : state.route === "notifications" ? renderNotifications()
     : state.route === "proactive" ? renderProactive()
+    : state.route === "plans" ? renderPlans()
     : state.route === "call" ? renderCall()
     : renderChat();
   const undoMemory = state.lastRejectedCandidate ? `<div class="toast" role="status">已选择“不记住” <button class="btn btn-line" data-action="undo-memory-reject">撤销</button></div>` : "";
@@ -2461,7 +2645,9 @@ function render() {
     ? `<div class="sheet-layer">${memoryReferenceSheet(state.memoryRefsPanel)}</div>`
     : state.revisingEvent
       ? `<div class="sheet-layer">${lifeEventReviseForm(state.revisingEvent, state.eventDraft ?? {})}</div>`
-      : "";
+      : state.cardSheet
+        ? `<div class="sheet-layer">${eventCardSheet(state.cardSheet)}</div>`
+        : "";
   // 对话滚动记忆：整树重渲染会把 .chat-scroll 重置回顶部（此前发消息/播语音
   // 时页面“跳回第一次对话”的根因）。渲染前记录位置与消息数，渲染后——
   // 新消息或原本贴底 → 跟到最新消息；用户正回看历史 → 保持原阅读位置。
@@ -2501,6 +2687,42 @@ function render() {
     const submitted = [...app.querySelectorAll(".card")].find((card) => card.textContent.includes("最近提交"));
     if (submitted) submitted.insertAdjacentHTML("beforeend", ` <button class="btn btn-line" data-action="refresh-last-complaint" ${state.busy ? "disabled" : ""}>查询处理状态</button>`);
   }
+  // A3 卡片惰性水合：渲染后扫描未水合的卡片壳，逐个拉取并定点替换节点
+  // innerHTML——不触发 render()（组合输入/焦点/滚动不受打扰）。
+  hydrateCompanionCards();
+}
+
+// 拉取卡片数据并定点替换 [data-artifact-id] 节点内容；失败节点显示受控
+// 摘要+重试入口（§4.5 兜底），不整树重渲染。
+function hydrateCompanionCards() {
+  const nodes = [...app.querySelectorAll('.companion-card[data-artifact-id]:not([data-hydrated])')];
+  for (const node of nodes) {
+    const artifactId = node.dataset.artifactId;
+    if (!artifactId) continue;
+    node.dataset.hydrated = "pending";
+    hydrateOneCard(artifactId, node);
+  }
+}
+
+async function hydrateOneCard(artifactId, node) {
+  const target = node ?? app.querySelector(`.companion-card[data-artifact-id="${CSS.escape(artifactId)}"]`);
+  if (!target) return;
+  let card = state.cardCache.get(artifactId);
+  if (card === undefined) {
+    try {
+      const payload = await api(`/artifacts/${encodeURIComponent(artifactId)}`);
+      card = unwrap(payload, "card", "card") ?? null;
+      state.cardCache.set(artifactId, card);
+    } catch {
+      state.cardCache.set(artifactId, { failed: true });
+      card = { failed: true };
+    }
+  }
+  // 缓存命中后节点可能已被重渲染替换——重查当前节点再替换。
+  const current = app.querySelector(`.companion-card[data-artifact-id="${CSS.escape(artifactId)}"]`);
+  const destination = current ?? target;
+  destination.dataset.hydrated = card?.failed ? "failed" : "done";
+  destination.innerHTML = card?.failed ? companionCardFallback(artifactId) : companionCardBody(card);
 }
 
 document.addEventListener("change", (event) => {
@@ -2633,6 +2855,18 @@ document.addEventListener("click", (event) => {
   if (action === "toggle-event-followup") toggleEventFollowup(button);
   if (action === "regrant-followup") regrantFollowup();
   if (action === "dismiss-regrant") { state.pendingFollowupRegrant = null; render(); }
+  // 六项能力 A3：计划页/卡片动作/时间线事件卡入口。
+  if (action === "open-plans") openPlans();
+  if (action === "plan-accept") planAccept(button);
+  if (action === "plan-action") planAction(button);
+  if (action === "toggle-plan-step") togglePlanStep(button);
+  if (action === "plan-create-draft") createPlanForEvent(button.dataset.eventId || null);
+  if (action === "create-plan-for-event") createPlanForEvent(button.dataset.eventId || null);
+  if (action === "card-action") runCardAction(button);
+  if (action === "open-event-card") openEventCard(button.dataset.artifactId);
+  if (action === "close-card-sheet") { state.cardSheet = null; render(); }
+  if (action === "export-card") exportCard(button.dataset.artifactId);
+  if (action === "reload-card") { state.cardCache.delete(button.dataset.artifactId); render(); }
   if (action === "remove-emergency-contact") removeEmergencyContact();
   if (action === "delete-account") deleteAccount();
   if (action === "dismiss-reminder") { state.continuousReminder = null; render(); }

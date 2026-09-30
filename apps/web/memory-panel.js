@@ -65,16 +65,25 @@ function memoryReferenceSheet(payload) {
 // 六项能力 A2：followup 概要（{enabled, followup_kind, due_at, job_state}）存在
 // 时渲染「提醒我」开关——确认事件 ≠ 允许提醒，开启/关闭都要单独一次点击
 //（PUT/DELETE followup 带 expected_version，409 时前端提示刷新重试）。
+// 六项能力 A3：事件未绑定计划时可「一起准备」（POST 草案；接受才开始）；
+// 有卡片身份行时「查看卡片」（GET /artifacts 现场渲染的 bottom-sheet）。
 function lifeEventTimelineCard(event, { busy = false } = {}) {
   const when = event.scheduled_at ? formatWhen(event) : "时间待补充";
   const followup = event.followup ?? null;
   const followupMeta = followup?.enabled
     ? ` · 提醒已开${followup.due_at ? " " + escapeHtml(new Date(followup.due_at).toLocaleString()) : ""}`
     : "";
+  const planMeta = event.plan ? ` · 计划${event.plan.state === "ACTIVE" ? "进行中" : event.plan.state === "PAUSED" ? "已暂停" : "草案中"}` : "";
   const followupToggle = followup
     ? `<button class="btn ${followup.enabled ? "btn-danger" : "btn-line"}" data-action="toggle-event-followup" data-event-id="${escapeHtml(event.event_id)}" data-followup-on="${followup.enabled ? "true" : "false"}" data-expected-version="${escapeHtml(event.version ?? "")}" data-event-status="${escapeHtml(event.status ?? "")}" ${busy ? "disabled" : ""}>${followup.enabled ? "关闭提醒" : "提醒我"}</button>`
     : "";
-  return `<article class="asset timeline-entry" data-entry-type="LIFE_EVENT"><div><b>${escapeHtml(event.display_text ?? event.title)}</b><small>${DOMAIN_LABELS[event.domain] ?? event.domain} · ${STATUS_LABELS[event.status] ?? event.status} · ${escapeHtml(when)} · 版本 ${escapeHtml(event.version ?? "?")}${followupMeta}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>删除</button>${followupToggle}</div></article>`;
+  const planButton = !event.plan && event.status !== "CANCELLED"
+    ? `<button class="btn btn-line" data-action="create-plan-for-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>一起准备</button>`
+    : "";
+  const cardButton = event.artifact_id
+    ? `<button class="btn btn-line" data-action="open-event-card" data-artifact-id="${escapeHtml(event.artifact_id)}" ${busy ? "disabled" : ""}>查看卡片</button>`
+    : "";
+  return `<article class="asset timeline-entry" data-entry-type="LIFE_EVENT"><div><b>${escapeHtml(event.display_text ?? event.title)}</b><small>${DOMAIN_LABELS[event.domain] ?? event.domain} · ${STATUS_LABELS[event.status] ?? event.status} · ${escapeHtml(when)} · 版本 ${escapeHtml(event.version ?? "?")}${followupMeta}${planMeta}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>修订</button>${cardButton}${planButton}${followupToggle}<button class="btn btn-danger" data-action="delete-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>删除</button></div></article>`;
 }
 
 // 事件修订表单（409 冲突时保留草稿重试）。
