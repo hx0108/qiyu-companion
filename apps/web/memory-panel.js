@@ -62,9 +62,19 @@ function memoryReferenceSheet(payload) {
 }
 
 // 时间线事件卡（filter=event）：修订/删除走事件路由（带版本与回执）。
+// 六项能力 A2：followup 概要（{enabled, followup_kind, due_at, job_state}）存在
+// 时渲染「提醒我」开关——确认事件 ≠ 允许提醒，开启/关闭都要单独一次点击
+//（PUT/DELETE followup 带 expected_version，409 时前端提示刷新重试）。
 function lifeEventTimelineCard(event, { busy = false } = {}) {
   const when = event.scheduled_at ? formatWhen(event) : "时间待补充";
-  return `<article class="asset timeline-entry" data-entry-type="LIFE_EVENT"><div><b>${escapeHtml(event.display_text ?? event.title)}</b><small>${DOMAIN_LABELS[event.domain] ?? event.domain} · ${STATUS_LABELS[event.status] ?? event.status} · ${escapeHtml(when)} · 版本 ${escapeHtml(event.version ?? "?")}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>删除</button></div></article>`;
+  const followup = event.followup ?? null;
+  const followupMeta = followup?.enabled
+    ? ` · 提醒已开${followup.due_at ? " " + escapeHtml(new Date(followup.due_at).toLocaleString()) : ""}`
+    : "";
+  const followupToggle = followup
+    ? `<button class="btn ${followup.enabled ? "btn-danger" : "btn-line"}" data-action="toggle-event-followup" data-event-id="${escapeHtml(event.event_id)}" data-followup-on="${followup.enabled ? "true" : "false"}" data-expected-version="${escapeHtml(event.version ?? "")}" data-event-status="${escapeHtml(event.status ?? "")}" ${busy ? "disabled" : ""}>${followup.enabled ? "关闭提醒" : "提醒我"}</button>`
+    : "";
+  return `<article class="asset timeline-entry" data-entry-type="LIFE_EVENT"><div><b>${escapeHtml(event.display_text ?? event.title)}</b><small>${DOMAIN_LABELS[event.domain] ?? event.domain} · ${STATUS_LABELS[event.status] ?? event.status} · ${escapeHtml(when)} · 版本 ${escapeHtml(event.version ?? "?")}${followupMeta}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-event" data-event-id="${escapeHtml(event.event_id)}" ${busy ? "disabled" : ""}>删除</button>${followupToggle}</div></article>`;
 }
 
 // 事件修订表单（409 冲突时保留草稿重试）。

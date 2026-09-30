@@ -41,6 +41,8 @@ const state = {
   memoryRefsPanel: null,
   revisingEvent: null,
   eventDraft: null,
+  // 六项能力 A2：改期联动撤销提醒后的「为新时间重新开启」待确认状态。
+  pendingFollowupRegrant: null,
   eventDeletionReceipt: null,
   asrFile: null,
   asrJob: null,
@@ -1502,7 +1504,7 @@ function renderProactive() {
   <form id="proactive-preferences-form" class="stack"><b>偏好</b><label class="check-row"><input name="proactive_enabled" type="checkbox" ${preferences.enabled ? "checked" : ""}><span>允许普通主动消息（早安/晚安、纪念日、约定）</span></label><div class="button-row"><label class="field"><span>静默开始</span><select name="quiet_start">${hourOptions(preferences.quiet_start_hour)}</select></label><label class="field"><span>静默结束</span><select name="quiet_end">${hourOptions(preferences.quiet_end_hour)}</select></label></div><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>保存偏好</button></form>
   <form id="proactive-event-form" class="stack"><b>新建事件</b><label class="field"><span>类型</span><select name="event_type"><option value="SUBSCRIBED_MORNING">早安订阅</option><option value="SUBSCRIBED_EVENING">晚安订阅</option><option value="CONFIRMED_ANNIVERSARY">纪念日</option><option value="CONFIRMED_BIRTHDAY">生日</option><option value="CONFIRMED_APPOINTMENT">约定</option></select></label><label class="field"><span>标题</span><input name="event_title" maxlength="80" required placeholder="例如：在一起一百天"></label><label class="field"><span>日期（纪念日/生日可选）</span><input name="event_due_at" type="date"></label><button class="btn btn-primary" ${state.busy ? "disabled" : ""}>创建事件</button></form>
   <div class="stack"><b>我的事件</b>${eventCards || '<div class="empty-state">暂无主动事件。</div>'}</div>
-  <div class="stack"><b>已发送记录</b>${messageCards || '<div class="empty-state">还没有已发送的主动消息。</div>'}</div>`);
+  <div class="stack"><b>已发送记录</b>${messageCards || '<div class="empty-state">还没有已发送的主动消息。</div>'}<p class="muted">生活事件到期的跟进提醒会直接写进对话消息流（带「主动」角标）；此处只是审计记录与频控统计来源，不是第二个收件箱。</p></div>`);
 }
 
 // ---- 连续使用心跳（SAFE-03）：服务端计算时长，客户端只上报与展示 ----
@@ -1882,7 +1884,10 @@ function messageMarkup(message, latestAssistantId = null) {
   // 来源透明（六项能力 A1）：每条 AI 回复都可查「本轮参考了哪些记忆/事件」；
   // 点击才请求，无引用时服务端 404，如实提示。
   const refsButton = !isUser && id ? `<button type="button" class="memory-refs-trigger" data-action="open-memory-refs" data-message-id="${escapeHtml(id)}" ${state.busy ? "disabled" : ""}>本轮参考</button>` : "";
-  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${bubbleHtml}</div>${refsButton}${praiseButton}${voiceRow}</div></article>`;
+  // 主动跟进消息（六项能力 A2）：服务端 provider='proactive-followup'，角标
+  // 标明这是角色主动发来的；来源入口仍由 memory_refs 事件引用自动出现。
+  const proactiveBadge = message.provider === "proactive-followup" ? '<span class="aigc proactive-flag">主动</span>' : "";
+  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${proactiveBadge}${bubbleHtml}</div>${refsButton}${praiseButton}${voiceRow}</div></article>`;
 }
 
 async function openWorldState() {
@@ -2170,7 +2175,10 @@ function renderAssets() {
   const timelineCards = (state.timeline ?? []).map((entry) => entry.entry_type === "LIFE_EVENT"
     ? lifeEventTimelineCard(entry, { busy: state.busy })
     : `<article class="asset timeline-entry"><div><b>${escapeHtml(entry.display_text ?? entry.type)}</b><small>${escapeHtml(new Date(entry.created_at).toLocaleString())} · ${FILTER_GROUP_LABELS[entry.filter_group] ?? FILTER_GROUP_LABELS[entry.type] ?? "记录"} · 版本 ${escapeHtml(entry.version ?? "?")}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>删除</button></div></article>`).join("");
-  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button></div><h1 id="app-title">关系时间线</h1><p class="lead">只显示仍然有效的确认资产；被修订替代和已删除的版本不会出现在线。</p><div class="button-row">${chips}</div><div class="stack">${deletionMarkup()}${timelineCards || '<div class="empty-state">当前筛选下没有时间线条目。</div>'}</div><div class="flow-actions"><button class="btn btn-line" data-action="download-relationship-profile" ${state.busy ? "disabled" : ""}>下载关系档案 JSON</button><div class="button-row"><button class="btn btn-line" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>原始互动保留 30 天</button><button class="btn btn-line" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>原始互动保留 90 天</button></div><button class="btn btn-line" data-action="refresh-assets" ${state.busy ? "disabled" : ""}>刷新时间线</button></div>`);
+  // 六项能力 A2：改期撤销提醒后的重新确认卡（放最上面，看完即可处理）。
+  const regrant = state.pendingFollowupRegrant;
+  const regrantCard = regrant ? `<section class="card followup-regrant"><b>提醒已随改期关闭</b><p class="muted">事件已改到新时间，原来的跟进提醒已取消（${escapeHtml(regrant.jobs_cancelled)} 条任务）。确认事件 ≠ 允许提醒——按新时间重新开启需要你再确认一次。</p><div class="button-row"><button class="btn btn-primary" data-action="regrant-followup" ${state.busy ? "disabled" : ""}>为新时间重新开启提醒</button><button class="btn btn-line" data-action="dismiss-regrant" ${state.busy ? "disabled" : ""}>不用了</button></div></section>` : "";
+  return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button></div><h1 id="app-title">关系时间线</h1><p class="lead">只显示仍然有效的确认资产；被修订替代和已删除的版本不会出现在线。</p><div class="button-row">${chips}</div><div class="stack">${regrantCard}${deletionMarkup()}${timelineCards || '<div class="empty-state">当前筛选下没有时间线条目。</div>'}</div><div class="flow-actions"><button class="btn btn-line" data-action="download-relationship-profile" ${state.busy ? "disabled" : ""}>下载关系档案 JSON</button><div class="button-row"><button class="btn btn-line" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>原始互动保留 30 天</button><button class="btn btn-line" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>原始互动保留 90 天</button></div><button class="btn btn-line" data-action="refresh-assets" ${state.busy ? "disabled" : ""}>刷新时间线</button></div>`);
 }
 
 function trialFeedbackMarkup() {
@@ -2207,13 +2215,25 @@ async function submitEventRevision(eventId, expectedVersion) {
   const scheduledAt = fromLocalInputValue(local);
   setBusy(true);
   try {
-    await api(`/life-events/${encodeURIComponent(eventId)}`, {
+    const payload = await api(`/life-events/${encodeURIComponent(eventId)}`, {
       method: "PATCH", idempotent: uuid(),
       body: { expected_version: expectedVersion, title, scheduled_at: scheduledAt, timezone: "Asia/Shanghai", status }
     });
     state.revisingEvent = null;
     state.eventDraft = null;
-    setToast("事件已修订；旧版本保留历史。");
+    // 六项能力 A2 联动：改期撤销旧版本的提醒（jobs_cancelled>0）→ 不静默
+    // 重开，给「为新时间重新开启提醒」确认卡（重新许可是用户自己的点击）。
+    const cancelledJobs = payload?.followup_invalidated?.jobs_cancelled ?? 0;
+    if (cancelledJobs > 0) {
+      state.pendingFollowupRegrant = {
+        event_id: payload?.event?.event_id ?? eventId,
+        expected_version: payload?.event?.version ?? null,
+        jobs_cancelled: cancelledJobs
+      };
+      setToast(`事件已修订；原提醒已随旧版本取消（${cancelledJobs} 条任务）。`);
+    } else {
+      setToast("事件已修订；旧版本保留历史。");
+    }
     await refreshMemoryAndAssets();
   } catch (error) {
     if (error?.status === 409) {
@@ -2234,10 +2254,61 @@ async function deleteLifeEventAction(entry) {
     const payload = await api(`/life-events/${encodeURIComponent(entry.event_id)}`, { method: "DELETE", idempotent: uuid() });
     state.eventDeletionReceipt = payload?.deletion_receipt ?? null;
     state.deletionJob = payload?.deletion_job ?? null;
+    state.pendingFollowupRegrant = null;
     setToast(payload?.deletion_receipt ? `已删除。回执：${payload.deletion_receipt.completed_targets ?? 0} 项清理完成。` : "已删除。");
     await refreshMemoryAndAssets();
   } catch (error) {
     setToast(serverMessage(error));
+  } finally { setBusy(false); render(); }
+}
+
+// 六项能力 A2：时间线事件卡「提醒我」开关。开启=PUT followup（followup_kind
+// 按事件状态选：PLANNED 走事前准点提醒，其余走事后关心；due_at 缺省由服务端
+// 按事件时间派生）。关闭=DELETE（已发出的消息不撤回）。409=事件刚被改，提示
+// 刷新后重试，不用旧版本硬写。
+async function toggleEventFollowup(button) {
+  const eventId = button.dataset.eventId;
+  if (!eventId) return;
+  const turningOn = button.dataset.followupOn !== "true";
+  setBusy(true);
+  try {
+    if (turningOn) {
+      const payload = await api(`/life-events/${encodeURIComponent(eventId)}/followup`, {
+        method: "PUT", idempotent: uuid(),
+        body: {
+          expected_version: Number(button.dataset.expectedVersion),
+          followup_kind: button.dataset.eventStatus === "PLANNED" ? "BEFORE_EVENT" : "AFTER_EVENT"
+        }
+      });
+      setToast(payload?.note ?? "跟进提醒已开启；到期时写进对话消息流（每日一条与静默时段仍生效）。");
+    } else {
+      await api(`/life-events/${encodeURIComponent(eventId)}/followup`, { method: "DELETE", idempotent: uuid(), body: {} });
+      setToast("已关闭这条事件的提醒；已发出的消息不会撤回。");
+    }
+    await refreshMemoryAndAssets();
+  } catch (error) {
+    if (error?.status === 409) setToast("事件刚被修改，请刷新时间线后再操作提醒。");
+    else setToast(serverMessage(error));
+  } finally { setBusy(false); render(); }
+}
+
+// 改期确认卡：按新事件时间重新开启提醒（again 一次许可=一次跟进）。
+async function regrantFollowup() {
+  const regrant = state.pendingFollowupRegrant;
+  if (!regrant?.expected_version) { state.pendingFollowupRegrant = null; render(); return; }
+  setBusy(true);
+  try {
+    const payload = await api(`/life-events/${encodeURIComponent(regrant.event_id)}/followup`, {
+      method: "PUT", idempotent: uuid(),
+      body: { expected_version: regrant.expected_version, followup_kind: "BEFORE_EVENT" }
+    });
+    state.pendingFollowupRegrant = null;
+    setToast(payload?.note ?? "已按新时间重新开启提醒。");
+    await refreshMemoryAndAssets();
+  } catch (error) {
+    if (error?.status === 409) setToast("事件又有新版本，请刷新时间线后从事件卡重新开启提醒。");
+    else setToast(serverMessage(error));
+    state.pendingFollowupRegrant = null;
   } finally { setBusy(false); render(); }
 }
 
@@ -2294,6 +2365,7 @@ const PROTOTYPE_ICON_PATHS = Object.freeze({
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>', heart: '<path d="M20.8 5.8a5.5 5.5 0 00-7.8 0L12 6.8l-1-1a5.5 5.5 0 00-7.8 7.8L12 22l8.8-8.4a5.5 5.5 0 000-7.8z"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0116 0"/>', chev: '<path d="M9 18l6-6-6-6"/>', x: '<path d="M6 6l12 12M18 6L6 18"/>',
   phone: '<path d="M6.6 3h3l1.5 4.5-2 1.5a12 12 0 006 6l1.5-2L21 14.5v3A2.5 2.5 0 0118.2 20 15.5 15.5 0 014 5.8 2.5 2.5 0 016.6 3z"/>',
+  bell: '<path d="M18 16H6c1.5-1.4 2.2-3.2 2.2-6a3.8 3.8 0 017.6 0c0 2.8.7 4.6 2.2 6z"/><path d="M10.3 19a1.8 1.8 0 003.4 0"/>',
   lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>', download: '<path d="M12 3v12M7 10l5 5 5-5M4 21h16"/>', trash: '<path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14"/>'
 });
 
@@ -2308,6 +2380,7 @@ function prototypeShell(content, step) {
 function prototypeNav(active) {
   const items = [
     ["chat", "chat", "对话", "back-chat"], ["timeline", "clock", "时间线", "open-assets"],
+    ["proactive", "bell", "主动", "open-proactive"],
     ["relation", "heart", "关系", "open-character-profile"], ["profile", "user", "我的", "open-data"]
   ];
   return `<nav class="bottom-nav" aria-label="主导航">${items.map(([id, icon, label, action]) => `<button type="button" class="nav-item ${active === id ? "on" : ""}" data-action="${action}">${prototypeIcon(icon, 20)}<span>${label}</span></button>`).join("")}</nav>`;
@@ -2557,6 +2630,9 @@ document.addEventListener("click", (event) => {
   if (action === "resume-interaction") resumeInteraction();
   if (action === "delete-proactive") deleteProactiveEvent(button.dataset.eventId);
   if (action === "trigger-proactive") triggerProactiveEvent(button.dataset.eventId);
+  if (action === "toggle-event-followup") toggleEventFollowup(button);
+  if (action === "regrant-followup") regrantFollowup();
+  if (action === "dismiss-regrant") { state.pendingFollowupRegrant = null; render(); }
   if (action === "remove-emergency-contact") removeEmergencyContact();
   if (action === "delete-account") deleteAccount();
   if (action === "dismiss-reminder") { state.continuousReminder = null; render(); }

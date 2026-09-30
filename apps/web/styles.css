@@ -166,3 +166,8 @@ body.qy-keyboard-open .app { min-height: var(--qy-app-height, calc(100dvh - 28px
 .memory-ref-row.unavailable .ref-state { color: #b3591f; }
 /* A1 事件候选 sheet：类型/归属并排字段（不用内联样式，遵守 CSP style-src 'self'） */
 .qiyu-prototype .field-pair { flex: 1; min-width: 0; }
+
+/* ---- 六项能力 A2：聊天流内主动跟进消息角标（同 A1，不用内联样式，遵守 CSP） ---- */
+.proactive-flag {
+  margin: 0 0 4px; padding: 1px 8px; border: 1px solid currentColor; border-radius: 999px;
+}
