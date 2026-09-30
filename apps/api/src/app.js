@@ -33,6 +33,9 @@ const { scheduleAccountNotifications } = require('./domain/notification-schedule
 const { buildCostReport, parseRateCard } = require('./domain/cost-accounting');
 const reviewerIdentity = require('./domain/reviewer-identity');
 const { inspectContextImage } = require('./domain/context-image-policy');
+const { detectOoc } = require('./domain/ooc-policy');
+const { deriveEpisodeCandidate } = require('./domain/episode-memory');
+const { assessMultimodalConsistency } = require('./domain/multimodal-consistency-gate');
 const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
 const { CallSessionError, TURN_TERMINAL_STATES, callTurns, createCall, createTurn, endCall, ensureCallWithinLimits, ownCall, ownTurn, publicCall, publicTurn, reapExpiredCalls, requireActiveCall, settleTurn, transitionTurn } = require('./domain/call-session');
 const { CALL_AUDIO_MIME_TYPE, executeCallTurn, executeGreeting, previewGreeting, settleTurnSafely } = require('./domain/call-turn-engine');
@@ -1218,6 +1221,21 @@ function publicWorldState(state) {
   return { world_state_id: state.world_state_id, state_version: state.state_version, mood_code: state.mood_code, location_code: state.location_code, wardrobe_asset_id: state.wardrobe_asset_id, active_event_refs: state.active_event_refs, expires_at: state.expires_at, reset_at: state.reset_at, updated_at: state.updated_at };
 }
 
+function worldStateSnapshot(store, worldStateId, version) {
+  if (!worldStateId || !Number.isInteger(version) || version < 1) return null;
+  const events = [...store.worldStateEvents.values()]
+    .filter((item) => item.world_state_id === worldStateId && item.new_version <= version)
+    .sort((left, right) => left.new_version - right.new_version);
+  if (!events.length || events[0].previous_version !== 0 || events.at(-1).new_version !== version) return null;
+  const state = { world_state_id: worldStateId, account_id: events[0].account_id, character_id: events[0].character_id, ...defaultWorldStateValues(), state_version: 0, reset_at: null, updated_at: null };
+  for (const event of events) {
+    if (event.previous_version !== state.state_version || event.character_id !== state.character_id) return null;
+    Object.assign(state, event.patch, { state_version: event.new_version, updated_at: event.occurred_at });
+    if (event.source_type === 'TEMPLATE_DEFAULT' || event.source_type === 'USER_RESET') state.reset_at = event.occurred_at;
+  }
+  return state;
+}
+
 function personaChangedFields(previous, next) {
   return [...Object.keys(emptyPersona())].filter((field) => JSON.stringify(previous?.[field] ?? null) !== JSON.stringify(next[field] ?? null));
 }
@@ -1326,11 +1344,25 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
   try {
     const contextPack = await buildContextPack(store, account, conversation, text, embeddingProvider);
     contextPack.context_images = contextImages;
-    const modelReply = normalizeUnpromptedCharacterSelfIntroduction(
+    let modelReply = normalizeUnpromptedCharacterSelfIntroduction(
       await replyGenerator(text, contextPack),
       text,
       contextPack.character?.name
     );
+    let ooc = detectOoc(modelReply.reply_text, contextPack.character);
+    // One bounded repair attempt. The provider sees the original immutable
+    // context plus a narrow correction instruction; it cannot alter state.
+    if (ooc.decision === 'REPAIR_REQUIRED' && modelReply.ai_generated !== false) {
+      modelReply = normalizeUnpromptedCharacterSelfIntroduction(
+        await replyGenerator(text, { ...contextPack, ooc_repair: { code: ooc.code } }),
+        text,
+        contextPack.character?.name
+      );
+      ooc = detectOoc(modelReply.reply_text, contextPack.character);
+    }
+    if (ooc.decision === 'REPAIR_REQUIRED') {
+      modelReply = { ...modelReply, provider: 'ooc-guard', model_version: 'ooc-guard-v1', ai_generated: false, memory_candidate: null, reply_text: '我刚才的表达不够贴合这个角色。我们换一种更自然的方式继续聊，好吗？', ooc_guard: ooc.code };
+    }
     recordOperationMetric(store, { accountId: account.account_id, provider: modelReply.provider, modelVersion: modelReply.model_version, inputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens), outputTokens: Number(modelReply.usage?.output_tokens ?? modelReply.usage?.completion_tokens ?? 0), latencyMs: Date.now() - modelStartedAt, outcome: modelReply.ai_generated === false ? 'FALLBACK' : 'COMPLETED' });
     const authorityClaim = assessModelOutputAuthority(modelReply.reply_text);
     if (authorityClaim) {
@@ -1358,12 +1390,14 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     // The state used to generate this response belongs to the response itself,
     // not to whatever state the character may have when TTS is requested later.
     const assistantMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT', text: modelReply.reply_text, provider: modelReply.provider, model_version: modelReply.model_version, ai_generated: modelReply.ai_generated !== false, world_state_id: contextPack.world_state.world_state_id, world_state_version: contextPack.world_state.state_version, created_at: createdAt, retention_expires_at: retentionExpiresAt };
-    const candidate = modelReply.memory_candidate ? {
+    const episodeCandidate = !modelReply.memory_candidate ? deriveEpisodeCandidate({ text, characterId: conversation.character_id, worldState: contextPack.world_state }) : null;
+    const candidateSource = modelReply.memory_candidate || episodeCandidate;
+    const candidate = candidateSource ? {
       candidate_id: store.next('memc'), account_id: account.account_id, character_id: conversation.character_id,
-      state: 'CANDIDATE', version: 1, type: modelReply.memory_candidate.type,
-      normalized_value: modelReply.memory_candidate.normalized_value, display_text: modelReply.memory_candidate.display_text,
+      state: 'CANDIDATE', version: 1, type: candidateSource.type,
+      normalized_value: candidateSource.normalized_value, display_text: candidateSource.display_text,
       provider: modelReply.provider, expires_at: plusDays(30), source_message_id: userMessage.message_id,
-      conflicts_with: detectAssetConflicts(store, account.account_id, conversation.character_id, modelReply.memory_candidate.display_text)
+      conflicts_with: detectAssetConflicts(store, account.account_id, conversation.character_id, candidateSource.display_text)
     } : null;
     store.messages.set(userMessage.message_id, userMessage);
     for (const assetId of attachmentIds) store.mediaAssets.get(assetId).message_id = userMessage.message_id;
@@ -2268,6 +2302,8 @@ async function createTtsJob(store, account, path, ttsGenerator, textModerator, m
   const worldState = source.world_state_id
     ? { world_state_id: source.world_state_id, state_version: source.world_state_version }
     : publicWorldState(currentWorldState(store, account.account_id, store.characters.get(conversation.character_id)));
+  const ttsConsistency = assessMultimodalConsistency({ sourceMessage: source, worldStateId: worldState.world_state_id, worldStateVersion: worldState.state_version, modality: 'tts' });
+  if (ttsConsistency.decision !== 'PASS') throw apiError(409, ttsConsistency.code, '语音与原回复的角色情境快照不一致');
   // 语音只朗读台词：剥离（动作描写）与超长截断后的 tts_text 是审核、计费
   // 与合成三条链路共用的口径。情绪基线取角色当前世界状态（P1 判断器可覆盖）。
   const ttsText = truncateForTts(sanitizeTtsText(source.text));
@@ -2517,11 +2553,24 @@ async function createImageJob(store, account, path, body, imageGenerator, imageS
     throw apiError(409, 'REFERENCE_IMAGE_RIGHTS_REVIEW_REQUIRED', '参考立绘尚未通过独立权利审核');
   }
   if (referenceAsset.state !== 'AVAILABLE') throw apiError(409, 'REFERENCE_IMAGE_NOT_CONFIRMED', '参考立绘当前不可用于生成');
+  if (typeof body?.source_message_id !== 'string' || !body.source_message_id.trim()) {
+    throw apiError(400, 'IMAGE_SOURCE_MESSAGE_REQUIRED', '创建图片必须关联一条助手回复');
+  }
+  const sourceMessage = ownAssistantMessage(store, account.account_id, body.source_message_id);
+  if (sourceMessage.conversation_id && store.conversations.get(sourceMessage.conversation_id)?.character_id !== character.character_id) {
+    throw apiError(409, 'IMAGE_SOURCE_CHARACTER_MISMATCH', '图片来源消息不属于当前角色');
+  }
   // Freeze the short-lived state before reserving entitlement or submitting to
   // the provider. Later user changes must never rewrite an already accepted job.
-  const worldState = publicWorldState(currentWorldState(store, account.account_id, character));
+  const sourceWorldState = worldStateSnapshot(store, sourceMessage.world_state_id, sourceMessage.world_state_version);
+  if (!sourceWorldState || sourceWorldState.character_id !== character.character_id) {
+    throw apiError(409, 'MULTIMODAL_SOURCE_SNAPSHOT_MISSING', '图片来源回复的情境快照不可用');
+  }
+  const worldState = publicWorldState(sourceWorldState);
+  const imageConsistency = assessMultimodalConsistency({ sourceMessage, worldStateId: worldState.world_state_id, worldStateVersion: worldState.state_version, modality: 'image' });
+  if (imageConsistency.decision !== 'PASS') throw apiError(409, imageConsistency.code, '图片与来源回复的角色情境快照不一致');
   const job = {
-    job_id: store.next('img'), account_id: account.account_id, character_id: character.character_id, reference_asset_id: referenceAsset.asset_id,
+    job_id: store.next('img'), account_id: account.account_id, character_id: character.character_id, reference_asset_id: referenceAsset.asset_id, source_message_id: sourceMessage.message_id,
     type: 'IMAGE_GENERATION', state: 'PENDING', attempts: 0, provider: 'tencent-hunyuan', provider_request_id: null, provider_job_id: null, entitlement_id: null,
     moderation_policy_version: null, result_asset_id: null, failure_code: null, provider_error_code: null,
     world_state_id: worldState.world_state_id, world_state_version: worldState.state_version, scene_contract: null, created_at: new Date().toISOString()
@@ -2542,7 +2591,7 @@ async function createImageJob(store, account, path, body, imageGenerator, imageS
     let result;
     try {
       result = await imageGenerator.generateScene({
-        character, referenceAsset, scene: body?.scene, confirmedAssets: activeAssets(store, account.account_id), worldState,
+        character, referenceAsset, sourceMessage, scene: body?.scene, confirmedAssets: activeAssets(store, account.account_id), worldState,
         referenceImageUrl: await imageStore.createModerationUrl(referenceAsset.object_key), style: body?.style, resolution: body?.resolution
       });
       recordOperationMetric(store, { accountId: account.account_id, capability: 'IMAGE_GENERATION', provider: providerName(imageGenerator, job.provider), modelVersion: providerModelVersion(imageGenerator), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - providerStartedAt, outcome: 'COMPLETED' });
@@ -3512,7 +3561,7 @@ function publicTrialFeedback(feedback) { return { feedback_id: feedback.feedback
 function publicNotice(notice) { return { ...notice }; }
 function publicTtsJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, source_message_id: job.source_message_id, voice: { voice_id: job.voice_id || null, voice_version: job.voice_version || null, voice_gender: job.voice_gender || 'unspecified', authorization_record_id: job.authorization_record_id || null, rights_review_id: job.rights_review_id || null, rights_review_state: job.rights_review_state || null }, emotion: job.emotion_category ? { category: job.emotion_category, intensity: job.emotion_intensity ?? null, source: job.emotion_source || null } : null, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
 function publicAsrJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, input_asset_id: job.input_asset_id, transcript: job.transcript_text ? { text: job.transcript_text, state: job.transcript_state, version: 1 } : null, failure_code: job.failure_code, created_at: job.created_at }; }
-function publicImageJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, reference_asset_id: job.reference_asset_id, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
+function publicImageJob(job) { return { job_id: job.job_id, type: job.type, state: job.state, attempts: job.attempts, reference_asset_id: job.reference_asset_id, source_message_id: job.source_message_id || null, world_state_id: job.world_state_id || null, world_state_version: job.world_state_version || null, result_asset_id: job.result_asset_id, failure_code: job.failure_code, created_at: job.created_at }; }
 function resolvedTtsVoiceProfile(ttsGenerator, gender = 'unspecified') {
   // Direct function injection is only used by the local synthetic test harness.
   // Runtime-created Tencent adapters must supply an operator-recorded profile;

@@ -40,10 +40,21 @@ test('图片链路依次执行参考图审核、混元任务、私有入桶、�
   assert.equal(denied.body.error.code, 'REFERENCE_IMAGE_RIGHTS_REVIEW_REQUIRED');
   assert.equal(events.includes('generate'), false);
   approveReferenceRightsForTest(store, reference.body);
-  const created = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'image-job', body: { reference_asset_id: reference.body.media_asset.asset_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] }, resolution: '768:1024' } });
+  const noSource = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'image-job-no-source', body: { reference_asset_id: reference.body.media_asset.asset_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
+  assert.equal(noSource.status, 400);
+  assert.equal(noSource.body.error.code, 'IMAGE_SOURCE_MESSAGE_REQUIRED');
+  const otherCharacter = { character_id: 'chr_image_other' };
+  store.worldStates.set(otherCharacter.character_id, { ...store.worldStates.get(character.character_id), character_id: otherCharacter.character_id });
+  const wrongCharacterSource = imageSourceForTest(store, otherCharacter);
+  const mismatchedSource = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'image-job-wrong-character-source', body: { reference_asset_id: reference.body.media_asset.asset_id, source_message_id: wrongCharacterSource.message_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
+  assert.equal(mismatchedSource.status, 409);
+  assert.equal(mismatchedSource.body.error.code, 'IMAGE_SOURCE_CHARACTER_MISMATCH');
+  const source = imageSourceForTest(store, character);
+  const created = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'image-job', body: { reference_asset_id: reference.body.media_asset.asset_id, source_message_id: source.message_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] }, resolution: '768:1024' } });
   assert.equal(created.status, 202);
   assert.equal(created.body.image_job.state, 'PENDING');
   assert.ok(created.body.image_job.world_state_id);
+  assert.equal(created.body.image_job.source_message_id, source.message_id);
   assert.equal(created.body.image_job.world_state_version, 1);
   assert.deepEqual(observedWorldState, { world_state_id: created.body.image_job.world_state_id, state_version: 1, mood_code: 'NEUTRAL', location_code: 'UNSPECIFIED', wardrobe_asset_id: null, active_event_refs: [], expires_at: null, reset_at: observedWorldState.reset_at, updated_at: observedWorldState.updated_at });
   const stateChanged = await request(base, `/api/v1/characters/${character.character_id}/world-state`, { method: 'PATCH', key: 'change-world-after-image-submit', body: { expected_version: 1, mood_code: 'HAPPY', location_code: 'CAFE' } });
@@ -102,7 +113,8 @@ test('图片提交仅在内部保留安全的供应商错误码，不向用户 A
   const character = await readyCharacter(base, 'provider-diagnostic');
   const reference = await request(base, `/api/v1/characters/${character.character_id}/reference-images`, { method: 'POST', key: 'provider-diagnostic-reference', body: { mime_type: 'image/png', image_base64: Buffer.from('x').toString('base64'), user_confirms_image_rights: true } });
   approveReferenceRightsForTest(store, reference.body);
-  const created = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'provider-diagnostic-job', body: { reference_asset_id: reference.body.media_asset.asset_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
+  const source = imageSourceForTest(store, character);
+  const created = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'provider-diagnostic-job', body: { reference_asset_id: reference.body.media_asset.asset_id, source_message_id: source.message_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
   assert.equal(created.body.image_job.failure_code, 'TENCENT_UPSTREAM_REJECTED');
   assert.equal(JSON.stringify(created.body), JSON.stringify(created.body).replace('FailedOperation.ServiceNotOpened', ''));
   assert.equal(store.mediaJobs.get(created.body.image_job.job_id).provider_error_code, 'FailedOperation.ServiceNotOpened');
@@ -119,7 +131,8 @@ test('启用权益服务时，图片只在成功交付后扣额，提交失败�
   const character = await readyCharacter(base, 'quota');
   const reference = await request(base, `/api/v1/characters/${character.character_id}/reference-images`, { method: 'POST', key: 'quota-reference', body: { mime_type: 'image/png', image_base64: Buffer.from('x').toString('base64'), user_confirms_image_rights: true } });
   approveReferenceRightsForTest(store, reference.body);
-  const created = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'quota-job', body: { reference_asset_id: reference.body.media_asset.asset_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
+  const source = imageSourceForTest(store, character);
+  const created = await request(base, `/api/v1/characters/${character.character_id}/image-jobs`, { method: 'POST', key: 'quota-job', body: { reference_asset_id: reference.body.media_asset.asset_id, source_message_id: source.message_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
   assert.equal(created.body.image_job.state, 'PENDING');
   await request(base, `/api/v1/image-jobs/${created.body.image_job.job_id}/refresh`, { method: 'POST', key: 'quota-refresh', body: {} });
   assert.deepEqual(calls, [`reserve:${created.body.image_job.job_id}`, 'generate', `commit:${created.body.image_job.job_id}`]);
@@ -129,7 +142,8 @@ test('启用权益服务时，图片只在成功交付后扣额，提交失败�
   const failingCharacter = await readyCharacter(failing, 'quota-fail');
   const failingReference = await request(failing, `/api/v1/characters/${failingCharacter.character_id}/reference-images`, { method: 'POST', key: 'quota-fail-reference', body: { mime_type: 'image/png', image_base64: Buffer.from('x').toString('base64'), user_confirms_image_rights: true } });
   approveReferenceRightsForTest(failingStore, failingReference.body);
-  const failed = await request(failing, `/api/v1/characters/${failingCharacter.character_id}/image-jobs`, { method: 'POST', key: 'quota-fail-job', body: { reference_asset_id: failingReference.body.media_asset.asset_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
+  const failingSource = imageSourceForTest(failingStore, failingCharacter);
+  const failed = await request(failing, `/api/v1/characters/${failingCharacter.character_id}/image-jobs`, { method: 'POST', key: 'quota-fail-job', body: { reference_asset_id: failingReference.body.media_asset.asset_id, source_message_id: failingSource.message_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] } } });
   assert.equal(failed.body.image_job.failure_code, 'TENCENT_UPSTREAM_REJECTED');
   assert.ok(calls.includes(`release:${failed.body.image_job.job_id}`));
 });
@@ -202,4 +216,13 @@ function approveReferenceRightsForTest(store, payload) {
   review.reviewer_id = 'reviewer-test-only';
   review.updated_at = new Date().toISOString();
   store.mediaAssets.get(payload.media_asset.asset_id).state = 'AVAILABLE';
+}
+
+function imageSourceForTest(store, character, accountId = 'acct_dev_alice') {
+  const conversation = { conversation_id: store.next('cnv'), account_id: accountId, character_id: character.character_id, status: 'OPEN', created_at: new Date().toISOString() };
+  const worldState = store.worldStates.get(character.character_id);
+  const message = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT', text: '我把这刻的画面记下来了。', ai_generated: true, world_state_id: worldState.world_state_id, world_state_version: worldState.state_version, created_at: new Date().toISOString() };
+  store.conversations.set(conversation.conversation_id, conversation);
+  store.messages.set(message.message_id, message);
+  return message;
 }

@@ -32,6 +32,15 @@ async function passAge(base, prefix, token = 'dev-alice-token') {
   await request(base, '/api/v1/age/declarations', { method: 'POST', token, key: `${prefix}-a`, body: { date_of_birth: '1990-01-01', confirmed_18_plus: true } });
 }
 
+function imageSourceForTest(store, character, accountId = 'acct_dev_alice') {
+  const conversation = { conversation_id: store.next('cnv'), account_id: accountId, character_id: character.character_id, status: 'OPEN', created_at: new Date().toISOString() };
+  const worldState = store.worldStates.get(character.character_id);
+  const message = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT', text: '这是一条可追溯的图片来源回复。', ai_generated: true, world_state_id: worldState.world_state_id, world_state_version: worldState.state_version, created_at: new Date().toISOString() };
+  store.conversations.set(conversation.conversation_id, conversation);
+  store.messages.set(message.message_id, message);
+  return message;
+}
+
 test('年龄人工复核：队列可见→复核放行→用户恢复互动；驳回则阻断但数据权利保留', async (t) => {
   const base = await start(t);
   await passAge(base, 'ar');
@@ -104,6 +113,7 @@ test('线下收款人工发放：按订阅周期入账→用户可用→撤销�
   await passAge(base, 'mg');
   const character = await request(base, '/api/v1/characters', { method: 'POST', key: 'mg-c', body: { name: '发放角色' } });
   const characterId = character.body.character.character_id;
+  const sourceMessage = imageSourceForTest(store, character.body.character);
 
   // 先上传参考图并审核放行，使任务校验能走到权益环节。
   const uploaded = await request(base, `/api/v1/characters/${characterId}/reference-images`, {
@@ -113,7 +123,7 @@ test('线下收款人工发放：按订阅周期入账→用户可用→撤销�
   assert.equal(uploaded.status, 201);
   const reviewId = (await internal(base, '/internal/content-rights-reviews?state=REVIEW_REQUIRED')).body.reviews[0].review_id;
   await internal(base, `/internal/content-rights-reviews/${reviewId}/decisions`, { method: 'POST', key: 'mg-dec', body: { decision: 'APPROVED', reason: '原创' } });
-  const sceneBody = { reference_asset_id: uploaded.body.media_asset.asset_id, scene: { location: '窗边', outfit: '白裙', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] }, resolution: '768:1024' };
+  const sceneBody = { reference_asset_id: uploaded.body.media_asset.asset_id, source_message_id: sourceMessage.message_id, scene: { location: '窗边', outfit: '白裙', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] }, resolution: '768:1024' };
 
   // 无额度时图片任务被拒。
   const before = await request(base, `/api/v1/characters/${characterId}/image-jobs`, { method: 'POST', key: 'mg-job-0', body: sceneBody });

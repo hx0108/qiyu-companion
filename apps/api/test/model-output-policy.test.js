@@ -17,3 +17,8 @@ test('AI-08 fixed prompt-injection attack set rejects every prohibited authority
 test('authority guard does not block a model that accurately directs users to formal settings', () => {
   assert.equal(assessModelOutputAuthority('我不能修改你的年龄、权限或长期记忆；请使用产品中的正式设置入口。'), null);
 });
+
+test('output guard blocks a model promise to imitate an identifiable third party but preserves refusal', () => {
+  assert.deepEqual(assessModelOutputAuthority('我可以试着学学她说话的感觉，让你觉得亲切些。'), { code: 'MODEL_ACCEPTED_THIRD_PARTY_IMITATION' });
+  assert.equal(assessModelOutputAuthority('我不能模仿你的朋友，也不会学习她的说话方式。'), null);
+});

@@ -121,6 +121,8 @@ test('OC 拒绝为终态：申诉留档、队列可见，但不解除创建阻�
 });
 
 test('参考图审核闭环：APPROVED 后资产可用并放行生图任务的权利校验', async (t) => {
+  const { DevelopmentStore } = require('../src/domain/store');
+  const store = new DevelopmentStore();
   const imageStore = {
     async putImage({ assetId, bytes, mimeType }) { return { objectKey: `qiyu/images/${assetId}`, checksum: 'c'.repeat(64), byteLength: bytes.length }; },
     async createModerationUrl(objectKey) { return `https://cos.example/${objectKey}`; },
@@ -128,6 +130,7 @@ test('参考图审核闭环：APPROVED 后资产可用并放行生图任务的�
     async readImage() { throw new Error('not needed'); }
   };
   const base = await start(t, {
+    store,
     imageModerator: async () => ({ decision: 'PASS', providerRequestId: 'ims_req', policyVersion: 'ims_v1' }),
     imageStore,
     imageGenerator: {
@@ -159,11 +162,20 @@ test('参考图审核闭环：APPROVED 后资产可用并放行生图任务的�
   // 生图任务通过权利校验（到达提交阶段而非 409 权利拦截）。
   const job = await request(base, `/api/v1/characters/${character.body.character.character_id}/image-jobs`, {
     method: 'POST', key: 'ir-ref-job',
-    body: { reference_asset_id: uploaded.body.media_asset.asset_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] }, resolution: '768:1024' }
+    body: { reference_asset_id: uploaded.body.media_asset.asset_id, source_message_id: imageSourceForTest(store, character.body.character).message_id, scene: { location: '窗边', outfit: '针织衫', time_of_day: 'NIGHT', confirmed_event_asset_ids: [] }, resolution: '768:1024' }
   });
   assert.equal(job.status, 202);
   assert.notEqual(job.body.image_job.failure_code, 'REFERENCE_IMAGE_RIGHTS_REVIEW_REQUIRED');
 });
+
+function imageSourceForTest(store, character, accountId = 'acct_dev_alice') {
+  const conversation = { conversation_id: store.next('cnv'), account_id: accountId, character_id: character.character_id, status: 'OPEN', created_at: new Date().toISOString() };
+  const worldState = store.worldStates.get(character.character_id);
+  const message = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT', text: '这是一条可追溯的图片来源回复。', ai_generated: true, world_state_id: worldState.world_state_id, world_state_version: worldState.state_version, created_at: new Date().toISOString() };
+  store.conversations.set(conversation.conversation_id, conversation);
+  store.messages.set(message.message_id, message);
+  return message;
+}
 
 test('内部只读接口：删除队列、供应商健康与功能开关', async (t) => {
   const base = await start(t, {

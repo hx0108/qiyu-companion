@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenReplyGenerator } = require('../src/providers/qwen-adapter');
+const { QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenReplyGenerator, CONVERSATION_PROMPT_VERSION } = require('../src/providers/qwen-adapter');
 const { PROMPT_INJECTION_ATTACK_SET_V1 } = require('../src/production/prompt-injection-attack-set');
 
 test('QwenAdapter uses the compatible chat-completions contract without returning reasoning content', async () => {
@@ -46,6 +46,7 @@ test('QwenAdapter exposes safe upstream failures and the factory keeps Qwen opt-
   const generator = createQwenReplyGenerator({ QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' }, {
     fetchImpl: async () => ({ ok: true, json: async () => ({ id: 'chatcmpl_factory', model: 'qwen3.8-flash', choices: [{ message: { content: JSON.stringify(validReply('真实模型回复')) } }], usage: {} }) })
   });
+  assert.equal(generator.promptVersion, CONVERSATION_PROMPT_VERSION);
   const reply = await generator('用户输入');
   assert.equal(reply.provider, 'qwen');
   assert.equal(reply.reply_text, '真实模型回复');
