@@ -974,6 +974,43 @@ paths:
         '202': { $ref: '#/components/responses/JsonResponse' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v1/life-events/{eventId}/followup:
+    get:
+      summary: 获取事件的跟进许可与任务状态
+      description: 事件维度的许可（含历史）与在途任务概要；push_configured 如实标注当前渠道仅站内。
+      parameters: [ { $ref: '#/components/parameters/EventId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+    put:
+      summary: 开启一次跟进（事件级许可，确认事件不等于允许提醒）
+      description: 创建 followup_grant + 派生 followup_job；一次许可=一次跟进（BEFORE_EVENT 准点/AFTER_EVENT 事后 2 小时，可显式 due_at）；同键重放幂等；旧 ACTIVE 许可被新 due_at 取代。时区为空/时间待确认/已取消事件/过时 due_at 拒绝。到期且符合准入、静默与频控条件时在对话消息流产生站内消息（当前未配置 Push）。
+      parameters: [ { $ref: '#/components/parameters/EventId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version, followup_kind]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                followup_kind: { type: string, enum: [BEFORE_EVENT, AFTER_EVENT] }
+                due_at: { type: string, format: date-time, description: 缺省按 kind 默认偏移派生（准点/事后2小时） }
+                allowed_from: { type: string, format: date-time }
+                expires_at: { type: string, format: date-time, description: 缺省 due_at+24h }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: 撤销跟进许可并取消待发送任务
+      description: 许可撤销与在途任务取消同事务；消息已投递则不撤回已见内容。
+      parameters: [ { $ref: '#/components/parameters/EventId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
   /api/v1/messages/{messageId}/memory-references:
     get:
       summary: 获取该助手消息本轮实际参考的记忆来源

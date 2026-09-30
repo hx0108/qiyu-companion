@@ -38,6 +38,8 @@ const { deriveEpisodeCandidate } = require('./domain/episode-memory');
 const { enqueueLifeEventExtraction } = require('./domain/life-event-extraction-worker');
 const { confirmLifeEventFromCandidate, listLifeEvents, getLifeEvent, reviseLifeEvent, deleteLifeEvent, findLifeEvent, publicLifeEvent, lifeEventDisplayText } = require('./domain/life-event-service');
 const { messageMemoryReferences, buildMemoryRefs, recordMessageMemoryRefs, clearExpiredMessageMemoryLinks } = require('./domain/memory-reference-service');
+const { validateFollowupGrantRequest } = require('./domain/followup-schema');
+const { grantFollowup, revokeFollowup, listFollowupStatus, invalidateFollowupsOnRevision, revokeFollowupsOnDeletion, publicFollowupGrant, publicFollowupJob, computeLocalDateInZone, claimDailySlot } = require('./domain/followup-service');
 const { assessMultimodalConsistency } = require('./domain/multimodal-consistency-gate');
 const { safeDevFlags, devFlagEnabled } = require('./development/dev-flags');
 const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
@@ -338,6 +340,24 @@ async function route(context) {
     }
     if (method === 'DELETE' && /^\/api\/v1\/life-events\/[^/]+$/.test(path)) {
       return idempotent(context, account, () => deleteLifeEventRoute(store, account, path));
+    }
+    // ---- 事件级跟进（六项能力 A2）：依赖事件存在，嵌在事件开关内 + 独立开关 ----
+    if (devFlagOn(context, 'FOLLOWUP_DISPATCH', account.account_id)) {
+      if (method === 'PUT' && /^\/api\/v1\/life-events\/[^/]+\/followup$/.test(path)) {
+        return idempotent(context, account, () => grantFollowupRoute(store, account, path, body));
+      }
+      if (method === 'GET' && /^\/api\/v1\/life-events\/[^/]+\/followup$/.test(path)) {
+        ownLifeEvent(store, account.account_id, path.split('/')[4]);
+        return ok(listFollowupStatus({ store, accountId: account.account_id, eventId: path.split('/')[4] }));
+      }
+      if (method === 'DELETE' && /^\/api\/v1\/life-events\/[^/]+\/followup$/.test(path)) {
+        return idempotent(context, account, () => {
+          authorize(account, 'WRITE_MEMORY', store);
+          ownLifeEvent(store, account.account_id, path.split('/')[4]);
+          const outcome = revokeFollowup({ store, accountId: account.account_id, eventId: path.split('/')[4], now: new Date() });
+          return { status: 202, body: { revoked: true, ...outcome } };
+        });
+      }
     }
   }
   if (devFlagOn(context, 'MEMORY_REFERENCES', account.account_id)) {
@@ -2992,10 +3012,24 @@ function timelineEntries(store, accountId, filter) {
       domain: event.domain, event_kind: event.event_kind, filter_group: 'event',
       display_text: lifeEventDisplayText(event), title: event.title, status: event.status,
       scheduled_at: event.scheduled_at ?? null, time_precision: event.time_precision,
-      version: event.version, created_at: event.created_at
+      version: event.version, created_at: event.created_at,
+      // A2：事件卡「提醒我」开关的数据源（FOLLOWUP_DISPATCH 关闭时恒空，
+      // 前端渲染为不可开启）。
+      followup: followupSummaryForTimeline(store, event)
     }));
   return [...assetEntries, ...lifeEventEntries]
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+}
+
+// A2：时间线事件条目附带的跟进概要（当前版本是否有生效许可/在途任务）。
+function followupSummaryForTimeline(store, event) {
+  const activeGrant = [...store.followupGrants.values()].find((grant) =>
+    grant.account_id === event.account_id && grant.event_id === event.event_id
+    && grant.event_version === event.version && grant.state === 'ACTIVE') ?? null;
+  const pendingJob = [...store.followupJobs.values()].find((job) =>
+    job.account_id === event.account_id && job.event_id === event.event_id
+    && job.event_version === event.version && ['PENDING', 'LEASED', 'READY'].includes(job.state)) ?? null;
+  return { enabled: Boolean(activeGrant), followup_kind: activeGrant?.followup_kind ?? null, due_at: pendingJob?.due_at ?? activeGrant?.allowed_from ?? null, job_state: pendingJob?.state ?? null };
 }
 
 function typeToFilter(type) {
@@ -3392,7 +3426,7 @@ function deleteProactiveEvent(store, account, path) {
   return ok({ event: publicProactiveEvent(event), cancelled_pending: true, note: '未发送的任务已取消；已发送记录保留供审计。' });
 }
 
-function triggerProactiveEvent(store, account, path) {
+async function triggerProactiveEvent(store, account, path) {
   const event = ownProactiveEvent(store, account.account_id, path.split('/')[4]);
   if (event.state !== 'ACTIVE') throw apiError(409, 'STATE_TRANSITION_INVALID', '事件已删除');
   const sentAt = [...store.proactiveMessages.values()]
@@ -3405,6 +3439,18 @@ function triggerProactiveEvent(store, account, path) {
   });
   if (!decision.allowed) {
     return ok({ dispatched: false, reason: decision.reason, policy: '规则引擎拒绝；不会由模型改写。' });
+  }
+  // A2 每日槽位原子竞争：手动触发与跟进 Worker 共享每日一条（内存模式走域
+  // 函数；PG 请求作用域走 store.claimProactiveDailySlot 的 SQL ON CONFLICT）。
+  const sentAtNow = new Date();
+  // 按账户偏移折算本地日期（槽位键），与 proactive-policy localDayStart 同口径。
+  const offsetMinutes = Number.isInteger(preferences.timezone_offset_minutes) ? preferences.timezone_offset_minutes : 0;
+  const slotDate = new Date(sentAtNow.getTime() + offsetMinutes * 60000).toISOString().slice(0, 10);
+  const slotClaimed = typeof store.claimProactiveDailySlot === 'function'
+    ? await store.claimProactiveDailySlot(slotDate, 'manual')
+    : claimDailySlot(store, account.account_id, slotDate, 'manual');
+  if (!slotClaimed) {
+    return ok({ dispatched: false, reason: 'DAILY_LIMIT_REACHED', policy: '每日槽位已被占用（手动触发与跟进共享一条上限）。' });
   }
   const text = (PROACTIVE_TEMPLATES[event.type] || '').replaceAll('{title}', event.title);
   const message = {
@@ -3600,7 +3646,11 @@ function reviseLifeEventRoute(store, account, path, body) {
   // expected_version 是乐观锁控制字段，不进字段白名单校验。
   const { expected_version: expectedVersion, ...patch } = body ?? {};
   try {
-    return ok(reviseLifeEvent({ store, account, event, patch, expectedVersion, now: new Date() }));
+    const result = reviseLifeEvent({ store, account, event, patch, expectedVersion, now: new Date() });
+    // A2 联动：旧版本许可失效+在途任务取消（同请求事务）；计数供前端渲染
+    //「为新时间重新开启提醒」确认卡。
+    const followupInvalidated = invalidateFollowupsOnRevision({ store, event, previousVersion: expectedVersion, now: new Date() });
+    return ok({ ...result, followup_invalidated: followupInvalidated });
   } catch (error) {
     if (error?.status === 409 && error.code === 'VERSION_CONFLICT') {
       error.details = { ...(error.details ?? {}), current_event: publicLifeEvent(event) };
@@ -3609,12 +3659,40 @@ function reviseLifeEventRoute(store, account, path, body) {
   }
 }
 
+// PUT /life-events/{id}/followup：开启一次跟进（确认事件 ≠ 允许提醒——本路由
+// 才是许可入口）。409 冲突响应回传当前事件；响应如实声明仅站内渠道。
+function grantFollowupRoute(store, account, path, body) {
+  authorize(account, 'WRITE_MEMORY', store);
+  const event = ownLifeEvent(store, account.account_id, path.split('/')[4]);
+  if (body?.expected_version !== event.version) {
+    const error = apiError(409, 'VERSION_CONFLICT', '生活事件版本冲突');
+    error.details = { current_event: publicLifeEvent(event) };
+    throw error;
+  }
+  const validation = validateFollowupGrantRequest(body, { event, now: new Date() });
+  if (!validation.ok) {
+    throw apiError(400, 'VALIDATION_ERROR', `跟进许可字段不合法：${validation.errors.map((item) => `${item.field} ${item.reason}`).join('；')}`, { missing_fields: validation.errors.map((item) => item.field), field_errors: validation.errors });
+  }
+  const granted = grantFollowup({ store, account, event, validated: validation.value, now: new Date() });
+  return created({
+    grant: publicFollowupGrant(granted.grant),
+    job: publicFollowupJob(granted.job),
+    replayed: granted.replayed === true,
+    superseded: granted.superseded ?? { grants_revoked: 0, jobs_cancelled: 0 },
+    channel: 'IN_APP',
+    push_configured: false,
+    note: '跟进许可已开启；到期且符合准入、静默与频控条件时在对话消息流产生一条站内消息。当前未配置 Push 渠道。'
+  });
+}
+
 // DELETE /life-events/{id}：软删资产 + 投影即刻不可见 + 删除账本/回执（202）。
+// A2 联动：许可撤销与待发送任务取消同请求事务（消息先提交则不撤回已见内容）。
 function deleteLifeEventRoute(store, account, path) {
   authorize(account, 'WRITE_MEMORY', store);
   const event = ownLifeEvent(store, account.account_id, path.split('/')[4]);
+  const followup = revokeFollowupsOnDeletion({ store, event, now: new Date() });
   const result = deleteLifeEvent({ store, account, event, now: new Date() });
-  return { status: 202, body: result };
+  return { status: 202, body: { ...result, followup_revoked: followup } };
 }
 function ownAsset(store, accountId, id) { const item = store.assets.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '关系资产不存在'); return item; }
 function ownCandidates(store, accountId) { return [...store.candidates.values()].filter((item) => item.account_id === accountId && item.state === 'CANDIDATE' && new Date(item.expires_at).getTime() > Date.now()); }

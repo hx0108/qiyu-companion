@@ -3,7 +3,7 @@
 const { createApp, callAudioRegistry, reapExpiredVoiceCalls } = require('./app');
 const { assertRuntimeConfiguration, assertLocalSyntheticRuntimeAllowed } = require('./production/startup');
 const { createPersistenceFromEnvironment } = require('./persistence/composition');
-const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
+const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenFollowupComposer, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
 const { createTencentImageModeratorFromEnvironment, createTencentTextModeratorFromEnvironment } = require('./providers/tencent-moderation-adapter');
 const { createTencentAsrTranscriberFromEnvironment } = require('./providers/tencent-asr-adapter');
 const { createTencentTtsGeneratorFromEnvironment } = require('./providers/tencent-tts-adapter');
@@ -17,6 +17,7 @@ const { MediaEntitlementService } = require('./domain/media-entitlement-service'
 const { startRetentionWorker } = require('./domain/retention-worker');
 const { startConversationSummaryWorker } = require('./domain/conversation-summary-worker');
 const { startLifeEventExtractionWorker } = require('./domain/life-event-extraction-worker');
+const { startFollowupWorker } = require('./domain/followup-worker');
 const { startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
 const { startAccountDeletionCleanupWorker } = require('./domain/deletion-orchestration');
 const { DEV_FLAG_NAMES, parseDevFlags } = require('./development/dev-flags');
@@ -61,6 +62,7 @@ createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, em
   const enabledFlags = DEV_FLAG_NAMES.filter((name) => devFlags.enabled[name]);
   console.log(`六项能力开发开关：${enabledFlags.length ? enabledFlags.join('、') : '全部关闭'}${devFlags.accounts && devFlags.accounts.size ? `（仅白名单账户 ${[...devFlags.accounts].join('、')}）` : ''}。`);
   console.log(`生活事件提取：${devFlags.enabled.LIFE_EVENTS ? (lifeEventExtractor ? `已启动（${lifeEventExtractor.promptVersion}）` : '开关开启但未配置提取模型——任务将堆积等待 Worker') : '未开启'}。`);
+  console.log(`跟进调度：${devFlags.enabled.FOLLOWUP_DISPATCH ? `已启动（措辞 ${followupComposer ? followupComposer.promptVersion : '模板回退——未配置模型'}）` : '未开启'}。`);
 });
 
 // 保留期主动清理：仅进程内内存存储可运行；Postgres 请求作用域存储需独立 Worker 部署。
@@ -71,6 +73,13 @@ if (process.env.QIYU_PERSISTENCE !== 'postgres') startConversationSummaryWorker(
 const lifeEventExtractor = devFlags.enabled.LIFE_EVENTS ? createQwenLifeEventExtractor(process.env) : null;
 if (process.env.QIYU_PERSISTENCE !== 'postgres' && lifeEventExtractor) {
   startLifeEventExtractionWorker(store, lifeEventExtractor);
+}
+// 跟进调度 Worker（六项能力 A2）：仅内存模式 + FOLLOWUP_DISPATCH 开关开启时
+// 启动；composer 未配置模型时为 null，措辞走固定模板回退（决策仍在域层）。
+// PG 模式由 run-workers 的 postgres-followup-repository 承担同语义。
+const followupComposer = devFlags.enabled.FOLLOWUP_DISPATCH ? createQwenFollowupComposer(process.env) : null;
+if (process.env.QIYU_PERSISTENCE !== 'postgres' && devFlags.enabled.FOLLOWUP_DISPATCH) {
+  startFollowupWorker(store, followupComposer);
 }
 // 资产向量 Worker：仅进程内内存存储可运行；Postgres 模式须独立 Worker 部署。
 // Qwen 配置时用供应商语义向量（索引与查询同 model_version）；否则确定性开发嵌入。

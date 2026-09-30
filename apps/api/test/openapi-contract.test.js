@@ -37,6 +37,13 @@ const A1_PROBES = [
   { method: 'GET', path: '/api/v1/messages/msg_missing/memory-references', expectStatus: 404 },
 ];
 
+// A2：事件级跟进许可（嵌在 LIFE_EVENTS 内 + FOLLOWUP_DISPATCH 独立开关）。
+const A2_PROBES = [
+  { method: 'GET', path: '/api/v1/life-events/levt_missing/followup', expectStatus: 404 },
+  { method: 'PUT', path: '/api/v1/life-events/levt_missing/followup', expectStatus: 404, body: { expected_version: 1, followup_kind: 'BEFORE_EVENT' } },
+  { method: 'DELETE', path: '/api/v1/life-events/levt_missing/followup', expectStatus: 404 },
+];
+
 async function startServer(devFlags) {
   const app = createApp({ store: new DevelopmentStore(), devFlags });
   await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
@@ -76,6 +83,9 @@ test('contract: A1 life-events 与 memory-references 路径已写入 openapi.yam
     ['/api/v1/life-events/{eventId}', 'GET'],
     ['/api/v1/life-events/{eventId}', 'PATCH'],
     ['/api/v1/life-events/{eventId}', 'DELETE'],
+    ['/api/v1/life-events/{eventId}/followup', 'GET'],
+    ['/api/v1/life-events/{eventId}/followup', 'PUT'],
+    ['/api/v1/life-events/{eventId}/followup', 'DELETE'],
     ['/api/v1/messages/{messageId}/memory-references', 'GET'],
   ];
   for (const [templatePath, method] of expected) {
@@ -85,10 +95,10 @@ test('contract: A1 life-events 与 memory-references 路径已写入 openapi.yam
 });
 
 test('contract: 开关开启时新路由可达（不是 ROUTE_NOT_FOUND）且错误响应形状符合合同', async (t) => {
-  const devFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES' });
+  const devFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH' });
   const { app, base } = await startServer(devFlags);
   t.after(() => app.close());
-  for (const spec of A1_PROBES) {
+  for (const spec of [...A1_PROBES, ...A2_PROBES]) {
     const { status, json } = await probe(base, spec);
     const code = json?.error?.code;
     assert.notEqual(code, 'ROUTE_NOT_FOUND', `${spec.method} ${spec.path} 应已接线（收到 ROUTE_NOT_FOUND 说明路由缺失）`);
@@ -107,7 +117,7 @@ test('contract: 开关开启时新路由可达（不是 ROUTE_NOT_FOUND）且错
 test('contract: 开关关闭时新路由按不存在处理（404 ROUTE_NOT_FOUND），不暴露功能存在', async (t) => {
   const { app, base } = await startServer(parseDevFlags({}));
   t.after(() => app.close());
-  for (const spec of A1_PROBES) {
+  for (const spec of [...A1_PROBES, ...A2_PROBES]) {
     const { status, json } = await probe(base, spec);
     assert.equal(status, 404, `${spec.method} ${spec.path} 关闭时应 404`);
     assert.equal(json?.error?.code, 'ROUTE_NOT_FOUND', `${spec.method} ${spec.path} 关闭时应 ROUTE_NOT_FOUND`);
