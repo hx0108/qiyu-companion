@@ -21,8 +21,11 @@ const ALICE_CONVERSATION = 'aaaaaaaa-0000-7000-8000-000000000002';
 // 共享连接池：种子在 before 做一次（每个测试独立可跑）；after 统一关闭，
 // finally 只 release 本测试的 client（不留悬挂事务，也避免 pool.end() 等锁）。
 const sharedPool = DATABASE_URL ? new pg.Pool({ connectionString: DATABASE_URL, max: 20 }) : null;
-test.before(options, async () => { await seedDevelopmentAccounts(); });
-test.after(options, async () => { if (sharedPool) await sharedPool.end(); });
+// 注意：Node 22.16 根级 test.before/after 传 options（含 skip:false）时钩子
+// 不执行——这里不带 options，库未配置时在钩子内部自行跳过（用例级 options
+// 的 skip 不受影响）。
+test.before(async () => { if (DATABASE_URL) await seedDevelopmentAccounts(); });
+test.after(async () => { if (sharedPool) await sharedPool.end(); });
 
 async function scopedClient(accountId) {
   const client = await sharedPool.connect();
