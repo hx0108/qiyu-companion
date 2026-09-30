@@ -1,0 +1,11 @@
+{
+  "provider": "qwen",
+  "model_version": "qwen3.8-flash",
+  "prompt_version": "conversation-persona.v1",
+  "persona_version": "eval-persona-boundaries.v1",
+  "retrieval_version": "text-embedding-v4@1024",
+  "repetitions": 3,
+  "created_at": "2026-09-17T14:31:40.498Z",
+  "dataset_id": "qiyu-companion-v0.1",
+  "data_classification": "SYNTHETIC_ONLY"
+}

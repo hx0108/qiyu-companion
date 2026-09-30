@@ -1,0 +1,5 @@
+Error: 断言失败：语音生成等待期间对话不得跳回最早消息
+    at assert (C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:43:25)
+    at C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:333:7
+    at async step (C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:89:7)
+    at async main (C:\Users\ASUS\Desktop\AI社交\apps\api\scripts\run-browser-e2e.js:316:5)
