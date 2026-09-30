@@ -320,7 +320,7 @@ test('生活事件提取器：候选透传、隐私红线入提示词、json_obj
   const requestBody = JSON.parse(captured.options.body);
   const promptText = requestBody.messages.at(-1).content;
   assert.match(promptText, /REAL_LIFE=用户的现实生活事件/);      // 虚构归属判定规则
-  assert.match(promptText, /不得包含公司名、联系人姓名/);        // 隐私红线
+  assert.match(promptText, /不得出现任何具体机构名.*联系人姓名/s); // 隐私红线（2026-09-30 真实验收后加固：含正反例示范）
   assert.match(promptText, /time_uncertain=true/);               // 含糊日期出路
   assert.match(promptText, /我周五要去做产品经理的面试/);        // 用户消息进提示词
   assert.deepEqual(requestBody.response_format, { type: 'json_object' }); // 结构化输出合同

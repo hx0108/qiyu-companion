@@ -40,9 +40,33 @@ function loadRootEnv() {
 async function main() {
   loadRootEnv();
   process.env.QIYU_LLM_PROVIDER = 'qwen';
+  // .env 里 QWEN_API_KEY 与 DASHSCOPE_API_KEY 可能对应不同工作空间（其一
+  // 可能欠费停摆）。用 1-token ping 探测：QWEN_API_KEY 不可用时回落
+  // DASHSCOPE_API_KEY，报告记录实际所用 key 的尾 4 位（不记全钥）。
+  const baseUrl = process.env.QWEN_BASE_URL || process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+  async function keyWorks(key) {
+    if (!key) return false;
+    try {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'qwen3.8-flash', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, enable_thinking: false, stream: false })
+      });
+      return response.ok;
+    } catch { return false; }
+  }
+  let keyNote = `QWEN_API_KEY(…${String(process.env.QWEN_API_KEY || '').slice(-4)})`;
+  if (!(await keyWorks(process.env.QWEN_API_KEY))) {
+    if (!(await keyWorks(process.env.DASHSCOPE_API_KEY))) {
+      console.error('[acceptance] QWEN_API_KEY 与 DASHSCOPE_API_KEY 均不可用（欠费/失效/网络），验收未运行。');
+      process.exit(1);
+    }
+    process.env.QWEN_API_KEY = process.env.DASHSCOPE_API_KEY;
+    keyNote = `DASHSCOPE_API_KEY(…${String(process.env.DASHSCOPE_API_KEY).slice(-4)})，QWEN_API_KEY 探测不可用已回落`;
+  }
   const extractor = createQwenLifeEventExtractor(process.env);
   if (!extractor) {
-    console.error('[acceptance] 缺 QWEN_API_KEY（根目录 .env），验收未运行。');
+    console.error('[acceptance] 缺可用 API key（根目录 .env），验收未运行。');
     process.exit(1);
   }
   const startedAt = new Date();
@@ -79,7 +103,7 @@ async function main() {
 
   const runDir = path.resolve(__dirname, '..', '..', '..', 'development', 'eval', 'runs', 'qwen-life-event-extractor-r1');
   fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'raw-probes.json'), JSON.stringify({ started_at: startedAt.toISOString(), prompt_version: extractor.promptVersion, model: extractor.modelVersion, results }, null, 2), 'utf8');
+  fs.writeFileSync(path.join(runDir, 'raw-probes.json'), JSON.stringify({ started_at: startedAt.toISOString(), prompt_version: extractor.promptVersion, model: extractor.modelVersion, key_note: keyNote, results }, null, 2), 'utf8');
 
   // 报告：结构合规统计 + 逐条期望对照（语义质量由人工在下方登记）。
   const totalCandidates = results.reduce((sum, item) => sum + (item.raw_candidates ?? []).length, 0);
@@ -88,7 +112,7 @@ async function main() {
     '# 真实 Qwen 生活事件提取器验收报告（A1 边界销账）',
     '',
     `- 运行时间：${startedAt.toISOString()}`,
-    `- 模型：${extractor.modelVersion} · Prompt：${extractor.promptVersion}`,
+    `- 模型：${extractor.modelVersion} · Prompt：${extractor.promptVersion} · Key：${keyNote}`,
     `- 样本：${PROBES.length} 条固定消息（合成，不含真实用户数据）`,
     `- 候选总数：${totalCandidates} · 域校验通过：${validCandidates}${totalCandidates > 0 ? `（${Math.round(validCandidates / totalCandidates * 100)}%）` : ''}`,
     `- 隐私红线硬断言：${hardFailures.filter((line) => line.includes('隐私红线')).length === 0 ? '通过（P07/P08 的 title 未出现公司/医院名与金额）' : '失败'}`,

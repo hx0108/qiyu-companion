@@ -496,7 +496,7 @@ function lifeEventExtractionPrompt({ text, character, recentContext } = {}) {
     '规则：',
     '1. 只提取用户自己提到的事件，最多 3 条；没有就返回空数组。',
     '2. domain 判定：REAL_LIFE=用户的现实生活事件；FICTIONAL_SHARED=用户与角色共设的故事/虚构世界内的事件（如"我们在故事里的约定"）。',
-    '3. title 用不超过 20 字的中性短语概括（如"周五的产品经理面试"），不得包含公司名、联系人姓名、医疗或财务的具体数字与细节。',
+    '3. title 用不超过 20 字的中性短语概括，不得出现任何具体机构名（公司、医院、学校、平台的名称或简称）、联系人姓名、疾病/手术具体名称、金额数字。用事件类型词概括：用户说"去阿里巴巴面试"→ title 写"求职面试"；"去协和医院做手术"→ title 写"就医手术"；"我周五要去某公司面试"→"周五的面试"。"周五的阿里巴巴面试"这种含公司名的写法是禁止的。',
     '4. event_kind 从 INTERVIEW/READING/CREATION/OTHER 里选。',
     '5. scheduled_at 尽量解析为 ISO 日期时间；解析不了相对日期（如"下周 sometime"）就留空并填 raw_time_text 原文、time_uncertain=true。',
     '6. 只输出一个 JSON 对象：{"candidates":[{"title":"...","event_kind":"...","domain":"...","scheduled_at":"...","timezone":"...","raw_time_text":"...","time_uncertain":false}]}。',

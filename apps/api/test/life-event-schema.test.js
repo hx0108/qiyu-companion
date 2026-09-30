@@ -127,3 +127,19 @@ test('life-event-schema: 枚举常量冻结且与迁移 CHECK 对齐', () => {
   assert.deepEqual(LIFE_EVENT_KINDS, ['INTERVIEW', 'READING', 'CREATION', 'OTHER']);
   assert.equal(Object.isFrozen(LIFE_EVENT_DOMAINS), true);
 });
+
+test('life-event-schema: 确定性机构名脱敏——后缀型机构名从模型 title 中删除（2026-09-30 真实验收发现）', () => {
+  const { sanitizeLifeEventTitle, validateLifeEventCandidateOutput } = require('../src/domain/life-event-schema');
+  assert.equal(sanitizeLifeEventTitle('周五下午阿里巴巴面试'), '周五下午阿里巴巴面试'); // 无后缀专名：确定性规则抓不到，由用户确认环节兜底
+  assert.equal(sanitizeLifeEventTitle('下个月协和医院小手术'), '下个月小手术');
+  assert.equal(sanitizeLifeEventTitle('周三去腾讯有限公司签约'), '周三去签约');
+  assert.equal(sanitizeLifeEventTitle('在招商银行开户'), '在开户');
+  assert.equal(sanitizeLifeEventTitle('普通候选不含机构'), '普通候选不含机构');
+  // 模型输出校验路径自动脱敏（用户修订路径不脱敏——自己的数据自己决定）。
+  const sanitized = validateLifeEventCandidateOutput({ title: '下个月协和医院小手术', domain: 'REAL_LIFE' });
+  assert.equal(sanitized.valid, true);
+  assert.equal(sanitized.value.title, '下个月小手术');
+  // 脱敏后为空 → 候选无效丢弃。
+  const emptied = validateLifeEventCandidateOutput({ title: '协和医院', domain: 'REAL_LIFE' });
+  assert.equal(emptied.valid, false);
+});

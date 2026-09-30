@@ -38,6 +38,19 @@ function isParseableDate(value) {
   return Number.isFinite(parsed);
 }
 
+// 确定性隐私脱敏（2026-09-30 真实验收发现：提示词红线「机构名不入 title」对
+// qwen3.8-flash 是概率性的——「协和医院」「XX公司」后缀型机构名会漏进 title）。
+// 只作用于模型提取路径（validateLifeEventCandidateOutput）；用户确认/修订时
+// 自己写的标题不脱敏（自己的数据自己决定）。无后缀专名（如公司简称）无法
+// 穷举，由「候选须用户确认才成为事实」这道既有防线兜底（确认卡可见可编辑）。
+const ORGANIZATION_NAME_PATTERN = /[一-龥A-Za-z0-9]{2}(?:有限公司|股份有限公司|股份公司|集团公司|集团|公司|医院|诊所|卫生院|银行|支行|学院|大学|中学|小学|研究所)/gu;
+function sanitizeLifeEventTitle(title) {
+  return String(title ?? '')
+    .replace(ORGANIZATION_NAME_PATTERN, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 // 提取器单条输出的校验与归一化。返回 { valid, errors, value }：
 // - errors: [{ field, reason }]（app 层映射 400 VALIDATION_ERROR + details.missing_fields）
 // - value: 受控字段（含确定性推导的 time_precision 与 needs_time_confirmation）
@@ -46,7 +59,9 @@ function isParseableDate(value) {
 function validateLifeEventCandidateOutput(item, { now = new Date() } = {}) {
   const errors = [];
   const source = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
-  const title = typeof source.title === 'string' ? source.title.trim() : '';
+  const rawTitle = typeof source.title === 'string' ? source.title.trim() : '';
+  // 机构名脱敏后再参与校验：脱敏后为空视为该候选无效（整条丢弃由调用方处理）。
+  const title = rawTitle ? sanitizeLifeEventTitle(rawTitle) : '';
   if (!title) errors.push({ field: 'title', reason: '必填' });
   else if (title.length > LIFE_EVENT_TITLE_MAX) errors.push({ field: 'title', reason: `不能超过 ${LIFE_EVENT_TITLE_MAX} 字` });
 
@@ -169,7 +184,7 @@ function validateLifeEventRevisionFields(patch, { current = {} } = {}) {
 
 module.exports = {
   LIFE_EVENT_DOMAINS, LIFE_EVENT_KINDS, LIFE_EVENT_STATUSES, LIFE_EVENT_TIME_PRECISIONS,
-  LIFE_EVENT_TITLE_MAX, LIFE_EVENT_REVISION_FIELDS,
-  isValidIanaTimezone, resolveTimePrecision,
+  LIFE_EVENT_TITLE_MAX, LIFE_EVENT_REVISION_FIELDS, ORGANIZATION_NAME_PATTERN,
+  isValidIanaTimezone, resolveTimePrecision, sanitizeLifeEventTitle,
   validateLifeEventCandidateOutput, validateLifeEventRevisionFields
 };

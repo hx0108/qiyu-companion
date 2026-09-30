@@ -1,7 +1,8 @@
 {
-  "started_at": "2026-09-30T14:12:06.400Z",
+  "started_at": "2026-09-30T15:18:57.328Z",
   "prompt_version": "life-event-extraction.v1",
   "model": "qwen3.8-flash",
+  "key_note": "DASHSCOPE_API_KEY(…23b6)，QWEN_API_KEY 探测不可用已回落",
   "results": [
     {
       "probe_id": "P01",
@@ -10,7 +11,43 @@
         "candidates": 1,
         "kind": "INTERVIEW"
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "周五下午的产品经理面试",
+          "event_kind": "INTERVIEW",
+          "domain": "REAL_LIFE",
+          "scheduled_at": null,
+          "timezone": null,
+          "raw_time_text": "周五下午三点",
+          "time_uncertain": false
+        }
+      ],
+      "usage": {
+        "completion_tokens": 47,
+        "prompt_tokens": 685,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 685
+        },
+        "total_tokens": 732
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "周五下午的产品经理面试",
+            "domain": "REAL_LIFE",
+            "event_kind": "INTERVIEW",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "周五下午三点",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P02",
@@ -18,7 +55,43 @@
       "expect": {
         "candidates": 1
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "驾照科目二考试",
+          "event_kind": "OTHER",
+          "domain": "REAL_LIFE",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "下周三",
+          "time_uncertain": true
+        }
+      ],
+      "usage": {
+        "completion_tokens": 40,
+        "prompt_tokens": 681,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 681
+        },
+        "total_tokens": 721
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "驾照科目二考试",
+            "domain": "REAL_LIFE",
+            "event_kind": "OTHER",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "下周三",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P03",
@@ -26,7 +99,43 @@
       "expect": {
         "candidates": "0-1"
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "牙齿复查",
+          "event_kind": "OTHER",
+          "domain": "REAL_LIFE",
+          "scheduled_at": null,
+          "timezone": null,
+          "raw_time_text": "上周六",
+          "time_uncertain": true
+        }
+      ],
+      "usage": {
+        "completion_tokens": 42,
+        "prompt_tokens": 684,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 684
+        },
+        "total_tokens": 726
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "牙齿复查",
+            "domain": "REAL_LIFE",
+            "event_kind": "OTHER",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "上周六",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P04",
@@ -34,7 +143,17 @@
       "expect": {
         "candidates": 0
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [],
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 681,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 681
+        },
+        "total_tokens": 685
+      },
+      "validated": []
     },
     {
       "probe_id": "P05",
@@ -42,7 +161,17 @@
       "expect": {
         "candidates": 0
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [],
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 683,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 683
+        },
+        "total_tokens": 687
+      },
+      "validated": []
     },
     {
       "probe_id": "P06",
@@ -51,7 +180,43 @@
         "candidates": 1,
         "domain": "FICTIONAL_SHARED"
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "雪山寻剑约定",
+          "event_kind": "OTHER",
+          "domain": "FICTIONAL_SHARED",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "下周",
+          "time_uncertain": true
+        }
+      ],
+      "usage": {
+        "completion_tokens": 80,
+        "prompt_tokens": 687,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 687
+        },
+        "total_tokens": 767
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "雪山寻剑约定",
+            "domain": "FICTIONAL_SHARED",
+            "event_kind": "OTHER",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "下周",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P07",
@@ -59,7 +224,43 @@
       "expect": {
         "candidates": 1
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "周五下午的求职面试",
+          "event_kind": "INTERVIEW",
+          "domain": "REAL_LIFE",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "周五下午",
+          "time_uncertain": true
+        }
+      ],
+      "usage": {
+        "completion_tokens": 42,
+        "prompt_tokens": 683,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 683
+        },
+        "total_tokens": 725
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "周五下午的求职面试",
+            "domain": "REAL_LIFE",
+            "event_kind": "INTERVIEW",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "周五下午",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P08",
@@ -67,7 +268,43 @@
       "expect": {
         "candidates": "0-1"
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "下月就医手术",
+          "event_kind": "OTHER",
+          "domain": "REAL_LIFE",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "下个月",
+          "time_uncertain": true
+        }
+      ],
+      "usage": {
+        "completion_tokens": 40,
+        "prompt_tokens": 687,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 687
+        },
+        "total_tokens": 727
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "下月就医手术",
+            "domain": "REAL_LIFE",
+            "event_kind": "OTHER",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "下个月",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P09",
@@ -75,7 +312,67 @@
       "expect": {
         "candidates": "1-2"
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "明天上午组会",
+          "event_kind": "OTHER",
+          "domain": "REAL_LIFE",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "明天上午十点",
+          "time_uncertain": false
+        },
+        {
+          "title": "明天下午还书",
+          "event_kind": "OTHER",
+          "domain": "REAL_LIFE",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "明天下午",
+          "time_uncertain": false
+        }
+      ],
+      "usage": {
+        "completion_tokens": 77,
+        "prompt_tokens": 690,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 690
+        },
+        "total_tokens": 767
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "明天上午组会",
+            "domain": "REAL_LIFE",
+            "event_kind": "OTHER",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "明天上午十点",
+            "status": "PLANNED"
+          }
+        },
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "明天下午还书",
+            "domain": "REAL_LIFE",
+            "event_kind": "OTHER",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "明天下午",
+            "status": "PLANNED"
+          }
+        }
+      ]
     },
     {
       "probe_id": "P10",
@@ -84,7 +381,43 @@
         "candidates": 1,
         "kind": "READING"
       },
-      "error": "Qwen 服务暂时不可用，请稍后重试"
+      "raw_candidates": [
+        {
+          "title": "读完《百年孤独》",
+          "event_kind": "READING",
+          "domain": "REAL_LIFE",
+          "scheduled_at": "",
+          "timezone": "",
+          "raw_time_text": "这个月",
+          "time_uncertain": true
+        }
+      ],
+      "usage": {
+        "completion_tokens": 41,
+        "prompt_tokens": 688,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "text_tokens": 688
+        },
+        "total_tokens": 729
+      },
+      "validated": [
+        {
+          "valid": true,
+          "errors": [],
+          "value": {
+            "title": "读完《百年孤独》",
+            "domain": "REAL_LIFE",
+            "event_kind": "READING",
+            "scheduled_at": null,
+            "timezone": null,
+            "time_precision": "UNKNOWN",
+            "needs_time_confirmation": true,
+            "raw_time_text": "这个月",
+            "status": "PLANNED"
+          }
+        }
+      ]
     }
   ]
 }
