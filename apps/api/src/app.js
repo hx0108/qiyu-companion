@@ -36,6 +36,7 @@ const { inspectContextImage } = require('./domain/context-image-policy');
 const { detectOoc } = require('./domain/ooc-policy');
 const { deriveEpisodeCandidate } = require('./domain/episode-memory');
 const { assessMultimodalConsistency } = require('./domain/multimodal-consistency-gate');
+const { safeDevFlags, devFlagEnabled } = require('./development/dev-flags');
 const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
 const { CallSessionError, TURN_TERMINAL_STATES, callTurns, createCall, createTurn, endCall, ensureCallWithinLimits, ownCall, ownTurn, publicCall, publicTurn, reapExpiredCalls, requireActiveCall, settleTurn, transitionTurn } = require('./domain/call-session');
 const { CALL_AUDIO_MIME_TYPE, executeCallTurn, executeGreeting, previewGreeting, settleTurnSafely } = require('./domain/call-turn-engine');
@@ -93,7 +94,9 @@ const STATIC_FILES = new Map([
   ['/designs/qiyu-v1-handoff/tokens/tokens.css', { file: path.resolve(__dirname, '../../../designs/qiyu-v1-handoff/tokens/tokens.css'), type: 'text/css; charset=utf-8' }]
 ]);
 
-function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null, voiceCallEnabled = false } = {}) {
+function createApp({ store = new DevelopmentStore(), replyGenerator = generateReply, streamingReplyGenerator = null, summaryGenerator = null, summaryEnabled = true, textModerator = null, asrTranscriber = null, ttsGenerator = null, emotionJudge = null, skillDistiller = null, mediaStore = new LocalPrivateMediaStore(), imageGenerator = null, imageModerator = null, imageStore = null, imageResultFetcher = null, imageEntitlementService = null, trialAuthEnabled = false, trialAuth = null, embeddingProvider = null, featureFlags = null, smsSender = null, voiceCallEnabled = false, devFlags = null } = {}) {
+  // 六项能力开发开关：未注入时全关，所有新路径惰性（既有行为零变化）。
+  const resolvedDevFlags = devFlags || safeDevFlags();
   return http.createServer(async (req, res) => {
     const requestId = validRequestId(req.headers['x-request-id']) || `req_${randomUUID()}`;
     try {
@@ -101,7 +104,7 @@ function createApp({ store = new DevelopmentStore(), replyGenerator = generateRe
       const staticFile = req.method === 'GET' && STATIC_FILES.get(url.pathname);
       if (staticFile) return await sendStatic(res, staticFile, requestId);
       const body = await readJson(req);
-      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, requestId });
+      const result = await routeWithPersistence({ req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService, trialAuthEnabled, trialAuth, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, devFlags: resolvedDevFlags, requestId });
       if (result.sseLive) return sendLiveEventStream(res, result, requestId);
       if (result.sse) return sendEventStream(res, result, requestId);
       if (result.binary) return sendBinary(res, result, requestId);
@@ -3447,6 +3450,11 @@ function authorize(account, action, store) {
   const notice = store.noticeFor(account.account_id);
   const decision = evaluateAccess(account, action, { noticeDisplayed: Boolean(notice.displayed_at) });
   if (!decision.allowed) throw apiError(decision.status, decision.code, decision.message);
+}
+
+// 六项能力开发开关检查：关闭时调用方按“路由不存在”处理（404），不暴露功能存在。
+function devFlagOn(context, name, accountId) {
+  return devFlagEnabled(context.devFlags, name, accountId);
 }
 
 function ownCharacter(store, accountId, id) { const item = store.characters.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '角色不存在'); return item; }

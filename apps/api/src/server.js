@@ -18,6 +18,7 @@ const { startRetentionWorker } = require('./domain/retention-worker');
 const { startConversationSummaryWorker } = require('./domain/conversation-summary-worker');
 const { startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
 const { startAccountDeletionCleanupWorker } = require('./domain/deletion-orchestration');
+const { DEV_FLAG_NAMES, parseDevFlags } = require('./development/dev-flags');
 
 const port = Number(process.env.PORT || 3000);
 // Keep direct development launches local-only, while container deployments
@@ -50,10 +51,14 @@ const imageResultFetcher = imageGenerator ? fetchTencentGeneratedImage : undefin
 // 外层权益服务仅对进程内内存存储有效；Postgres 模式由 withAccountTransaction
 // 在每个请求作用域 store 上挂载实例（请求级账本与订阅都在其中加载）。
 const mediaEntitlementService = process.env.QIYU_PERSISTENCE === 'postgres' ? null : new MediaEntitlementService({ store });
-createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, emotionJudge, skillDistiller, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService, trialAuthEnabled: process.env.QIYU_TRIAL_AUTH === 'invite', embeddingProvider, featureFlags: runtime.featureFlags, smsSender, voiceCallEnabled: process.env.QIYU_VOICE_CALL_ENABLED === '1' }).listen(port, host, () => {
+// 六项能力开发开关：默认全关；QIYU_DEV_FLAGS/QIYU_DEV_FLAG_ACCOUNTS 控制开启与账户白名单。
+const devFlags = parseDevFlags(process.env);
+createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, emotionJudge, skillDistiller, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService, trialAuthEnabled: process.env.QIYU_TRIAL_AUTH === 'invite', embeddingProvider, featureFlags: runtime.featureFlags, smsSender, voiceCallEnabled: process.env.QIYU_VOICE_CALL_ENABLED === '1', devFlags }).listen(port, host, () => {
   console.log(`栖语 M1 本地合成 API 已监听 http://${host}:${port}`);
   console.log(`运行模式：${runtime.mode}；外部高风险能力默认关闭，必须经生产配置门禁启用。`);
   console.log(`持久化：${process.env.QIYU_PERSISTENCE || 'memory'}；模型：${process.env.QIYU_LLM_PROVIDER === 'qwen' ? 'qwen（本地开发接线）' : 'mock'}。`);
+  const enabledFlags = DEV_FLAG_NAMES.filter((name) => devFlags.enabled[name]);
+  console.log(`六项能力开发开关：${enabledFlags.length ? enabledFlags.join('、') : '全部关闭'}${devFlags.accounts && devFlags.accounts.size ? `（仅白名单账户 ${[...devFlags.accounts].join('、')}）` : ''}。`);
 });
 
 // 保留期主动清理：仅进程内内存存储可运行；Postgres 请求作用域存储需独立 Worker 部署。
