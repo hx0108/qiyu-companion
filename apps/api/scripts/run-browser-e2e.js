@@ -23,6 +23,7 @@ const { fetchTencentGeneratedImage } = require('../src/media/tencent-image-resul
 const { MediaEntitlementService } = require('../src/domain/media-entitlement-service');
 const { mockLifeEventExtractor } = require('../src/domain/mock-adapter');
 const { startLifeEventExtractionWorker } = require('../src/domain/life-event-extraction-worker');
+const { startFollowupWorker } = require('../src/domain/followup-worker');
 const { parseDevFlags } = require('../src/development/dev-flags');
 const { createControlledPng } = require('./controlled-probe-png');
 
@@ -62,8 +63,10 @@ async function main() {
   const providerRuntime = realTencentMedia ? createTencentMediaRuntime(process.env, store) : createMockContextImageRuntime();
   // 六项能力 A1：陪伴连续性场景走确定性 mock 提取器（关键词→固定候选），
   // 开关全开；内存 worker 500ms 轮询，页面轮询等候选横幅。
-  const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES' });
+  // 六项能力 A2：跟进调度 worker 同场启动（composer=null 走模板措辞）。
+  const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH' });
   const a1Worker = startLifeEventExtractionWorker(store, mockLifeEventExtractor, { intervalMs: 500 });
+  startFollowupWorker(store, null, { intervalMs: 500, workerId: 'e2e-followup' });
   const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true, devFlags: a1DevFlags });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -97,7 +100,7 @@ async function main() {
   const onlyIndex = cliArgs.indexOf('--only');
   const onlyScenario = onlyIndex >= 0 ? cliArgs[onlyIndex + 1] : null;
   const ONLY_SCENARIO_STEPS = {
-    'companion-continuity': ['必要告知', '年龄声明', '角色创建', '对话：', 'A1 ']
+    'companion-continuity': ['必要告知', '年龄声明', '角色创建', '对话：', 'A1 ', 'A2 ']
   };
   const step = async (name, run) => {
     if (onlyScenario && ONLY_SCENARIO_STEPS[onlyScenario] && !ONLY_SCENARIO_STEPS[onlyScenario].some((prefix) => name.startsWith(prefix))) {
@@ -410,6 +413,103 @@ async function main() {
       await page.waitForFunction(() => !document.querySelector('[data-entry-type="LIFE_EVENT"]'), null, { timeout: 10_000 });
     });
 
+    // ---- 跟进调度（六项能力 A2）：确认事件→单独开启提醒→到期投递→每日一条 ----
+    // 确认事件 ≠ 允许提醒：投递必须经时间线「提醒我」单独许可；Worker 500ms
+    // 轮询；投递物=聊天流 ASSISTANT 消息（provider='proactive-followup'，主动
+    // 角标 + 事件来源引用）。
+    await step('A2 开启提醒：时间线「提醒我」→ 许可与任务落库（确认≠允许）', async () => {
+      // 宿主机时钟可能落在默认静默窗口（23-8，UTC 轴）导致 DEFER 不投递。
+      // HTTP 校验拒绝起止相同（0-0），改用反向窗口：非静默=当前与下一个 UTC
+      // 小时（start=(h+2)%24、end=h%24，跨回绕覆盖恰 22 小时静默）——任何时
+      // 刻跑都至少有约 1 小时余量；h=22/23 时窗口自然翻成 start<end 形态。
+      const currentUtcHour = new Date().getUTCHours();
+      const prefsResponse = await fetch(`${base}/api/v1/proactive-preferences`, {
+        method: 'PUT', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': 'e2e-followup-prefs' },
+        body: JSON.stringify({ enabled: true, quiet_start_hour: (currentUtcHour + 2) % 24, quiet_end_hour: currentUtcHour % 24 })
+      });
+      assert(prefsResponse.ok, `写静默偏好失败：HTTP ${prefsResponse.status}`);
+      await backToChat(); // A1 场景结束在时间线页；发消息要先回聊天流。
+      await confirmLifeEventCandidate(page, store, { message: '我明天上午要去考试，有点慌', localTime: toLocalInput(Date.now() + 90_000), titlePart: '考试' });
+      await backToChat();
+      await page.locator('nav.bottom-nav [data-action="open-assets"]').click();
+      await page.waitForSelector('[data-entry-type="LIFE_EVENT"] [data-action="toggle-event-followup"]', { timeout: 10_000 });
+      await page.locator('[data-entry-type="LIFE_EVENT"] [data-action="toggle-event-followup"]').click();
+      await page.waitForFunction(() => document.body.innerText.includes('跟进许可已开启'), null, { timeout: 10_000 });
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && ![...store.followupJobs.values()].some((job) => job.state === 'PENDING')) await page.waitForTimeout(200);
+      assert([...store.followupJobs.values()].some((job) => job.state === 'PENDING'), '开启提醒后服务端应有 PENDING 调度任务');
+      assert([...store.followupGrants.values()].some((grant) => grant.state === 'ACTIVE'), '开启提醒后应有 ACTIVE 许可');
+      assert((await page.locator('[data-entry-type="LIFE_EVENT"]').innerText()).includes('提醒已开'), '事件卡应翻转显示提醒已开');
+    });
+
+    await step('A2 到期投递：due_at 到点→Worker 写进聊天流（主动角标+事件来源）', async () => {
+      // UI 开启的 due=事件准点（90 秒后）；为快速验证投递，同 kind 重新 PUT 一
+      // 个 3 秒后的 due_at——服务端语义=改期：旧许可失效、旧任务取消、新任务
+      // 排期（PUT 幂等重放之外的 supersede 路径顺带被覆盖）。
+      const event = [...store.lifeEvents.values()].find((item) => !item.deleted_at && (item.title ?? '').includes('考试'));
+      assert(event, '应存在已确认的考试事件');
+      const dueAt = new Date(Date.now() + 3_000).toISOString();
+      const putResponse = await fetch(`${base}/api/v1/life-events/${encodeURIComponent(event.event_id)}/followup`, {
+        method: 'PUT', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-followup-put-${Date.now()}` },
+        body: JSON.stringify({ expected_version: event.version, followup_kind: 'BEFORE_EVENT', due_at: dueAt })
+      });
+      assert(putResponse.ok, `改期 PUT 失败：HTTP ${putResponse.status}`);
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && ![...store.followupJobs.values()].some((job) => job.due_at === dueAt && job.state === 'PENDING')) await page.waitForTimeout(200);
+      const superseded = [...store.followupJobs.values()].find((job) => job.due_at !== dueAt && job.state === 'CANCELLED');
+      assert(superseded, '旧 due 的任务应随重新开启被取消（改期联动）');
+      // 先等服务端终态再谈 UI：终态/错误直接进断言消息，避免 UI 超时掩盖根因。
+      const publishDeadline = Date.now() + 12_000;
+      let targetJob = null;
+      while (Date.now() < publishDeadline) {
+        targetJob = [...store.followupJobs.values()].find((job) => job.due_at === dueAt);
+        if (targetJob && targetJob.state !== 'PENDING') break;
+        await page.waitForTimeout(300);
+      }
+      assert(targetJob?.state === 'PUBLISHED',
+        `到期任务应发布，实际 ${targetJob?.state}/${targetJob?.last_error ?? ''}；全部任务：${JSON.stringify([...store.followupJobs.values()].map((job) => ({ due: job.due_at, state: job.state, err: job.last_error ?? null })))}`);
+      // 等投递：Worker 领取→模板措辞→evaluateFollowupPublish 放行→聊天流消息。
+      // 主动消息不推送、前端也不轮询——用户下次回到应用（刷新）才从消息流
+      // 读到，这正是站内投递的产品语义；E2E 用 reload 模拟「回到应用」。
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForSelector('#message-form', { timeout: 15_000 });
+      await page.waitForSelector('.proactive-flag', { timeout: 15_000 });
+      const proactiveText = await page.locator('article.message.ai', { has: page.locator('.proactive-flag') }).last().innerText();
+      assert(proactiveText.includes('考试安排'), `主动消息应含事件标题，实际：${proactiveText.slice(0, 80)}`);
+      // 来源透明：主动消息自带 LIFE_EVENT 引用（「本轮参考」面板可查）。
+      await page.locator('.memory-refs-trigger').last().click();
+      await page.waitForSelector('.memory-ref-row.available', { timeout: 10_000 });
+      const refText = await page.locator('.memory-ref-list').innerText();
+      assert(refText.includes('考试安排'), '主动消息来源面板应显示事件');
+      await page.locator('[data-action="close-memory-refs"]').click();
+    });
+
+    await step('A2 每日一条：同日第二任务到期被拒（EXPIRED 不补发）', async () => {
+      await backToChat(); // 上一步结束在来源面板；发消息要先回聊天流。
+      await confirmLifeEventCandidate(page, store, { message: '周末和朋友约了聚餐', localTime: toLocalInput(Date.now() + 90_000), titlePart: '聚餐' });
+      const dinner = [...store.lifeEvents.values()].find((item) => !item.deleted_at && (item.title ?? '').includes('聚餐'));
+      assert(dinner, '应存在已确认的聚餐事件');
+      const putResponse = await fetch(`${base}/api/v1/life-events/${encodeURIComponent(dinner.event_id)}/followup`, {
+        method: 'PUT', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-followup-put2-${Date.now()}` },
+        body: JSON.stringify({ expected_version: dinner.version, followup_kind: 'BEFORE_EVENT', due_at: new Date(Date.now() + 3_000).toISOString() })
+      });
+      assert(putResponse.ok, `聚餐提醒 PUT 失败：HTTP ${putResponse.status}`);
+      // Worker 领取后 evaluateFollowupPublish 命中每日一条（今天已发过主动消息）
+      // → EXPIRED 终态，不补发过时提醒；聊天流与审计都不再增加。
+      const deadline = Date.now() + 15_000;
+      let dinnerJob = null;
+      while (Date.now() < deadline) {
+        dinnerJob = [...store.followupJobs.values()].find((job) => job.event_id === dinner.event_id && ['PENDING', 'LEASED', 'EXPIRED', 'PUBLISHED'].includes(job.state));
+        if (dinnerJob && ['EXPIRED', 'PUBLISHED'].includes(dinnerJob.state)) break;
+        await page.waitForTimeout(300);
+      }
+      assert(dinnerJob?.state === 'EXPIRED' && String(dinnerJob.last_error ?? '').includes('DAILY_LIMIT_REACHED'),
+        `同日第二任务应 EXPIRED/DAILY_LIMIT_REACHED，实际 ${dinnerJob?.state}/${dinnerJob?.last_error}`);
+      assert([...store.proactiveMessages.values()].filter((item) => item.kind === 'NORMAL').length === 1, '审计应仍只有一条 NORMAL');
+      assert([...store.messages.values()].filter((message) => message.provider === 'proactive-followup').length === 1, '聊天流应仍只有一条主动消息');
+      await backToChat();
+    });
+
 
     await step(realTencentMedia ? 'TTS：真实腾讯语音生成并由鉴权媒体接口播放' : 'TTS 未启用降级：受控失败视图且文字保留', async () => {
       await backToChat(); // A1 场景结束在时间线页；语音按钮在聊天流里。
@@ -601,6 +701,42 @@ function createMockContextImageRuntime() {
 
 function reviewerHeaders() {
   return { Authorization: 'Bearer reviewer-dev-token', 'Content-Type': 'application/json', 'Idempotency-Key': `e2e-${Date.now()}-${Math.random().toString(16).slice(2)}` };
+}
+
+// datetime-local 本地值（YYYY-MM-DDTHH:mm）。
+function toLocalInput(ms) {
+  const date = new Date(ms);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+// 生活事件确认 sheet 全流程（A1 内联逻辑固化，A2 复用）：发消息 → 等提取
+// worker 产出 life_event 候选（Node 侧先等落库再轮询 UI）→ 确认掉先行的普通
+// 候选直到专用 sheet 出现 → 补具体时间 → confirm-edited 固化字段集。
+async function confirmLifeEventCandidate(page, store, { message, localTime, titlePart }) {
+  await page.locator('#message-form [name="message"]').fill(message);
+  await page.locator('#message-form .send').click();
+  await new Promise((resolve, reject) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if ([...store.candidates.values()].some((item) => item.type === 'life_event' && item.state === 'CANDIDATE')) { clearInterval(timer); resolve(); }
+      else if (Date.now() - started > 10_000) { clearInterval(timer); reject(new Error('提取 worker 未在 10 秒内产出 life_event 候选')); }
+    }, 200);
+  });
+  await page.waitForSelector('.memory-banner', { timeout: 10_000 });
+  await page.locator('.memory-banner').click();
+  for (let attempt = 0; attempt < 4 && (await page.locator('#life-event-title').count()) === 0; attempt += 1) {
+    assert((await page.locator('[data-action="confirm-candidate"]').count()) > 0, '普通候选应可确认');
+    await page.locator('[data-action="confirm-candidate"]').click();
+    await page.waitForSelector('#message-form', { timeout: 10_000 });
+    await page.waitForSelector('.memory-banner', { timeout: 10_000 });
+    await page.locator('.memory-banner').click();
+  }
+  await page.waitForSelector('#life-event-title', { timeout: 10_000 });
+  assert((await page.locator('#life-event-title').inputValue()).includes(titlePart), `候选标题应含「${titlePart}」`);
+  await page.locator('#life-event-scheduled-at').fill(localTime);
+  await page.locator('[data-action="confirm-edited-candidate"]').click();
+  await page.waitForSelector('#message-form', { timeout: 10_000 });
 }
 
 function createTencentMediaRuntime(environment, store) {

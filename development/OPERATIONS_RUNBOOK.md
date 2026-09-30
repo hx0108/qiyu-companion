@@ -42,3 +42,10 @@ rule_files: [monitoring/prometheus-rules.yml]
 - 关闭开关：清掉 `QIYU_DEV_FLAGS` 里的 `LIFE_EVENTS`/`MEMORY_REFERENCES` 并重启——提取立即停止（三通道不再入队）、事件/引用路由按不存在处理；已确认事件与引用快照作为用户数据保留（数据权利不随开关变化）。
 - 任务积压：`SELECT account_id, count(*) FROM life_event_extraction_jobs WHERE state='PENDING' GROUP BY 1;`（PG 模式）。run-workers 未配置提取模型（QIYU_LLM_PROVIDER/QWEN_API_KEY）时跳过提取队列，任务会等待模型可用或被保留期清扫取消（`CANCELLED`，原因 `source message retention expired`）。
 - `FAILED` 任务（3 次退避耗尽）留在 `life_event_extraction_jobs` 表供任务台查询；不自动重放，人工确认原因后可按 message_id 手工补录候选。提取失败不阻塞聊天主链路。
+
+### 跟进调度开关与排障（六项能力 A2）
+- 关闭开关：清掉 `QIYU_DEV_FLAGS` 里的 `FOLLOWUP_DISPATCH` 并重启——followup 路由按不存在处理、Worker 不启动；在途任务留在 `followup_jobs`（PENDING 不再被领取，不产生半发布状态）；已发布的主动消息不撤回（用户数据），事件与许可记录保留。
+- 任务积压：`SELECT account_id, state, count(*) FROM followup_jobs WHERE state IN ('PENDING','LEASED') GROUP BY 1,2;`（PG 模式）。`PENDING` 堆积先查 Worker 是否在跑（run-workers 日志，`FOLLOWUP_DISPATCH` 开启时才启动）；`LEASED` 长期滞留=租约 300 秒过期后被其他 Worker 自动重领（进程崩溃恢复路径），无需人工介入。
+- `FAILED` 任务（3 次指数退避耗尽，`last_error` 留痕）留在 `followup_jobs` 供任务台查询；不自动重放。`EXPIRED`（窗口已过/`DAILY_LIMIT_REACHED`/静默窗结束仍超时）是正常频控终态，不是故障。
+- 每日一条槽位核查：`SELECT * FROM proactive_daily_slots WHERE local_date = CURRENT_DATE;`——手动触发接口与 Worker 共享该槽位；若怀疑漏发，先看槽位是否已被占（`claimed_by` 指向当日已发布的 job）。
+- 静默时段投诉排查：账户静默偏好在 `accounts.proactive_preferences_json`（HTTP 校验起止小时必须 0-23 且不同；被静默抑制的任务 DEFER 到静默结束的精确时刻，`next_attempt_at` 可查，顺延不消耗重试次数）。
