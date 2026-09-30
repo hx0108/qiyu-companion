@@ -57,5 +57,5 @@
   - 删除/保留期：retention sweep 联动（引用删/事件 source 置空/任务取消，事件本体保留）、注销账本追加三域、时间线 filter=event。
   - Web：memory-panel 模块（候选确认日期区/来源面板/事件修订 409 保留草稿/删除回执）+ 「本轮参考」入口；三重登记并 bump 20260930-a1。
 - **测试（2026-09-30 实跑）**：`node --test` 433 通过 + 4 跳过（PG 专属）+ 0 失败；`test:pg-companion-continuity` 4/4（迁移可执行、RLS 生效、UNIQUE/乐观锁恰一胜、事务原子、20 并发×2000 次混合读写 P95=45-49ms，Docker 临时库 tmpfs）；`test:e2e-companion-continuity` 三轮稳定门禁通过；`test:e2e-browser` 16 步全过。
-- **如实登记边界**：事件提取仅以 mock 提取器与单测验证过域逻辑与接线；真实 Qwen 提取器的端到端效果未在本轮验收（无配额环境），上线前需按 EVAL_BASELINE 流程补真实模型运行包与人工盲评。PG 实测覆盖 RLS/约束/并发/原子性，未含多进程 Worker 竞争生产压测。
+- **如实登记边界**：事件提取仅以 mock 提取器与单测验证过域逻辑与接线；真实 Qwen 提取器验收已于 2026-09-30 尝试（`development/eval/runs/qwen-life-event-extractor-r1/`），被 DashScope `Arrearage`（阿里云账户欠费）阻断——10 条探针全部上游拒绝、零模型输出，不能据此评估质量。验收脚本已就绪（`apps/api/scripts/run-life-event-extractor-acceptance.js`，10 条固定消息含隐私红线硬断言），充值恢复后一条命令重跑并人工复核语义质量。PG 实测覆盖 RLS/约束/并发/原子性，未含多进程 Worker 竞争生产压测。
 - **操作口径**：开关（QIYU_DEV_FLAGS/QIYU_DEV_FLAG_ACCOUNTS，默认全关）与任务积压处置见 OPERATIONS_RUNBOOK「生活事件提取开关与任务积压」。

@@ -1,0 +1,90 @@
+{
+  "started_at": "2026-09-30T14:12:06.400Z",
+  "prompt_version": "life-event-extraction.v1",
+  "model": "qwen3.8-flash",
+  "results": [
+    {
+      "probe_id": "P01",
+      "text": "我周五下午三点有个产品经理的面试，好紧张啊",
+      "expect": {
+        "candidates": 1,
+        "kind": "INTERVIEW"
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P02",
+      "text": "下周三我要去考驾照科目二",
+      "expect": {
+        "candidates": 1
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P03",
+      "text": "上周六去医院复查了牙齿，医生说恢复得不错",
+      "expect": {
+        "candidates": "0-1"
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P04",
+      "text": "今天天气真好，适合睡懒觉",
+      "expect": {
+        "candidates": 0
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P05",
+      "text": "唉，最近上班好累，什么都不想干",
+      "expect": {
+        "candidates": 0
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P06",
+      "text": "我们在故事里的设定是下周一起去北境雪山找那把剑",
+      "expect": {
+        "candidates": 1,
+        "domain": "FICTIONAL_SHARED"
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P07",
+      "text": "我在字节跳动上班，周五下午要去阿里巴巴面试",
+      "expect": {
+        "candidates": 1
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P08",
+      "text": "我下个月要去协和医院做个小手术，大概要花三万块",
+      "expect": {
+        "candidates": "0-1"
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P09",
+      "text": "明天上午十点开组会，下午我打算去图书馆把借的书还了",
+      "expect": {
+        "candidates": "1-2"
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    },
+    {
+      "probe_id": "P10",
+      "text": "我打算这个月把《百年孤独》看完，已经读到一半了",
+      "expect": {
+        "candidates": 1,
+        "kind": "READING"
+      },
+      "error": "Qwen 服务暂时不可用，请稍后重试"
+    }
+  ]
+}

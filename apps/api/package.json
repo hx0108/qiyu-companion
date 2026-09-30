@@ -22,6 +22,7 @@
     "test:e2e-browser": "node scripts/run-browser-e2e.js",
     "test:e2e-companion-continuity": "node scripts/run-browser-e2e.js --only companion-continuity",
     "test:pg-companion-continuity": "node scripts/run-pg-companion-continuity.js",
+    "verify:life-event-extractor": "node scripts/run-life-event-extractor-acceptance.js",
     "test:e2e-prototype-states": "node scripts/run-prototype-state-browser-e2e.js",
     "test:e2e-ops": "node scripts/run-ops-browser-e2e.js"
   },
