@@ -26,7 +26,8 @@
 
 ## 产品与技术事实源
 
-- `栖语PRD_v1.0.md`：当前产品需求、范围、指标与验收口径。
+- `development/CURRENT_PRODUCT_STATUS_2026-09-17.md`：当前代码、实跑验证、在线健康检查、外部阻断与下一优先级的唯一状态入口；历史状态台账不得替代它。
+- `栖语PRD_v1.3.md`：当前产品需求、范围、指标与验收口径。
 - `栖语技术设计文档_v1.md`：架构、接口、状态机、安全与数据设计。
 - `栖语可行性分析_v1.md`：产品与技术可行性分析。
 - `栖语订阅定价分析.ipynb`：订阅定价测算结果。
@@ -53,7 +54,7 @@
 
 ## M1 本地开发切片
 
-- `development/M1_IMPLEMENTATION_BASELINE.md`：本地、合成数据实现的唯一范围；不构成外部封测或公开上线批准。
+- `development/M1_IMPLEMENTATION_BASELINE.md`：M1本地、合成数据基线；不构成外部封测或公开上线批准。当前能力状态以 `development/CURRENT_PRODUCT_STATUS_2026-09-17.md` 为准。
 - `contracts/openapi.yaml`：供本地前端接入的 M1 API 合同。
 - `apps/api/`：Node 22 原生 HTTP API 与 `node:test`。默认使用内存合成数据，也可显式接入本地 Docker PostgreSQL；默认回复为确定性 `provider=mock`，并可在本地开发中显式接入 Qwen3.8-Flash 与腾讯云文本审核、TTS、ASR、COS/IMS、混元图片适配器。上述均是本地受控开发接线，不构成真实支付、第三方增强年龄核验或已批准的生产服务。
 - `infra/postgres/`：本地 PostgreSQL 16 + pgvector、迁移、RLS 与 M1 开发持久化验证工具；它是生产持久化的工程基础，不是已批准的生产部署。

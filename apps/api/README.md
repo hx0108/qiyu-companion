@@ -1,5 +1,7 @@
 # 栖语 M1 本地合成 API
 
+> 本文记录 M1 本地合成API基线和接口边界。当前功能、实跑测试、远程健康检查和外部阻断请优先阅读 [`../../development/CURRENT_PRODUCT_STATUS_2026-09-17.md`](../../development/CURRENT_PRODUCT_STATUS_2026-09-17.md)；不得将本文中的历史探针结论单独当作当前生产状态。
+
 这是 `development/M1_IMPLEMENTATION_BASELINE.md` 的服务端最小闭环：必要告知、开发年龄准入、单角色、默认确定性 Mock 对话（可显式接入 Qwen3.8-Flash）、候选记忆确认、账户隔离、在线撤销与幂等。
 
 它**不是生产服务**：默认使用内存中的合成数据，也可显式使用本地 Docker PostgreSQL；`provider: "mock"` 不是模型调用，Qwen 路径仅限本地开发外呼；开发年龄判断不是第三方核验；`ONLINE_DISABLED` 删除任务不表示生产物理清理完成。
