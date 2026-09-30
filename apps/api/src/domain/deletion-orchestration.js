@@ -3,6 +3,7 @@
 const { invalidateAssetEmbedding } = require('./asset-embedding-worker');
 const { invalidateSummaries } = require('./conversation-summary');
 const { cancelConversationSummaryJobs } = require('./conversation-summary-worker');
+const { clearExpiredMessageMemoryLinks } = require('./memory-reference-service');
 
 // 数据删除编排（P0，PRD 7.0/9.3 AC-15）：注销不再只是"在线停用"，而是
 //   1) 请求时登记逐数据域删除账本（deletion_targets，含对象级回执）；
@@ -18,7 +19,9 @@ const BACKUP_RETENTION_DAYS = 30;
 
 const ACCOUNT_DOMAIN_TARGETS = Object.freeze([
   'MESSAGES', 'CONVERSATION_SUMMARIES', 'MEMORY_CANDIDATES',
-  'RELATIONSHIP_ASSETS', 'RELATIONSHIP_ASSET_EMBEDDINGS', 'OC_IMPORTS'
+  'RELATIONSHIP_ASSETS', 'RELATIONSHIP_ASSET_EMBEDDINGS', 'OC_IMPORTS',
+  // 六项能力 A1（迁移 063/064）：事件投影/提取任务/引用快照随注销清理。
+  'LIFE_EVENTS', 'LIFE_EVENT_EXTRACTION_JOBS', 'MESSAGE_MEMORY_REFS'
 ]);
 
 function registerDeletionTargets(store, deletionJob, targets, now = new Date().toISOString()) {
@@ -106,6 +109,21 @@ async function runAccountDeletionCleanup(store, account, deletionJob, { mediaSto
   }
   completeDeletionTarget(store, deletionJob, 'OC_IMPORTS', undefined, { deleted_domain: 'oc_imports', completed_at: nowIso }, nowIso);
 
+  // 5b) 六项能力 A1：事件投影物理删除、提取任务清空、引用快照清空。资产侧
+  // （life_event 类型 relationship_assets）已由第 4 步统一软删。
+  for (const [eventId, event] of [...(store.lifeEvents ?? new Map())]) {
+    if (event.account_id === accountId) store.lifeEvents.delete(eventId);
+  }
+  completeDeletionTarget(store, deletionJob, 'LIFE_EVENTS', undefined, { deleted_domain: 'life_events', completed_at: nowIso }, nowIso);
+  for (const [jobId, job] of [...(store.lifeEventExtractionJobs ?? new Map())]) {
+    if (job.account_id === accountId) store.lifeEventExtractionJobs.delete(jobId);
+  }
+  completeDeletionTarget(store, deletionJob, 'LIFE_EVENT_EXTRACTION_JOBS', undefined, { deleted_domain: 'life_event_extraction_jobs', completed_at: nowIso }, nowIso);
+  for (const [refId, ref] of [...(store.messageMemoryRefs ?? new Map())]) {
+    if (ref.account_id === accountId) store.messageMemoryRefs.delete(refId);
+  }
+  completeDeletionTarget(store, deletionJob, 'MESSAGE_MEMORY_REFS', undefined, { deleted_domain: 'message_memory_refs', completed_at: nowIso }, nowIso);
+
   // 6) 媒体对象：逐对象删除并写对象级回执；任一失败保留 FAILED 供重试。
   // LEDGER_REPLAY 模式（备份恢复重放）只对齐数据库行状态——对象存储与生产
   // 共用同一桶，主库删除时对象已删，重放不得再次外呼。
@@ -138,7 +156,7 @@ async function runAccountDeletionCleanup(store, account, deletionJob, { mediaSto
   const failed = targets.filter((target) => target.state === 'FAILED');
   deletionJob.physical_cleanup_state = failed.length === 0 ? 'PRODUCTION_CLEANUP_COMPLETED' : 'PARTIAL_CLEANUP_OBJECTS_PENDING_RETRY';
   deletionJob.note = failed.length === 0
-    ? `账户数据已按删除账本清理（消息、摘要、候选、关系资产、向量、OC 原文、媒体对象）。备份最长保留至截止期后自动清除；供应商侧留存按合同删除条款执行。`
+    ? `账户数据已按删除账本清理（消息、摘要、候选、关系资产、向量、OC 原文、媒体对象、生活事件、提取任务、引用快照）。备份最长保留至截止期后自动清除；供应商侧留存按合同删除条款执行。`
     : `${failed.length} 个删除目标失败（保留重试）；其余目标已清理。未把失败目标报告为完成。`;
   deletionJob.backup_deadline = new Date(now.getTime() + BACKUP_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   deletionJob.receipt_version = RECEIPT_VERSION;
@@ -179,7 +197,11 @@ function registerConversationDeletionTargets(store, account, deletionJob, conver
     { target_type: 'MESSAGES', target_ref: conversationId },
     { target_type: 'CONVERSATION_SUMMARIES', target_ref: conversationId },
     { target_type: 'MEMORY_CANDIDATES', target_ref: conversationId },
-    { target_type: 'RELATIONSHIP_ASSETS', target_ref: conversationId }
+    { target_type: 'RELATIONSHIP_ASSETS', target_ref: conversationId },
+    // 六项能力 A1：会话内消息的引用快照与提取任务随行级清理；事件投影是
+    // 账户级确认事实，不随会话删除（与关系资产同语义），只断开来源链接。
+    { target_type: 'MESSAGE_MEMORY_REFS', target_ref: conversationId },
+    { target_type: 'LIFE_EVENT_EXTRACTION_JOBS', target_ref: conversationId }
   ], now);
   for (const target of targets) {
     target.state = 'COMPLETED';
@@ -197,6 +219,8 @@ function replayConversationDeletion(store, account, conversationId, now = new Da
   const candidateIds = new Set([...store.candidates.values()].filter((item) => item.account_id === account.account_id && messageIds.has(item.source_message_id)).map((item) => item.candidate_id));
   for (const summary of invalidateSummaries([...store.conversationSummaries.values()], [...store.messages.values()], conversationId, [...messageIds], now)) store.conversationSummaries.set(summary.summary_id, summary);
   cancelConversationSummaryJobs(store, conversationId, now);
+  // A1 联动：该会话消息的引用快照删除、事件 source 置空、未跑提取任务取消。
+  clearExpiredMessageMemoryLinks({ store, expiredMessageIds: messageIds, now: new Date(now) });
   for (const messageId of messageIds) store.messages.delete(messageId);
   for (const [feedbackId, feedback] of store.messageFeedback) if (messageIds.has(feedback.message_id)) store.messageFeedback.delete(feedbackId);
   for (const candidate of store.candidates.values()) if (candidateIds.has(candidate.candidate_id)) { candidate.state = 'DELETED'; candidate.deleted_at = now; }

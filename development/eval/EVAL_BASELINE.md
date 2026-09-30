@@ -35,6 +35,8 @@ npm run eval:companion:prepare -- --run-id qwen-20260917-r1 `
 
 输出位于 `development/eval/runs/<run-id>/`：`requests.jsonl` 供受控运行器消费，`review-sheet.csv` 供两名评审独立填写，`tts-blind-review.csv` 用于随机盲标后的语音打分。没有实际响应和 `evidence_ref` 的评分不得进入门禁结论。
 
+> Prompt 版本登记：`CONVERSATION_PROMPT_VERSION` 已于 2026-09-30 从 `conversation-persona.v1` 升至 `conversation-persona.v2`（六项能力 A1：`confirmed_assets` 带 `asset_id` 时加 `[尾4位/v版本]` 标注、新增 `active-life-event-data` 事件块）。两处变化都只在 A1 开关开启的请求出现；开关关闭的请求 prompt 文本与 v1 逐字一致。既有以 v1 冻结的运行包结论不受影响。
+
 真实模型模式（消耗 API 配额）：
 
 ```bash

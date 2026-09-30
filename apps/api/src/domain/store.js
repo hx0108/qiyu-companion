@@ -15,6 +15,9 @@ class DevelopmentStore {
     this.outboxEvents = new Map();
     this.candidates = new Map();
     this.assets = new Map();
+    this.lifeEvents = new Map();
+    this.lifeEventExtractionJobs = new Map();
+    this.messageMemoryRefs = new Map();
     this.mediaJobs = new Map();
     this.mediaAssets = new Map();
     this.callSessions = new Map();

@@ -185,6 +185,11 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   };
   store.messages.set(userMessage.message_id, userMessage);
   turn.user_message_id = userMessage.message_id;
+  // 生活事件提取（六项能力 A1 三通道之三）：通话转写与文字消息同一提取管线；
+  // deps 未注入（开关关闭或旧调用方）时静默跳过，不阻塞通话回合。
+  if (typeof deps.enqueueLifeEventExtraction === 'function') {
+    deps.enqueueLifeEventExtraction({ store, account, conversation: { conversation_id: call.conversation_id, character_id: call.character_id }, message: userMessage });
+  }
 
   // 3. 安全态：固定文案朗读（账户状态副作用与 createSafetyResponse 同口径）。
   const activeSafety = responseForExistingSafetyMode(account.safety_mode) || assessSafety(asrResult.text);
@@ -279,6 +284,11 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   }, call);
   store.messages.set(assistantMessage.message_id, assistantMessage);
   ctx.partialPersisted = true;
+  // 来源落库（通道三：通话）：与文字/SSE 同一份注入快照语义；安全替换路径
+  // （replaced=true）不是模型正常产物，不记引用。deps 未注入时静默跳过。
+  if (!replaced && typeof deps.recordMessageMemoryRefs === 'function' && Array.isArray(contextPack.memory_refs) && contextPack.memory_refs.length > 0) {
+    deps.recordMessageMemoryRefs({ store, account, conversation, message: assistantMessage, refs: contextPack.memory_refs });
+  }
   if (replaced) {
     textSequence += 1;
     ctx.emittedTexts.push(OUTPUT_GUARD_REPLY_TEXT);

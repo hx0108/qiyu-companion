@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenReplyGenerator, CONVERSATION_PROMPT_VERSION } = require('../src/providers/qwen-adapter');
+const { QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenReplyGenerator, createQwenLifeEventExtractor, lifeEventExtractionPrompt, CONVERSATION_PROMPT_VERSION, LIFE_EVENT_EXTRACTION_PROMPT_VERSION } = require('../src/providers/qwen-adapter');
 const { PROMPT_INJECTION_ATTACK_SET_V1 } = require('../src/production/prompt-injection-attack-set');
 
 test('QwenAdapter uses the compatible chat-completions contract without returning reasoning content', async () => {
@@ -297,4 +297,42 @@ test('情绪判断器保持 Qwen 显式开关，供应商故障向上抛出由�
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
   });
   await assert.rejects(() => broken({ text: '台词' }), (error) => error.code === 'QWEN_UPSTREAM_REJECTED');
+});
+
+test('生活事件提取器：候选透传、隐私红线入提示词、json_object 模式、版本可追溯', async () => {
+  let captured = null;
+  const extractor = createQwenLifeEventExtractor({ QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' }, {
+    fetchImpl: async (url, options) => {
+      captured = { options };
+      return { ok: true, json: async () => ({ id: 'chatcmpl_life', model: 'qwen3.8-flash', choices: [{ message: { content: '{"candidates":[{"title":"周五的产品经理面试","domain":"REAL_LIFE","event_kind":"INTERVIEW","raw_time_text":"周五","time_uncertain":true}]}' } }], usage: { prompt_tokens: 210, completion_tokens: 30 } }) };
+    }
+  });
+  assert.equal(extractor.provider, 'qwen');
+  assert.equal(extractor.promptVersion, LIFE_EVENT_EXTRACTION_PROMPT_VERSION);
+  assert.equal(LIFE_EVENT_EXTRACTION_PROMPT_VERSION, 'life-event-extraction.v1');
+
+  const outcome = await extractor({ text: '我周五要去做产品经理的面试', character: { name: '栖夏' }, recentContext: [{ actor: 'ASSISTANT', text: '加油，我陪你想想怎么准备。' }] });
+  assert.equal(outcome.candidates.length, 1);
+  assert.equal(outcome.candidates[0].title, '周五的产品经理面试');
+  assert.equal(outcome.provider, 'qwen');
+  assert.equal(outcome.usage.prompt_tokens, 210);
+
+  const requestBody = JSON.parse(captured.options.body);
+  const promptText = requestBody.messages.at(-1).content;
+  assert.match(promptText, /REAL_LIFE=用户的现实生活事件/);      // 虚构归属判定规则
+  assert.match(promptText, /不得包含公司名、联系人姓名/);        // 隐私红线
+  assert.match(promptText, /time_uncertain=true/);               // 含糊日期出路
+  assert.match(promptText, /我周五要去做产品经理的面试/);        // 用户消息进提示词
+  assert.deepEqual(requestBody.response_format, { type: 'json_object' }); // 结构化输出合同
+});
+
+test('生活事件提取器：坏 JSON 抛错（交给 Worker 重试）、空文本返回空候选、显式开关', async () => {
+  assert.equal(createQwenLifeEventExtractor({}), null); // 未开 qwen 不创建
+  const broken = createQwenLifeEventExtractor({ QIYU_LLM_PROVIDER: 'qwen', QWEN_API_KEY: 'test-key' }, {
+    fetchImpl: async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: '这不是 JSON' } }], usage: {} }) })
+  });
+  await assert.rejects(() => broken({ text: '周五有面试' }), (error) => error.code === 'QWEN_LIFE_EVENT_EXTRACTION_INVALID');
+  const empty = await broken({ text: '   ' });
+  assert.deepEqual(empty.candidates, []);
+  assert.equal(typeof lifeEventExtractionPrompt({ text: 'x' }), 'string');
 });

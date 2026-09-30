@@ -2,6 +2,7 @@
 
 const { invalidateSummaries } = require('./conversation-summary');
 const { cancelConversationSummaryJobs } = require('./conversation-summary-worker');
+const { clearExpiredMessageMemoryLinks } = require('./memory-reference-service');
 const DEFAULT_RAW_INTERACTION_RETENTION_DAYS = 90;
 
 function applyRawInteractionRetention(store, account, now = new Date()) {
@@ -31,7 +32,10 @@ function applyRawInteractionRetention(store, account, now = new Date()) {
       candidate.expired_at = now.toISOString();
     }
   }
-  return { expired_message_count: expiredMessageIds.size, cutoff };
+  // 六项能力 A1 联动：过期消息的引用快照删除、事件 source 置空、未跑的提取
+  // 任务取消（事件本体与已确认资产保留——它们是用户确认过的独立事实）。
+  const memoryLinks = clearExpiredMessageMemoryLinks({ store, expiredMessageIds, now });
+  return { expired_message_count: expiredMessageIds.size, cutoff, memory_link_cleanup: memoryLinks };
 }
 
 module.exports = { DEFAULT_RAW_INTERACTION_RETENTION_DAYS, applyRawInteractionRetention };

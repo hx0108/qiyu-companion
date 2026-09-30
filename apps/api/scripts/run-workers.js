@@ -4,6 +4,7 @@
 // API 进程以 QIYU_PERSISTENCE=postgres 运行时不内嵌任何 Worker（请求作用域存储
 // 不适合后台轮询）；本进程补齐该空白，消费四类队列：
 //   1) 会话摘要（账户 RLS 作用域消费；需要 Qwen，未配置时跳过）；
+//      以及生活事件提取（六项能力 A1，同一账户事务内 drain；未配置模型跳过）；
 //   2) 资产 Embedding（确定性开发嵌入；由 BYPASSRLS 专用角色领取）；
 //   3) 图片生成任务状态推进（P0 后台任务化：不再依赖前端手动刷新；
 //      需要 QIYU_IMAGE_PROVIDER=tencent-hunyuan 全套图片管线环境）；
@@ -17,8 +18,9 @@
 // 用法：DATABASE_URL=... node scripts/run-workers.js [--once] [--interval-ms 5000]
 
 const { createPersistenceFromEnvironment } = require('../src/persistence/composition');
-const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider } = require('../src/providers/qwen-adapter');
+const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenLifeEventExtractor } = require('../src/providers/qwen-adapter');
 const { runNextConversationSummaryJob } = require('../src/domain/conversation-summary-worker');
+const { runNextLifeEventExtractionJob } = require('../src/domain/life-event-extraction-worker');
 const { deterministicEmbedding, DEVELOPMENT_EMBEDDING_MODEL_VERSION } = require('../src/domain/asset-embedding-worker');
 const { advanceImageJob } = require('../src/domain/image-job-advance');
 const { runRetentionSweep } = require('../src/domain/retention-worker');
@@ -64,6 +66,9 @@ async function main() {
     throw new Error('run-workers 需要 QIYU_PERSISTENCE=postgres；内存模式的 Worker 由 API 进程内嵌运行');
   }
   const summaryGenerator = createQwenConversationSummaryGenerator(process.env) || null;
+  // 生活事件提取器（六项能力 A1）：未配置模型时跳过提取段（与摘要同语义，
+  // 任务保留在队列等待模型可用或保留期清理取消）。
+  const lifeEventExtractor = createQwenLifeEventExtractor(process.env) || null;
   // 语义向量（P1-4）：Qwen 配置时用供应商语义向量建索引；否则确定性开发嵌入。
   const embeddingProvider = createQwenEmbeddingProvider(process.env) || null;
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
@@ -88,15 +93,20 @@ async function main() {
 
   async function drainAccount(accountId) {
     let summaries = 0;
+    let extractions = 0;
     for (let round = 0; round < 20; round += 1) {
       const outcome = await store.withAccountTransaction(accountId, async (scoped) => {
         const summaryResult = summaryGenerator ? await runNextConversationSummaryJob({ store: scoped, summaryGenerator, now: new Date() }) : { state: 'SKIPPED_NO_MODEL' };
         if (summaryResult.state === 'COMPLETED') summaries += 1;
-        return summaryResult.state === 'IDLE' || summaryResult.state === 'SKIPPED_NO_MODEL';
+        // 生活事件提取与摘要同一账户事务内逐个 drain（六项能力 A1）。
+        const extractionResult = lifeEventExtractor ? await runNextLifeEventExtractionJob({ store: scoped, extractionGenerator: lifeEventExtractor, now: new Date() }) : { state: 'SKIPPED_NO_MODEL' };
+        if (extractionResult.state === 'COMPLETED') extractions += 1;
+        if (extractionResult.state === 'FAILED') console.warn(`[worker] 账户 ${accountId} 提取任务 ${extractionResult.job_id} 已重试耗尽（FAILED 留表待人工处理）`);
+        return summaryResult.state === 'IDLE' && (extractionResult.state === 'IDLE' || extractionResult.state === 'SKIPPED_NO_MODEL');
       });
       if (outcome) break;
     }
-    return { summaries };
+    return { summaries, extractions };
   }
 
   // 图片任务推进：与 HTTP refresh 共用 ./domain/image-job-advance 状态机。
@@ -133,15 +143,21 @@ async function main() {
     const summaryAccounts = await discoverAccounts(`
       SELECT DISTINCT account_id FROM (
         SELECT account_id FROM conversation_summary_jobs WHERE state = 'PENDING' AND exhausted_at IS NULL AND next_attempt_at <= CURRENT_TIMESTAMP
+        UNION
+        SELECT account_id FROM life_event_extraction_jobs WHERE state = 'PENDING' AND next_attempt_at <= CURRENT_TIMESTAMP
       ) pending`);
     for (const accountId of summaryAccounts) {
       const done = await drainAccount(accountId).catch((error) => {
         console.error(`[worker] 账户 ${accountId} 摘要任务失败：`, error.message);
-        return { summaries: 0 };
+        return { summaries: 0, extractions: 0 };
       });
       if (done.summaries > 0) {
         console.log(`[worker] 账户 ${accountId}：摘要 +${done.summaries}`);
         worked += done.summaries;
+      }
+      if (done.extractions > 0) {
+        console.log(`[worker] 账户 ${accountId}：生活事件提取 +${done.extractions}`);
+        worked += done.extractions;
       }
     }
 
@@ -258,7 +274,7 @@ async function main() {
     return worked;
   }
 
-  console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；资产向量：${embeddingProvider ? `qwen ${embeddingProvider.modelVersion}（${embeddingProvider.dimensions} 维）` : '确定性开发嵌入'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}）。`);
+  console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；生活事件提取：${lifeEventExtractor ? `qwen（${lifeEventExtractor.promptVersion}）` : '未配置——跳过提取队列'}；资产向量：${embeddingProvider ? `qwen ${embeddingProvider.modelVersion}（${embeddingProvider.dimensions} 维）` : '确定性开发嵌入'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}）。`);
   let running = true;
   process.on('SIGINT', () => { running = false; });
 

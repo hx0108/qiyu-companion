@@ -35,6 +35,9 @@ const reviewerIdentity = require('./domain/reviewer-identity');
 const { inspectContextImage } = require('./domain/context-image-policy');
 const { detectOoc } = require('./domain/ooc-policy');
 const { deriveEpisodeCandidate } = require('./domain/episode-memory');
+const { enqueueLifeEventExtraction } = require('./domain/life-event-extraction-worker');
+const { confirmLifeEventFromCandidate, listLifeEvents, getLifeEvent, reviseLifeEvent, deleteLifeEvent, findLifeEvent, publicLifeEvent, lifeEventDisplayText } = require('./domain/life-event-service');
+const { messageMemoryReferences, buildMemoryRefs, recordMessageMemoryRefs, clearExpiredMessageMemoryLinks } = require('./domain/memory-reference-service');
 const { assessMultimodalConsistency } = require('./domain/multimodal-consistency-gate');
 const { safeDevFlags, devFlagEnabled } = require('./development/dev-flags');
 const { CALL_AUDIO_MAX_TURN_BYTES, CallAudioBufferRegistry } = require('./domain/call-audio-buffer');
@@ -145,7 +148,7 @@ async function routeWithPersistence(context) {
 }
 
 async function route(context) {
-  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender, voiceCallEnabled } = context;
+  const { req, body, url, store, replyGenerator, streamingReplyGenerator, summaryGenerator, summaryEnabled, textModerator, asrTranscriber, ttsGenerator, emotionJudge, skillDistiller, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, requestId, trialAuthEnabled, trialAuth, authenticatedAccountId, embeddingProvider, featureFlags, smsSender, voiceCallEnabled, devFlags } = context;
   // 媒体权益服务：显式注入优先（测试），否则使用请求级 store 上挂载的实例（Postgres 请求作用域）。
   const imageEntitlementService = context.imageEntitlementService || store.mediaEntitlementService || null;
   const method = req.method;
@@ -258,7 +261,7 @@ async function route(context) {
   if (method === 'GET' && /^\/api\/v1\/characters\/[^/]+\/preferences$/.test(path)) return getPreferences(store, account, path);
   if (method === 'PUT' && /^\/api\/v1\/characters\/[^/]+\/preferences$/.test(path)) return idempotent(context, account, () => updatePreferences(store, account, path, body));
   if (method === 'POST' && /^\/api\/v1\/messages\/[^/]+\/feedback$/.test(path)) return idempotent(context, account, () => createMessageFeedback(store, account, path, body, skillDistiller));
-  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider);
+  if (method === 'GET' && /^\/api\/v1\/conversation-streams\/[^/]+$/.test(path)) return getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider, devFlags || null);
   if (method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(path)) return idempotent(context, account, () => deleteConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/pause$/.test(path)) return idempotent(context, account, () => pauseConversation(store, account, path));
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/resume$/.test(path)) return idempotent(context, account, () => resumeConversation(store, account, path));
@@ -277,12 +280,12 @@ async function route(context) {
   if (method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/turns\/[^/]+\/finalize$/.test(path)) {
     return idempotent(context, account, () => withCallApiErrors(() => finalizeVoiceCallTurn(store, account, path, summaryGenerator)));
   }
-  if (method === 'GET' && /^\/api\/v1\/call-turn-streams\/[^/]+$/.test(path)) return getCallTurnStream(store, account, path, requestId, callProviders);
+  if (method === 'GET' && /^\/api\/v1\/call-turn-streams\/[^/]+$/.test(path)) return getCallTurnStream(store, account, path, requestId, callProviders, devFlags || null);
   if (method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/end$/.test(path)) {
     return idempotent(context, account, () => withCallApiErrors(() => endVoiceCall(store, account, path, summaryGenerator)));
   }
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/messages$/.test(path)) {
-    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator, embeddingProvider, imageStore));
+    return idempotent(context, account, () => sendMessage(store, account, path, body, replyGenerator, summaryEnabled ? summaryGenerator : null, textModerator, streamingReplyGenerator, embeddingProvider, imageStore, context.devFlags || null));
   }
   if (method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/context-images$/.test(path)) {
     return idempotent(context, account, () => createContextImage(store, account, path, body, imageModerator, imageStore));
@@ -315,6 +318,34 @@ async function route(context) {
     return idempotent(context, account, () => deleteMediaAsset(store, account, path, mediaStore, imageStore));
   }
   if (method === 'GET' && path === '/api/v1/memory-candidates') return ok({ candidates: ownCandidates(store, account.account_id) });
+  // ---- 生活事件（六项能力 A1，开发开关门禁：关闭即按不存在处理）----
+  if (devFlagOn(context, 'LIFE_EVENTS', account.account_id)) {
+    if (method === 'GET' && path === '/api/v1/life-events') {
+      const limitParam = Number(url.searchParams.get('limit'));
+      return ok(listLifeEvents({
+        store, accountId: account.account_id,
+        characterId: url.searchParams.get('character_id') || null,
+        cursor: url.searchParams.get('cursor') || null,
+        limit: Number.isInteger(limitParam) && limitParam > 0 ? limitParam : undefined
+      }));
+    }
+    if (method === 'GET' && /^\/api\/v1\/life-events\/[^/]+$/.test(path)) {
+      return ok({ event: getLifeEvent({ store, accountId: account.account_id, eventId: path.split('/')[4] }) });
+    }
+    if (method === 'PATCH' && /^\/api\/v1\/life-events\/[^/]+$/.test(path)) {
+      return idempotent(context, account, () => reviseLifeEventRoute(store, account, path, body));
+    }
+    if (method === 'DELETE' && /^\/api\/v1\/life-events\/[^/]+$/.test(path)) {
+      return idempotent(context, account, () => deleteLifeEventRoute(store, account, path));
+    }
+  }
+  if (devFlagOn(context, 'MEMORY_REFERENCES', account.account_id)) {
+    if (method === 'GET' && /^\/api\/v1\/messages\/[^/]+\/memory-references$/.test(path)) {
+      const references = messageMemoryReferences({ store, accountId: account.account_id, messageId: path.split('/')[4] });
+      if (!references) throw apiError(404, 'RESOURCE_NOT_FOUND', '消息不存在或没有记忆引用记录');
+      return ok(references);
+    }
+  }
   if (method === 'POST' && /^\/api\/v1\/memory-candidates\/[^/]+\/(confirm|confirm-edited|reject|undo-reject)$/.test(path)) {
     return idempotent(context, account, () => resolveCandidate(store, account, path, body));
   }
@@ -1291,6 +1322,9 @@ function deleteConversation(store, account, path) {
   const deletedAt = new Date().toISOString();
   for (const summary of invalidateSummaries([...store.conversationSummaries.values()], [...store.messages.values()], conversation.conversation_id, [...messageIds], deletedAt)) store.conversationSummaries.set(summary.summary_id, summary);
   cancelConversationSummaryJobs(store, conversation.conversation_id, deletedAt);
+  // A1 联动：该会话消息的引用快照删除、事件 source 置空、未跑提取任务取消
+  //（事件本体是账户级确认事实，不随会话删除）。
+  clearExpiredMessageMemoryLinks({ store, expiredMessageIds: messageIds, now: new Date() });
   for (const messageId of messageIds) store.messages.delete(messageId);
   for (const [feedbackId, feedback] of store.messageFeedback) if (messageIds.has(feedback.message_id)) store.messageFeedback.delete(feedbackId);
   for (const candidate of store.candidates.values()) if (candidateIds.has(candidate.candidate_id)) { candidate.state = 'DELETED'; candidate.deleted_at = deletedAt; }
@@ -1303,7 +1337,9 @@ function deleteConversation(store, account, path) {
   return ok({ conversation: { conversation_id: conversation.conversation_id, status: conversation.status, deleted_at: deletedAt }, deletion_job: deletionJob, deletion_receipt: deletionReceipt(store, deletionJob) });
 }
 
-async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null, embeddingProvider = null, imageStore = null) {
+async function sendMessage(store, account, path, body, replyGenerator, summaryGenerator, textModerator, streamingReplyGenerator = null, embeddingProvider = null, imageStore = null, devFlags = null) {
+  const lifeEventExtractionEnabled = Boolean(devFlags && devFlagEnabled(devFlags, 'LIFE_EVENTS', account.account_id));
+  const memoryRefsEnabled = Boolean(devFlags && devFlagEnabled(devFlags, 'MEMORY_REFERENCES', account.account_id));
   const conversationId = path.split('/')[4];
   const attachmentIds = requestedContextImageIds(body?.attachments);
   const suppliedText = typeof body?.content?.text === 'string' ? body.content.text.trim() : '';
@@ -1335,7 +1371,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
   // 模型调用、额度预留与终稿持久化全部发生在一次性 SSE 令牌的消费请求中，
   // 未消费的令牌不产生任何模型调用或额度副作用。
   if (attachmentIds.length === 0 && body?.stream === true && streamingReplyGenerator && typeof streamingReplyGenerator.generateStream === 'function') {
-    return acceptStreamingMessage(store, account, conversation, text);
+    return acceptStreamingMessage(store, account, conversation, text, lifeEventExtractionEnabled, memoryRefsEnabled);
   }
   let reservation;
   const modelStartedAt = Date.now();
@@ -1345,7 +1381,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     throw dailyUsageApiError(error);
   }
   try {
-    const contextPack = await buildContextPack(store, account, conversation, text, embeddingProvider);
+    const contextPack = await buildContextPack(store, account, conversation, text, embeddingProvider, devFlags);
     contextPack.context_images = contextImages;
     let modelReply = normalizeUnpromptedCharacterSelfIntroduction(
       await replyGenerator(text, contextPack),
@@ -1409,6 +1445,13 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     // The user-facing transaction only records a deterministic task. The
     // separate worker owns the second model call, retries and derived write.
     if (summaryGenerator) enqueueConversationSummary({ store, account, conversation });
+    // 生活事件提取（六项能力 A1，三通道之一：文字非流式）——同样只入队，
+    // 不阻塞聊天主链路；开关关闭时不产生任何任务行。
+    if (lifeEventExtractionEnabled) enqueueLifeEventExtraction({ store, account, conversation, message: userMessage });
+    // 来源落库（通道一）：本轮实际注入项随助手消息固化为引用快照。
+    if (memoryRefsEnabled && Array.isArray(contextPack.memory_refs) && contextPack.memory_refs.length > 0) {
+      recordMessageMemoryRefs({ store, account, conversation, message: assistantMessage, refs: contextPack.memory_refs });
+    }
     const usage = commitDailyChatUsage(store, reservation, { billedInputTokens: inputTokensFromProviderUsage(modelReply.usage, reservation.reservation_tokens) });
     const stream = mintStreamToken(store, account, conversation, assistantMessage);
     return created({ user_message: userMessage, assistant_message: assistantMessage, memory_candidate: candidate, provider: modelReply.provider, disclaimer: modelReply.disclaimer, usage, stream });
@@ -1423,7 +1466,7 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
 const RECENT_CONTEXT_LIMIT = 20;
 const CONFIRMED_ASSET_TOP_K = 20;
 
-async function buildContextPack(store, account, conversation, text, embeddingProvider = null) {
+async function buildContextPack(store, account, conversation, text, embeddingProvider = null, devFlags = null) {
   const character = store.characters.get(conversation.character_id);
   const messages = conversationMessages(store, conversation.conversation_id);
   const summary = validSummary([...store.conversationSummaries.values()], messages, conversation.conversation_id, account.revocation_epoch);
@@ -1431,18 +1474,46 @@ async function buildContextPack(store, account, conversation, text, embeddingPro
   const recentContext = unSummarized
     .slice(-RECENT_CONTEXT_LIMIT)
     .map(({ actor, text }) => ({ actor, text }));
-  return {
+  // 六项能力 A1 注入（只做加法）：LIFE_EVENTS/MEMORY_REFERENCES 任一开启（按
+  // 账户白名单）→ confirmed_assets 附 asset_id、新增 active_life_events（≤5 条
+  // 有效事件）与 memory_refs（本轮实际注入项快照）。两开关全关时上下文包
+  // 与既有形状逐字一致（qwen prompt 文本不变，评测基线不受影响）。
+  const lifeEventsOn = devFlags && devFlagEnabled(devFlags, 'LIFE_EVENTS', account.account_id);
+  const memoryRefsOn = devFlags && devFlagEnabled(devFlags, 'MEMORY_REFERENCES', account.account_id);
+  const enriched = lifeEventsOn || memoryRefsOn;
+  const rankedAssets = await rankAssetsForContext(store, account.account_id, conversation.character_id, text, embeddingProvider);
+  const contextPack = {
     prompt_bundle_version: 'pb_1.0_dev',
     character: character ? publicCharacter(character) : null,
     conversation_id: conversation.conversation_id,
     user_message: text,
     recent_context: recentContext,
     conversation_summary: summary ? { summary_id: summary.summary_id, source_to_id: summary.source_to_id, version: 1, text: summary.text } : null,
-    confirmed_assets: (await rankAssetsForContext(store, account.account_id, conversation.character_id, text, embeddingProvider))
-      .map(({ type, display_text, version }) => ({ type, display_text, version })),
+    confirmed_assets: rankedAssets
+      .map(({ asset_id, type, display_text, version }) => (enriched ? { asset_id, type, display_text, version } : { type, display_text, version })),
     user_preferences: publicPreferencesOrNull(store.userPreferences?.get(`${account.account_id}:${conversation.character_id}`)),
     world_state: publicWorldState(currentWorldState(store, account, character))
   };
+  if (lifeEventsOn) {
+    contextPack.active_life_events = activeLifeEventsForContext(store, account.account_id, conversation.character_id);
+  }
+  if (memoryRefsOn) {
+    // 本轮实际注入项快照（资产 + 事件），随助手消息落库供来源面板追溯。
+    contextPack.memory_refs = buildMemoryRefs(contextPack);
+  }
+  return contextPack;
+}
+
+// 注入用有效事件（方案 §4.1）：未删除的 PLANNED/IN_PROGRESS，updated_at 新→旧
+// 取前 5 条；clarification_required 的事件照常注入（含糊时间如实带出）。
+const ACTIVE_LIFE_EVENTS_TOP = 5;
+function activeLifeEventsForContext(store, accountId, characterId) {
+  return [...(store.lifeEvents?.values() ?? [])]
+    .filter((event) => event.account_id === accountId && !event.deleted_at && event.character_id === characterId)
+    .filter((event) => ['PLANNED', 'IN_PROGRESS'].includes(event.status))
+    .sort((left, right) => (left.updated_at === right.updated_at ? String(right.event_id).localeCompare(String(left.event_id)) : left.updated_at < right.updated_at ? 1 : -1))
+    .slice(0, ACTIVE_LIFE_EVENTS_TOP)
+    .map((event) => ({ event_id: event.event_id, version: event.version, domain: event.domain, event_kind: event.event_kind, title: event.title, status: event.status, scheduled_at: event.scheduled_at ?? null, time_precision: event.time_precision }));
 }
 
 // 混合召回（技术设计 7.7）+ 类型保障（沉淀方向三）：boundary/commitment 是
@@ -1585,9 +1656,13 @@ function mintStreamToken(store, account, conversation, assistantMessage) {
 // ---- 真流式（技术设计 8.4 ACCEPTED 合同 + 7.5 逐段输出门禁）----
 // POST stream:true 只受理与签发一次性令牌；模型调用、额度预留、逐段审核、
 // 终稿持久化都在 SSE 消费请求内完成。令牌未消费则无任何副作用。
-function acceptStreamingMessage(store, account, conversation, text) {
-  const userMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'USER', text, provider: null, ai_generated: false, created_at: new Date().toISOString() };
+function acceptStreamingMessage(store, account, conversation, text, lifeEventExtractionEnabled = false, memoryRefsEnabled = false) {
+  const userMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'USER', text, provider: null, ai_generated: false, created_at: new Date().toISOString(), retention_expires_at: plusDays(account.raw_interaction_retention_days || 90) };
   store.messages.set(userMessage.message_id, userMessage);
+  // 生活事件提取（三通道之二：SSE 流式）。用户消息在受理时落库，提取任务同
+  // 事务入队；此前该路径漏设 retention_expires_at，一并补齐（与 sendMessage
+  // 同口径，保留期清扫由此才能覆盖流式消息）。
+  if (lifeEventExtractionEnabled) enqueueLifeEventExtraction({ store, account, conversation, message: userMessage });
   const token = `st_${randomUUID()}`;
   const now = Date.now();
   streamTokens.set(token, { mode: 'live', accountId: account.account_id, conversationId: conversation.conversation_id, text, expiresAt: now + STREAM_TOKEN_TTL_MS, used: false });
@@ -1598,14 +1673,14 @@ function acceptStreamingMessage(store, account, conversation, text) {
   });
 }
 
-function getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null) {
+function getConversationStream(store, account, path, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null, devFlags = null) {
   const token = path.split('/')[4];
   const entry = streamTokens.get(token);
   if (!entry || entry.accountId !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '流式回放不存在');
   if (entry.used) throw apiError(409, 'STATE_TRANSITION_INVALID', '流式令牌已使用，请用消息接口读取终态');
   if (entry.expiresAt < Date.now()) { streamTokens.delete(token); throw apiError(410, 'CONTENT_REVOKED', '流式令牌已过期'); }
   entry.used = true;
-  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider);
+  if (entry.mode === 'live') return liveConversationStream(store, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider, devFlags);
   const assistantMessage = store.messages.get(entry.assistantMessageId);
   const finalText = assistantMessage ? assistantMessage.text : entry.text;
   return {
@@ -1624,7 +1699,7 @@ function getConversationStream(store, account, path, requestId, streamingReplyGe
 // 真流式执行体（技术设计 7.5）：额度预留→Qwen 流式→按句片段过本地权限门禁
 // 与 OUTPUT 审核→通过才下发 chunk；拦截/失败走 replaced/failed 终态并释放额度。
 // SSE 请求与 POST 同处账户事务模型：流式期间同账户其他请求按公平使用语义排队。
-function liveConversationStream(requestStore, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null) {
+function liveConversationStream(requestStore, account, entry, requestId, streamingReplyGenerator, replyGenerator, textModerator, embeddingProvider = null, devFlags = null) {
   const produce = async (store, emit, signal) => {
     const conversation = ownConversation(store, account.account_id, entry.conversationId);
     requireOpenConversation(conversation);
@@ -1653,7 +1728,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
     try {
       // buildContextPack 包含异步的 pgvector 召回。必须先等待完成，
       // 否则 Qwen 只会收到 Promise，角色姓名、人格与记忆都会丢失。
-      contextPack = await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
+      contextPack = await buildContextPack(store, account, conversation, entry.text, embeddingProvider, devFlags);
       const onFragment = async (fragment) => {
         const visibleFragment = normalizeUnpromptedCharacterSelfIntroduction(
           { reply_text: fragment },
@@ -1682,7 +1757,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
       // 终稿复核：片段全过不代表拼接终稿安全（跨片段可能拼出新表述）。
       if (assessModelOutputAuthority(modelReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '终稿未通过输出门禁');
       const usage = commitUsage(modelReply);
-      persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true });
+      persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true, contextPack, devFlags });
     } catch (error) {
       const intercepted = error?.code === 'QWEN_STREAM_INTERCEPTED' || error?.code === 'MODEL_CLAIMED_AUTHORITY';
       if (intercepted) {
@@ -1696,7 +1771,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
       // 非流式 Qwen 请求。不重复写入用户消息，也不把临时占位当成 AI 回复。
       if (typeof replyGenerator === 'function') {
         try {
-          const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text, embeddingProvider);
+          const fallbackContext = contextPack || await buildContextPack(store, account, conversation, entry.text, embeddingProvider, devFlags);
           const fallbackReply = normalizeUnpromptedCharacterSelfIntroduction(
             await replyGenerator(entry.text, fallbackContext),
             entry.text,
@@ -1709,7 +1784,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
           }
           emit('message.replaced', { request_id: requestId, reason: 'STREAM_PROVIDER_FALLBACK' });
           const usage = commitUsage(fallbackReply);
-          persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true });
+          persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true, contextPack: fallbackContext, devFlags });
           return;
         } catch {
           // 降级也失败时由下方统一释放额度并返回可重试终态。
@@ -1732,7 +1807,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
 
 // 流式终态统一持久化：助手消息（含世界状态快照）与可选候选；拦截/安全路径
 // 不创建候选。最后发 message.completed（断线后客户端以 GET /messages/{id} 恢复终态）。
-function persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate }) {
+function persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate, contextPack = null, devFlags = null }) {
   const createdAt = new Date().toISOString();
   const contextCharacter = store.characters.get(conversation.character_id);
   const worldState = contextCharacter ? publicWorldState(currentWorldState(store, account, contextCharacter)) : null;
@@ -1743,6 +1818,11 @@ function persistStreamingFinal(store, account, conversation, modelReply, { assis
     world_state_version: worldState?.state_version ?? null, created_at: createdAt
   };
   store.messages.set(assistantMessage.message_id, assistantMessage);
+  // 来源落库（通道二：SSE）：终稿与注入快照同事务固化；安全替换路径
+  //（candidate:null）不带 contextPack——它不是模型正常产物，不记引用。
+  if (candidate && contextPack && devFlags && devFlagEnabled(devFlags, 'MEMORY_REFERENCES', account.account_id) && Array.isArray(contextPack.memory_refs) && contextPack.memory_refs.length > 0) {
+    recordMessageMemoryRefs({ store, account, conversation, message: assistantMessage, refs: contextPack.memory_refs });
+  }
   let memoryCandidate = null;
   if (candidate && modelReply.memory_candidate) {
     memoryCandidate = {
@@ -1813,12 +1893,11 @@ async function withCallApiErrors(operation) {
 }
 
 // 回合执行体依赖：provider 注入 + 路由层既有的域工具（engine 不反向依赖 app.js）。
-function callEngineDeps(callProviders, store) {
+function callEngineDeps(callProviders, store, devFlags = null) {
   return {
     ...callProviders,
     audioRegistry: callAudioRegistry,
     mediaEntitlementService: store.mediaEntitlementService || new MediaEntitlementService({ store }),
-    buildContextPack,
     ownConversation,
     requireOpenConversation,
     authorize,
@@ -1828,7 +1907,18 @@ function callEngineDeps(callProviders, store) {
     publicWorldState,
     estimateAudioSeconds,
     estimateTtsSeconds,
-    resolvedTtsVoiceProfile
+    resolvedTtsVoiceProfile,
+    // 生活事件提取（三通道之三：通话回合）。开关经 deps 注入，engine 保持
+    // 不感知 app.js 的开发开关机制。
+    enqueueLifeEventExtraction: devFlags ? ({ store: scopedStore, account, conversation, message }) => {
+      if (devFlagEnabled(devFlags, 'LIFE_EVENTS', account.account_id)) enqueueLifeEventExtraction({ store: scopedStore, account, conversation, message });
+    } : null,
+    // 来源落库（通道三）与事件注入：contextPack 组装带 devFlags（A1 增补只在
+    // 开关开启时出现，关闭时与既有形状逐字一致）。
+    buildContextPack: (scopedStore, account, conversation, text, embeddingProvider) => buildContextPack(scopedStore, account, conversation, text, embeddingProvider, devFlags),
+    recordMessageMemoryRefs: devFlags ? ({ store: scopedStore, account, conversation, message, refs }) => {
+      if (devFlagEnabled(devFlags, 'MEMORY_REFERENCES', account.account_id)) recordMessageMemoryRefs({ store: scopedStore, account, conversation, message, refs });
+    } : null
   };
 }
 
@@ -1918,7 +2008,7 @@ function appendVoiceCallAudioChunk(accountId, path, body) {
   return ok(callAudioRegistry.appendChunk(turnId, { chunkIndex, bytes }));
 }
 
-function getCallTurnStream(store, account, path, requestId, callProviders) {
+function getCallTurnStream(store, account, path, requestId, callProviders, devFlags = null) {
   const token = path.split('/')[4];
   const entry = callTurnTokens.get(token);
   if (!entry || entry.accountId !== account.account_id) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话流不存在');
@@ -1946,7 +2036,7 @@ function getCallTurnStream(store, account, path, requestId, callProviders) {
           const scopedAccount = scopedStore.account(account.account_id) || account;
           const scopedCall = scopedStore.callSessions.get(call.call_id);
           if (!scopedCall) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话不存在');
-          const deps = callEngineDeps(callProviders, scopedStore);
+          const deps = callEngineDeps(callProviders, scopedStore, devFlags);
           if (!turn) return executeGreeting(deps, { store: scopedStore, account: scopedAccount, call: scopedCall, emit, signal });
           const scopedTurn = scopedStore.callTurns.get(turn.turn_id);
           if (!scopedTurn) throw apiError(404, 'RESOURCE_NOT_FOUND', '通话回合不存在');
@@ -2798,6 +2888,27 @@ function resolveCandidate(store, account, path, body) {
     candidate.state = 'CONFIRMED'; candidate.version += 1;
     return created({ candidate, persona_version: result.body.persona_version, character: result.body.character, note: replacedOldest ? `示例行为已达 ${SKILL_EXAMPLE_CAP} 条上限，最早的一条已被替换。` : undefined });
   }
+  if (candidate.type === 'life_event') {
+    // 生活事件候选（六项能力 A1）：确认即固化受控字段 + 建资产 + 写事件投影
+    // （life-event-service 是投影唯一写者）。confirm-edited 必须提交完整的
+    // body.life_event 字段集——不允许只改展示文本而留下旧时间。
+    let editedFields = null;
+    if (action === 'confirm-edited') {
+      if (!body?.life_event || typeof body.life_event !== 'object' || Array.isArray(body.life_event)) {
+        throw apiError(400, 'VALIDATION_ERROR', 'confirm-edited 需要完整的 life_event 字段集', { missing_fields: ['life_event'] });
+      }
+      editedFields = body.life_event;
+    }
+    const confirmed = confirmLifeEventFromCandidate({ store, account, candidate, editedFields, now: new Date() });
+    candidate.state = editedFields === null ? 'CONFIRMED' : 'CONFIRMED_EDITED';
+    if (editedFields !== null) {
+      candidate.display_text = confirmed.asset.display_text;
+      candidate.normalized_value = confirmed.asset.value;
+    }
+    candidate.version += 1;
+    // 确认生活事件不默认创建提醒（主动关心属 A2 跟进调度，须另行显式开启）。
+    return created({ candidate, asset: confirmed.asset, event: confirmed.event });
+  }
   if (action === 'confirm-edited') {
     candidate.display_text = requiredText(body.display_text, 'display_text');
     candidate.normalized_value = body.normalized_value || { text: candidate.display_text };
@@ -2859,19 +2970,31 @@ function reviseAsset(store, account, path, body) {
   return ok({ asset, revision });
 }
 
-// 时间线：当前只包含仍有效的确认资产（PRD 3.3“确认事件、纪念日、约定”中
-// 纪念日/约定随主动事件接入）；被替代与已删除版本不进入在线时间线。
+// 时间线：仍有效的确认资产 + 生活事件投影（六项能力 A1：filter=event 纳入
+// life_events，读当前投影状态）；被替代与已删除版本不进入在线时间线。
 function timelineEntries(store, accountId, filter) {
   const validFilters = ['all', 'memory', 'commitment', 'boundary', 'event'];
   if (filter && !validFilters.includes(filter)) throw apiError(400, 'VALIDATION_ERROR', `filter 只能是 ${validFilters.join('/')}`);
-  return activeAssets(store, accountId)
+  const assetEntries = activeAssets(store, accountId)
     .filter((asset) => !filter || filter === 'all' || filter === typeToFilter(asset.type))
-    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
     .map((asset) => ({
       entry_type: 'CONFIRMED_ASSET', asset_id: asset.asset_id, character_id: asset.character_id,
       type: asset.type, filter_group: typeToFilter(asset.type), display_text: asset.display_text,
       version: asset.version, supersedes_asset_id: asset.supersedes_asset_id ?? null, created_at: asset.created_at
+    }))
+    .filter((entry) => entry.type !== 'life_event'); // 事件投影已单列，避免双记
+  const lifeEventEntries = [...(store.lifeEvents?.values() ?? [])]
+    .filter((event) => event.account_id === accountId && !event.deleted_at)
+    .filter((event) => !filter || filter === 'all' || filter === 'event')
+    .map((event) => ({
+      entry_type: 'LIFE_EVENT', event_id: event.event_id, character_id: event.character_id,
+      domain: event.domain, event_kind: event.event_kind, filter_group: 'event',
+      display_text: lifeEventDisplayText(event), status: event.status,
+      scheduled_at: event.scheduled_at ?? null, time_precision: event.time_precision,
+      version: event.version, created_at: event.created_at
     }));
+  return [...assetEntries, ...lifeEventEntries]
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
 }
 
 function typeToFilter(type) {
@@ -3465,6 +3588,33 @@ function ownAssistantMessage(store, accountId, id) { const item = store.messages
 function ownMediaAsset(store, accountId, id) { const item = store.mediaAssets.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '媒体资源不存在'); return item; }
 function ownImageJob(store, accountId, id) { const item = store.mediaJobs.get(id); if (!item || item.account_id !== accountId || item.type !== 'IMAGE_GENERATION') throw apiError(404, 'RESOURCE_NOT_FOUND', '图片任务不存在'); return item; }
 function ownCandidate(store, accountId, id) { const item = store.candidates.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '候选记忆不存在'); return item; }
+// 生活事件归属校验（六项能力 A1）：不存在/跨账户/已删除统一 404，不区分原因。
+function ownLifeEvent(store, accountId, id) { const item = findLifeEvent(store, accountId, id); if (!item) throw apiError(404, 'RESOURCE_NOT_FOUND', '生活事件不存在'); return item; }
+
+// PATCH /life-events/{id}：修订旧资产转 SUPERSEDED、投影 version+1。409 冲突
+// 响应回传当前值，客户端保留草稿重试。
+function reviseLifeEventRoute(store, account, path, body) {
+  authorize(account, 'WRITE_MEMORY', store);
+  const event = ownLifeEvent(store, account.account_id, path.split('/')[4]);
+  // expected_version 是乐观锁控制字段，不进字段白名单校验。
+  const { expected_version: expectedVersion, ...patch } = body ?? {};
+  try {
+    return ok(reviseLifeEvent({ store, account, event, patch, expectedVersion, now: new Date() }));
+  } catch (error) {
+    if (error?.status === 409 && error.code === 'VERSION_CONFLICT') {
+      error.details = { ...(error.details ?? {}), current_event: publicLifeEvent(event) };
+    }
+    throw error;
+  }
+}
+
+// DELETE /life-events/{id}：软删资产 + 投影即刻不可见 + 删除账本/回执（202）。
+function deleteLifeEventRoute(store, account, path) {
+  authorize(account, 'WRITE_MEMORY', store);
+  const event = ownLifeEvent(store, account.account_id, path.split('/')[4]);
+  const result = deleteLifeEvent({ store, account, event, now: new Date() });
+  return { status: 202, body: result };
+}
 function ownAsset(store, accountId, id) { const item = store.assets.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '关系资产不存在'); return item; }
 function ownCandidates(store, accountId) { return [...store.candidates.values()].filter((item) => item.account_id === accountId && item.state === 'CANDIDATE' && new Date(item.expires_at).getTime() > Date.now()); }
 function activeAssets(store, accountId) { return [...store.assets.values()].filter((item) => item.account_id === accountId && item.state === 'ACTIVE'); }

@@ -351,3 +351,34 @@ test('开场问候：世界情绪选模板、同一音频事件管线、TTS job 
   assert.equal(ttsJobs[0].source_message_id, greetingMessage.message_id);
   assert.equal(ttsJobs[0].state, 'COMPLETED');
 });
+
+test('生活事件提取（六项能力 A1 通话通道）：用户消息落库后经 deps 入队，未注入时静默跳过', async () => {
+  const { enqueueLifeEventExtraction } = require('../src/domain/life-event-extraction-worker');
+  const store = fixtureStore();
+  const service = entitlementServiceFor(store);
+  const calls = [];
+  const deps = buildDeps({ mediaEntitlementService: service });
+  deps.enqueueLifeEventExtraction = ({ store: scopedStore, account, conversation, message }) => {
+    // 与 app.js callEngineDeps 注入的 hook 同构：真正入队交给域函数。
+    calls.push({ accountId: account.account_id, conversationId: conversation.conversation_id, messageId: message.message_id });
+    enqueueLifeEventExtraction({ store: scopedStore, account, conversation, message });
+  };
+  const { call, turn } = finalizedTurn(store, deps);
+  const { emit } = collect();
+  await executeCallTurn(deps, { store, account: store.account(ACCOUNT_ID), call, turn, emit, signal: null });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].accountId, ACCOUNT_ID);
+  assert.equal(calls[0].conversationId, 'conv_000001');
+  assert.equal([...store.lifeEventExtractionJobs.values()].length, 1);
+  const job = [...store.lifeEventExtractionJobs.values()][0];
+  assert.equal(job.message_id, calls[0].messageId);
+  assert.equal(job.character_id, 'chr_000001');
+
+  // 未注入（开关关闭/旧调用方）：回合照常完成，不产生任务。
+  const store2 = fixtureStore();
+  const service2 = entitlementServiceFor(store2);
+  const deps2 = buildDeps({ mediaEntitlementService: service2 });
+  const { call: call2, turn: turn2 } = finalizedTurn(store2, deps2);
+  await executeCallTurn(deps2, { store: store2, account: store2.account(ACCOUNT_ID), call: call2, turn: turn2, emit: collect().emit, signal: null });
+  assert.equal([...store2.lifeEventExtractionJobs.values()].length, 0);
+});

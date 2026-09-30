@@ -879,6 +879,7 @@ paths:
   /api/v1/memory-candidates/{candidateId}/confirm:
     post:
       summary: 用户原样确认候选并创建 ACTIVE 资产
+      description: life_event 类型候选确认时在同一事务内创建资产与 life_events 事件投影，响应返回 candidate/asset/event；不默认创建任何提醒（事件级跟进许可是 A2 范围）。六项能力开发开关 LIFE_EVENTS 关闭时 life_event 走通用资产确认，不建事件投影。
       parameters: [ { $ref: '#/components/parameters/CandidateId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody: { $ref: '#/components/requestBodies/ExpectedVersion' }
       responses:
@@ -889,6 +890,7 @@ paths:
   /api/v1/memory-candidates/{candidateId}/confirm-edited:
     post:
       summary: 用户编辑确认候选并创建 ACTIVE 资产
+      description: life_event 类型必须提交完整受控字段 life_event 对象（不允许只改 display_text 留下旧时间）；缺字段返回 400 VALIDATION_ERROR 并在 details.missing_fields 列出。
       parameters: [ { $ref: '#/components/parameters/CandidateId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
       requestBody:
         required: true
@@ -901,11 +903,85 @@ paths:
                 expected_version: { type: integer, minimum: 1 }
                 display_text: { type: string, minLength: 1 }
                 normalized_value: { type: object, additionalProperties: true }
+                life_event:
+                  type: object
+                  required: [domain, event_kind, title]
+                  properties:
+                    domain: { type: string, enum: [REAL_LIFE, FICTIONAL_SHARED] }
+                    event_kind: { type: string, enum: [INTERVIEW, READING, CREATION, OTHER] }
+                    title: { type: string, minLength: 1, maxLength: 80 }
+                    scheduled_at: { type: string, format: date-time, nullable: true }
+                    timezone: { type: string, nullable: true }
+                    needs_time_confirmation: { type: boolean }
+                    status: { type: string, enum: [PLANNED, IN_PROGRESS, COMPLETED, CANCELLED] }
       responses:
         '201': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v1/life-events:
+    get:
+      summary: 分页获取当前角色的生活事件
+      description: 默认 20 条、上限 50 条；隐藏已删除事件。六项能力开发开关 LIFE_EVENTS 关闭时按路由不存在处理（404 ROUTE_NOT_FOUND）。
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+  /api/v1/life-events/{eventId}:
+    get:
+      summary: 获取事件当前版本、语义摘要及可用操作
+      parameters: [ { $ref: '#/components/parameters/EventId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      summary: 修订事件的受控字段并联动资产/投影/任务
+      description: 修订走旧资产 SUPERSEDED + 新资产生效 + 事件投影 version+1；仅改日期不自动修改完成状态；domain 变更要求用户确认（clarification_required）。expected_version 不匹配返回 409 并回传当前值供客户端合并草稿。
+      parameters: [ { $ref: '#/components/parameters/EventId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version]
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                title: { type: string, minLength: 1, maxLength: 80 }
+                event_kind: { type: string, enum: [INTERVIEW, READING, CREATION, OTHER] }
+                domain: { type: string, enum: [REAL_LIFE, FICTIONAL_SHARED] }
+                scheduled_at: { type: string, format: date-time, nullable: true }
+                timezone: { type: string, nullable: true }
+                status: { type: string, enum: [PLANNED, IN_PROGRESS, COMPLETED, CANCELLED] }
+                clarification_required: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      summary: 在线失效事件并登记派生清理
+      description: 同步下线资产、事件投影、关联引用与派生任务，返回 202 与删除回执 ID；清理进度由删除任务回执查询。不清除用户确认历史之外的内容，也不从备份物理抹除（合同同既有资产删除）。
+      parameters: [ { $ref: '#/components/parameters/EventId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '202': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/messages/{messageId}/memory-references:
+    get:
+      summary: 获取该助手消息本轮实际参考的记忆来源
+      description: 仅返回本轮上下文快照内、授权且当前有效来源的摘要；旧版本/已删除/跨范围引用只返回不可用标记，不提供正文。无引用的消息返回空列表。开关 MEMORY_REFERENCES 关闭时按路由不存在处理。
+      parameters: [ { $ref: '#/components/parameters/MessageId' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
   /api/v1/memory-candidates/{candidateId}/reject:
     post:
       summary: 用户拒绝候选；拒绝项不能进入资产或召回
@@ -1341,6 +1417,7 @@ components:
     JobId: { name: jobId, in: path, required: true, schema: { type: string } }
     CandidateId: { name: candidateId, in: path, required: true, schema: { type: string } }
     AssetId: { name: assetId, in: path, required: true, schema: { type: string } }
+    EventId: { name: eventId, in: path, required: true, schema: { type: string } }
     DeletionJobId: { name: deletionJobId, in: path, required: true, schema: { type: string } }
   requestBodies:
     ExpectedVersion:

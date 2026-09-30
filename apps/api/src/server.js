@@ -3,7 +3,7 @@
 const { createApp, callAudioRegistry, reapExpiredVoiceCalls } = require('./app');
 const { assertRuntimeConfiguration, assertLocalSyntheticRuntimeAllowed } = require('./production/startup');
 const { createPersistenceFromEnvironment } = require('./persistence/composition');
-const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
+const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
 const { createTencentImageModeratorFromEnvironment, createTencentTextModeratorFromEnvironment } = require('./providers/tencent-moderation-adapter');
 const { createTencentAsrTranscriberFromEnvironment } = require('./providers/tencent-asr-adapter');
 const { createTencentTtsGeneratorFromEnvironment } = require('./providers/tencent-tts-adapter');
@@ -16,6 +16,7 @@ const { assertImagePipelineConfiguration } = require('./production/image-pipelin
 const { MediaEntitlementService } = require('./domain/media-entitlement-service');
 const { startRetentionWorker } = require('./domain/retention-worker');
 const { startConversationSummaryWorker } = require('./domain/conversation-summary-worker');
+const { startLifeEventExtractionWorker } = require('./domain/life-event-extraction-worker');
 const { startAssetEmbeddingWorker } = require('./domain/asset-embedding-worker');
 const { startAccountDeletionCleanupWorker } = require('./domain/deletion-orchestration');
 const { DEV_FLAG_NAMES, parseDevFlags } = require('./development/dev-flags');
@@ -59,11 +60,18 @@ createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, em
   console.log(`持久化：${process.env.QIYU_PERSISTENCE || 'memory'}；模型：${process.env.QIYU_LLM_PROVIDER === 'qwen' ? 'qwen（本地开发接线）' : 'mock'}。`);
   const enabledFlags = DEV_FLAG_NAMES.filter((name) => devFlags.enabled[name]);
   console.log(`六项能力开发开关：${enabledFlags.length ? enabledFlags.join('、') : '全部关闭'}${devFlags.accounts && devFlags.accounts.size ? `（仅白名单账户 ${[...devFlags.accounts].join('、')}）` : ''}。`);
+  console.log(`生活事件提取：${devFlags.enabled.LIFE_EVENTS ? (lifeEventExtractor ? `已启动（${lifeEventExtractor.promptVersion}）` : '开关开启但未配置提取模型——任务将堆积等待 Worker') : '未开启'}。`);
 });
 
 // 保留期主动清理：仅进程内内存存储可运行；Postgres 请求作用域存储需独立 Worker 部署。
 if (process.env.QIYU_PERSISTENCE !== 'postgres') startRetentionWorker(store);
 if (process.env.QIYU_PERSISTENCE !== 'postgres') startConversationSummaryWorker(store, summaryGenerator);
+// 生活事件提取 Worker（六项能力 A1）：仅内存模式 + LIFE_EVENTS 开关开启 +
+// 已配置提取模型时启动；PG 模式由 run-workers 在账户事务内 drain。
+const lifeEventExtractor = devFlags.enabled.LIFE_EVENTS ? createQwenLifeEventExtractor(process.env) : null;
+if (process.env.QIYU_PERSISTENCE !== 'postgres' && lifeEventExtractor) {
+  startLifeEventExtractionWorker(store, lifeEventExtractor);
+}
 // 资产向量 Worker：仅进程内内存存储可运行；Postgres 模式须独立 Worker 部署。
 // Qwen 配置时用供应商语义向量（索引与查询同 model_version）；否则确定性开发嵌入。
 if (process.env.QIYU_PERSISTENCE !== 'postgres') {
