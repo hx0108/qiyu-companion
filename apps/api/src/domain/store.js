@@ -21,6 +21,10 @@ class DevelopmentStore {
     this.followupGrants = new Map();
     this.followupJobs = new Map();
     this.proactiveDailySlots = new Map();
+    this.companionPlans = new Map();
+    this.companionPlanSteps = new Map();
+    this.artifactCards = new Map();
+    this.actionRequests = new Map();
     this.mediaJobs = new Map();
     this.mediaAssets = new Map();
     this.callSessions = new Map();

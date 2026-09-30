@@ -95,6 +95,25 @@ function revokeFollowup({ store, accountId, eventId, now = new Date() } = {}) {
   return { grants_revoked: grantsRevoked, jobs_cancelled: jobsCancelled };
 }
 
+// A3 计划联动：按 grant_id 精确撤销一条许可（含其在途任务）。计划暂停/取消
+// 只撤 linked 的那条——同一事件上可能还有用户独立开启的提醒，不归计划管，
+// 禁止用 byEvent 版本（会把用户自己的许可一起撤掉）。
+function revokeFollowupGrantById({ store, accountId, grantId, now = new Date() } = {}) {
+  const grant = store.followupGrants.get(grantId);
+  if (!grant || grant.account_id !== accountId || grant.state !== 'ACTIVE') {
+    return { grants_revoked: 0, jobs_cancelled: 0 };
+  }
+  store.followupGrants.set(grantId, Object.freeze({ ...grant, state: 'REVOKED', revoked_at: now.toISOString(), version: grant.version + 1 }));
+  let jobsCancelled = 0;
+  for (const job of store.followupJobs.values()) {
+    if (job.grant_id === grantId && FOLLOWUP_JOB_IN_FLIGHT_STATES.includes(job.state)) {
+      store.followupJobs.set(job.job_id, Object.freeze({ ...job, state: 'CANCELLED', lease_owner: null, lease_expires_at: null, last_error: 'plan paused or cancelled; linked grant revoked' }));
+      jobsCancelled += 1;
+    }
+  }
+  return { grants_revoked: 1, jobs_cancelled: jobsCancelled };
+}
+
 // 事件维度状态（GET followup 与前端开关卡）。
 function listFollowupStatus({ store, accountId, eventId } = {}) {
   const grants = [...store.followupGrants.values()]
@@ -231,7 +250,7 @@ function publicFollowupJob(job) {
 
 module.exports = {
   FOLLOWUP_JOB_IN_FLIGHT_STATES,
-  computeLocalDateInZone, grantFollowup, revokeFollowup, listFollowupStatus,
+  computeLocalDateInZone, grantFollowup, revokeFollowup, revokeFollowupGrantById, listFollowupStatus,
   invalidateFollowupsOnRevision, revokeFollowupsOnDeletion,
   evaluateFollowupPublish, claimDailySlot, transitionFollowupJob,
   publicFollowupGrant, publicFollowupJob

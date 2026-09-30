@@ -571,6 +571,48 @@ function createQwenFollowupComposer(environment = process.env, dependencies = {}
   return composer;
 }
 
+// 计划提议器（六项能力 A3）：模型只在受控 schema 内提出 1-5 步草案建议，
+// 类型/时长/依赖由代码限制（plan-schema.validatePlanProposalOutput）；失败/
+// 未配置/输出不合法由调用方回退固定三步草案。只听模式不会调用本提议器。
+const PLAN_PROPOSAL_PROMPT_VERSION = 'plan-proposal.v1';
+
+function createQwenPlanProposer(environment = process.env, dependencies = {}) {
+  if (environment.QIYU_LLM_PROVIDER !== 'qwen') return null;
+  const adapter = new QwenAdapter({
+    apiKey: environment.QWEN_API_KEY || environment.DASHSCOPE_API_KEY,
+    baseUrl: environment.QWEN_BASE_URL || environment.DASHSCOPE_BASE_URL || DEFAULT_BASE_URL,
+    model: environment.QWEN_MODEL || DEFAULT_MODEL,
+    fetchImpl: dependencies.fetchImpl || globalThis.fetch,
+    timeoutMs: positiveTimeout(environment.QWEN_PLAN_TIMEOUT_MS || 12000)
+  });
+  const proposer = async ({ supportMode, event, character, availableMinutes } = {}) => {
+    const modeText = { PRACTICE_TOGETHER: '一起陪练', BREAK_DOWN_STEPS: '拆成小步骤' }[supportMode] ?? '一起准备';
+    const result = await adapter.generate({
+      text: [
+        `你是 AI 陪伴角色${character?.name ? `「${character.name}」` : ''}，帮用户把一件事拆成几个可完成的小步骤。`,
+        event ? `用户确认过的事件：${event.title}${event.scheduled_at ? `（时间 ${event.scheduled_at}）` : ''}` : '用户想准备一次面试，未绑定具体事件。',
+        `支持方式：${modeText}。${Number.isInteger(availableMinutes) ? `用户可用时间约 ${availableMinutes} 分钟。` : ''}`,
+        '请提出 1-5 个步骤建议：每步一个小而具体的行动，温和不施压，不得出现 HTML、链接或脚本，不得包含医疗、法律、财务建议。',
+        '只输出一个 JSON 对象：{"title":"计划标题","steps":[{"title":"步骤","estimated_minutes":30}]}'
+      ].join('\n'),
+      context: { plan_proposal: true, response_schema: true }
+    });
+    let parsed;
+    try { parsed = JSON.parse(extractJsonObject(result.text)); } catch {
+      throw new QwenProviderError('QWEN_PLAN_PROPOSAL_INVALID', 'Qwen 计划提议输出格式无效');
+    }
+    return {
+      title: typeof parsed?.title === 'string' ? parsed.title : '',
+      steps: Array.isArray(parsed?.steps) ? parsed.steps : [],
+      provider: 'qwen', modelVersion: result.modelVersion, usage: result.usage
+    };
+  };
+  proposer.provider = 'qwen';
+  proposer.modelVersion = adapter.model;
+  proposer.promptVersion = PLAN_PROPOSAL_PROMPT_VERSION;
+  return proposer;
+}
+
 // 语义 Embedding 工厂（P1-4 记忆检索质量）：资产索引侧与召回查询侧共用同一
 // provider，保证向量同源同版本（不同 model_version 的向量不得混算余弦）。
 // 兼容 DashScope OpenAI-compatible 的 /embeddings 端点；dimensions 参数仅
@@ -626,4 +668,4 @@ function createQwenEmbeddingProvider(environment = process.env, dependencies = {
   return provider;
 }
 
-module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, CONVERSATION_PROMPT_VERSION, LIFE_EVENT_EXTRACTION_PROMPT_VERSION, FOLLOWUP_COMPOSITION_PROMPT_VERSION, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenFollowupComposer, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator, fallbackCompanionReply, lifeEventExtractionPrompt, parseCompanionReply, parseEmotionJudgeReply, summaryPrompt };
+module.exports = { DEFAULT_BASE_URL, DEFAULT_MODEL, CONVERSATION_PROMPT_VERSION, LIFE_EVENT_EXTRACTION_PROMPT_VERSION, FOLLOWUP_COMPOSITION_PROMPT_VERSION, PLAN_PROPOSAL_PROMPT_VERSION, QwenAdapter, QwenProviderError, buildMessages, createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenFollowupComposer, createQwenPlanProposer, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator, fallbackCompanionReply, lifeEventExtractionPrompt, parseCompanionReply, parseEmotionJudgeReply, summaryPrompt };

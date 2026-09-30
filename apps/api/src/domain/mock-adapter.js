@@ -39,4 +39,30 @@ function mockLifeEventExtractor({ text } = {}) {
   return { candidates: candidates.slice(0, 3), provider: 'mock-extractor', modelVersion: 'deterministic-extractor-v1', usage: null };
 }
 
-module.exports = { generateReply, mockLifeEventExtractor };
+// 确定性计划提议器（六项能力 A3）：按事件类型产出固定三步草案，供本地开发
+// 与浏览器 E2E 在不调真实模型的情况下走完「提议→编辑→接受→暂停/恢复→完成」
+// 旅程。不是真实模型能力——只是测试替身。
+function mockPlanProposer({ event, supportMode } = {}) {
+  if (supportMode === 'LISTEN_ONLY') {
+    return { title: event ? `面试前，一起准备「${event.title}」` : '面试前，一起准备一点点', steps: [], provider: 'mock-proposer', modelVersion: 'deterministic-proposer-v1', usage: null };
+  }
+  const base = event ? `面试前，一起准备「${event.title}」` : '面试前，一起准备一点点';
+  if (event?.event_kind === 'INTERVIEW' || /面试/.test(String(event?.title ?? ''))) {
+    return {
+      title: base, steps: [
+        { title: '练一次自我介绍（对着手机录 3 分钟）', estimated_minutes: 20 },
+        { title: '梳理这段经历里最想讲的两个故事', estimated_minutes: 30 },
+        { title: '准备 3 个想问对方的问题', estimated_minutes: 15 }
+      ], provider: 'mock-proposer', modelVersion: 'deterministic-proposer-v1', usage: null
+    };
+  }
+  return {
+    title: base, steps: [
+      { title: '把要做的事列成一张小清单', estimated_minutes: 15 },
+      { title: '先完成其中最小的一件', estimated_minutes: 25 },
+      { title: '完成后给自己一点肯定', estimated_minutes: 10 }
+    ], provider: 'mock-proposer', modelVersion: 'deterministic-proposer-v1', usage: null
+  };
+}
+
+module.exports = { generateReply, mockLifeEventExtractor, mockPlanProposer };
