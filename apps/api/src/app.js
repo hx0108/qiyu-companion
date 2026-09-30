@@ -84,6 +84,7 @@ const STATIC_FILES = new Map([
   ['/encrypted-session.js', { file: path.resolve(__dirname, '../../web/encrypted-session.js'), type: 'text/javascript; charset=utf-8' }],
   ['/media-input.js', { file: path.resolve(__dirname, '../../web/media-input.js'), type: 'text/javascript; charset=utf-8' }],
   ['/call-client.js', { file: path.resolve(__dirname, '../../web/call-client.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/memory-panel.js', { file: path.resolve(__dirname, '../../web/memory-panel.js'), type: 'text/javascript; charset=utf-8' }],
   ['/manifest.webmanifest', { file: path.resolve(__dirname, '../../web/manifest.webmanifest'), type: 'application/manifest+json; charset=utf-8' }],
   ['/service-worker.js', { file: path.resolve(__dirname, '../../web/service-worker.js'), type: 'text/javascript; charset=utf-8' }],
   ['/styles.css', { file: path.resolve(__dirname, '../../web/styles.css'), type: 'text/css; charset=utf-8' }],
@@ -2989,7 +2990,7 @@ function timelineEntries(store, accountId, filter) {
     .map((event) => ({
       entry_type: 'LIFE_EVENT', event_id: event.event_id, character_id: event.character_id,
       domain: event.domain, event_kind: event.event_kind, filter_group: 'event',
-      display_text: lifeEventDisplayText(event), status: event.status,
+      display_text: lifeEventDisplayText(event), title: event.title, status: event.status,
       scheduled_at: event.scheduled_at ?? null, time_precision: event.time_precision,
       version: event.version, created_at: event.created_at
     }));

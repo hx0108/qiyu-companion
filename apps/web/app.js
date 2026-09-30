@@ -1,6 +1,7 @@
 import { clearEncryptedSession, loadEncryptedSession, saveEncryptedSession } from './encrypted-session.js';
 import { MAX_RECORDING_MS, MIN_HOLD_MS, createPcmWavRecorder, recordingBlobToWav, selectRecordingMimeType, shouldCancelHold } from './media-input.js';
 import { CallSessionClient } from './call-client.js';
+import { lifeEventCandidateSheet, collectLifeEventCandidateFields, memoryReferenceSheet, lifeEventTimelineCard, lifeEventReviseForm, fromLocalInputValue } from './memory-panel.js';
 
 const API_BASE = "/api/v1";
 const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
@@ -37,6 +38,10 @@ const state = {
   theme: "day",
   selectedCandidate: null,
   confirmEdit: "",
+  memoryRefsPanel: null,
+  revisingEvent: null,
+  eventDraft: null,
+  eventDeletionReceipt: null,
   asrFile: null,
   asrJob: null,
   asrEdit: "",
@@ -1698,7 +1703,10 @@ async function resolveCandidate(kind) {
   if (kind === "confirm") body = { expected_version: expectedVersion };
   if (kind === "confirm-edited") {
     path = `/memory-candidates/${encodeURIComponent(id)}/confirm-edited`;
-    body = { expected_version: expectedVersion, display_text: editedText };
+    // 生活事件：提交完整受控字段集（不允许只改展示文本留旧时间）。
+    body = candidate.type === "life_event"
+      ? { expected_version: expectedVersion, life_event: collectLifeEventCandidateFields() }
+      : { expected_version: expectedVersion, display_text: editedText };
   }
   setBusy(true);
   try {
@@ -1710,6 +1718,7 @@ async function resolveCandidate(kind) {
     }
     state.selectedCandidate = null;
     state.confirmEdit = "";
+    state.eventDraft = null;
     await refreshMemoryAndAssets();
   } catch (error) {
     setToast(serverMessage(error));
@@ -1870,7 +1879,10 @@ function messageMarkup(message, latestAssistantId = null) {
     return url ? `<div><img class="context-image-thumb" src="${escapeHtml(url)}" alt="用户上传并审核通过的聊天图片">${isUser ? `<button type="button" class="voice-delete" data-action="delete-context-image" data-asset-id="${escapeHtml(attachment.asset_id)}">删除图片</button>` : ""}</div>` : `<div class="context-image-status">图片附件 · 私密加载中</div>`;
   }).join("");
   const praiseButton = !isUser && id && id === latestAssistantId ? `<button type="button" class="praise-btn" data-action="praise-message" data-message-id="${escapeHtml(id)}" aria-label="这句回应很好，沉淀为行为模式" title="这句回应很好，沉淀为行为模式" ${state.busy ? "disabled" : ""}>${prototypeIcon("spark", 14)}</button>` : "";
-  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${bubbleHtml}</div>${praiseButton}${voiceRow}</div></article>`;
+  // 来源透明（六项能力 A1）：每条 AI 回复都可查「本轮参考了哪些记忆/事件」；
+  // 点击才请求，无引用时服务端 404，如实提示。
+  const refsButton = !isUser && id ? `<button type="button" class="memory-refs-trigger" data-action="open-memory-refs" data-message-id="${escapeHtml(id)}" ${state.busy ? "disabled" : ""}>本轮参考</button>` : "";
+  return `<article class="message ${isUser ? "me" : "ai"}"><div class="bubble">${attachments}<div class="message-copy">${bubbleHtml}</div>${refsButton}${praiseButton}${voiceRow}</div></article>`;
 }
 
 async function openWorldState() {
@@ -2136,7 +2148,11 @@ function renderCandidate() {
   const conflicts = candidate.conflicts_with ?? [];
   const conflictMarkup = conflicts.length > 0 ? `<div class="rights">${prototypeIcon("shield", 17)}<span>与已有关系资产可能冲突。确认不会自动覆盖旧内容，请在时间线中单独修订。</span></div>` : "";
   const characterName = state.character?.name ?? "当前角色";
-  return `<section class="screen qiyu-prototype app-screen paper"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · 关系记忆</small></div></div><button class="icon-btn soft" data-action="back-chat" aria-label="关闭记忆确认">${prototypeIcon("x", 20)}</button></header><div class="chat-scroll"><div class="date-rule">关系资产需由你确认</div><div class="scene-state"><span class="glyph">${prototypeIcon("archive", 16)}</span><span><b>候选记忆等待确认</b><small>不会自动写入长期关系资产</small></span></div></div><div class="sheet-layer"><section class="sheet" role="dialog" aria-modal="true" aria-label="关系记忆确认"><div class="grabber"></div><div class="sheet-head"><div><span class="aigc">${escapeHtml({ SKILL: "行为沉淀", development_note: "记忆候选", PREFERENCE: "偏好" }[candidate.type] ?? "服务端候选")}</span><h3>关系记忆</h3><p>候选内容不会自动成为长期事实</p></div><button class="close" data-action="back-chat" aria-label="关闭">${prototypeIcon("x", 18)}</button></div><blockquote class="memory-quote">${escapeHtml(text)}</blockquote>${conflictMarkup}<label class="field"><span>修改后确认（可选）</span><textarea id="candidate-edit">${escapeHtml(state.confirmEdit || text)}</textarea></label><div class="sheet-actions"><button class="btn btn-line" data-action="reject-candidate" ${state.busy ? "disabled" : ""}>不记住</button><button class="btn btn-secondary" data-action="confirm-edited-candidate" ${state.busy ? "disabled" : ""}>修改措辞</button><button class="btn btn-primary wide" data-action="confirm-candidate" ${state.busy ? "disabled" : ""}>确认记住 ${prototypeIcon("check", 18)}</button></div><p class="note">确认、修改或拒绝的最终状态均以 API 返回为准。</p></section></div></section>`;
+  // 生活事件（六项能力 A1）：日期确认走专用 sheet（含糊时间补全 + 完整字段集提交）。
+  const sheet = candidate.type === "life_event"
+    ? lifeEventCandidateSheet({ candidate, busy: state.busy, draft: state.eventDraft })
+    : `<section class="sheet" role="dialog" aria-modal="true" aria-label="关系记忆确认"><div class="grabber"></div><div class="sheet-head"><div><span class="aigc">${escapeHtml({ SKILL: "行为沉淀", development_note: "记忆候选", PREFERENCE: "偏好", life_event: "生活事件" }[candidate.type] ?? "服务端候选")}</span><h3>关系记忆</h3><p>候选内容不会自动成为长期事实</p></div><button class="close" data-action="back-chat" aria-label="关闭">${prototypeIcon("x", 18)}</button></div><blockquote class="memory-quote">${escapeHtml(text)}</blockquote>${conflictMarkup}<label class="field"><span>修改后确认（可选）</span><textarea id="candidate-edit">${escapeHtml(state.confirmEdit || text)}</textarea></label><div class="sheet-actions"><button class="btn btn-line" data-action="reject-candidate" ${state.busy ? "disabled" : ""}>不记住</button><button class="btn btn-secondary" data-action="confirm-edited-candidate" ${state.busy ? "disabled" : ""}>修改措辞</button><button class="btn btn-primary wide" data-action="confirm-candidate" ${state.busy ? "disabled" : ""}>确认记住 ${prototypeIcon("check", 18)}</button></div><p class="note">确认、修改或拒绝的最终状态均以 API 返回为准。</p></section>`;
+  return `<section class="screen qiyu-prototype app-screen paper"><header class="app-header"><div class="identity"><img class="avatar" src="/assets/qiyu-character.png" alt="${escapeHtml(characterName)}，AI 角色"><div><b>${escapeHtml(characterName)}</b><small><span class="ai-dot"></span>AI 角色 · 关系记忆</small></div></div><button class="icon-btn soft" data-action="back-chat" aria-label="关闭记忆确认">${prototypeIcon("x", 20)}</button></header><div class="chat-scroll"><div class="date-rule">关系资产需由你确认</div><div class="scene-state"><span class="glyph">${prototypeIcon("archive", 16)}</span><span><b>候选记忆等待确认</b><small>不会自动写入长期关系资产</small></span></div></div><div class="sheet-layer">${sheet}</div></section>`;
 }
 
 function deletionMarkup() {
@@ -2151,7 +2167,9 @@ function renderAssets() {
   const filter = state.timelineFilter ?? "all";
   const chips = [["all", "全部"], ["memory", "记忆"], ["commitment", "约定"], ["boundary", "边界"], ["event", "事件"]]
     .map(([value, label]) => `<button class="btn ${filter === value ? "btn-primary" : "btn-line"}" data-timeline-filter="${value}" ${state.busy ? "disabled" : ""}>${label}</button>`).join("");
-  const timelineCards = (state.timeline ?? []).map((entry) => `<article class="asset timeline-entry"><div><b>${escapeHtml(entry.display_text ?? entry.type)}</b><small>${escapeHtml(new Date(entry.created_at).toLocaleString())} · ${FILTER_GROUP_LABELS[entry.filter_group] ?? FILTER_GROUP_LABELS[entry.type] ?? "记录"} · 版本 ${escapeHtml(entry.version ?? "?")}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>删除</button></div></article>`).join("");
+  const timelineCards = (state.timeline ?? []).map((entry) => entry.entry_type === "LIFE_EVENT"
+    ? lifeEventTimelineCard(entry, { busy: state.busy })
+    : `<article class="asset timeline-entry"><div><b>${escapeHtml(entry.display_text ?? entry.type)}</b><small>${escapeHtml(new Date(entry.created_at).toLocaleString())} · ${FILTER_GROUP_LABELS[entry.filter_group] ?? FILTER_GROUP_LABELS[entry.type] ?? "记录"} · 版本 ${escapeHtml(entry.version ?? "?")}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>删除</button></div></article>`).join("");
   return screen(`<div class="topline"><button class="btn btn-line" data-action="back-chat">返回对话</button></div><h1 id="app-title">关系时间线</h1><p class="lead">只显示仍然有效的确认资产；被修订替代和已删除的版本不会出现在线。</p><div class="button-row">${chips}</div><div class="stack">${deletionMarkup()}${timelineCards || '<div class="empty-state">当前筛选下没有时间线条目。</div>'}</div><div class="flow-actions"><button class="btn btn-line" data-action="download-relationship-profile" ${state.busy ? "disabled" : ""}>下载关系档案 JSON</button><div class="button-row"><button class="btn btn-line" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>原始互动保留 30 天</button><button class="btn btn-line" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>原始互动保留 90 天</button></div><button class="btn btn-line" data-action="refresh-assets" ${state.busy ? "disabled" : ""}>刷新时间线</button></div>`);
 }
 
@@ -2167,8 +2185,63 @@ function renderDataCenter() {
   return `<section class="screen qiyu-prototype paper"><header class="app-header"><button class="icon-btn soft" data-action="back-chat" aria-label="返回对话">${prototypeIcon("x", 20)}</button><span class="step">数据中心</span><span class="header-spacer" aria-hidden="true"></span></header><div class="page-content"><h1 id="app-title" class="page-title">你的数据，<br>由你决定。</h1><p class="page-sub">导出、留存与删除都以 API 返回的状态为准；订阅状态不会限制这些数据权利。</p><section class="data-hero"><span class="lock">${prototypeIcon("lock", 28)}</span><h3>数据权利独立于关系</h3><p>聊天记录、候选记忆和确认的关系资产分层保存；删除后是否完成以服务端回执为准。</p></section><div class="section-title"><h3>聊天保留周期</h3><small>当前 ${escapeHtml(retentionText)}</small></div><div class="segment"><button class="${retention === 30 ? "on" : ""}" data-action="set-retention-30" ${state.busy ? "disabled" : ""}>30 天</button><button class="${retention === 90 ? "on" : ""}" data-action="set-retention-90" ${state.busy ? "disabled" : ""}>90 天</button></div><div class="section-title"><h3>关系资产</h3><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 16)}</span><span class="list-copy"><b>导出我的数据</b><small>关系档案、当前可见文本与确认记忆</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 16)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修订或删除确认内容</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-safety"><span class="list-ico">${prototypeIcon("shield", 16)}</span><span class="list-copy"><b>安全与帮助</b><small>联系人、举报、申诉和紧急帮助</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button><button class="list-row" data-action="open-notifications"><span class="list-ico">${prototypeIcon("chat", 16)}</span><span class="list-copy"><b>站内通知</b><small>${state.notifications.filter((item) => !item.read).length ? `${state.notifications.filter((item) => !item.read).length} 条未读` : "没有未读通知"}</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div>${trialFeedbackMarkup()}${deletionMarkup()}<div class="section-title"><h3>删除与注销</h3><small>订阅不影响数据权利</small></div><div class="list"><button class="list-row" data-action="delete-account" ${state.busy ? "disabled" : ""}><span class="list-ico">${prototypeIcon("trash", 16)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span><span class="list-end">${prototypeIcon("chev", 14)}</span></button></div></div></section>`;
 }
 
-async function undoCandidateRejection() {
-  const rejected = state.lastRejectedCandidate;
+// ---- 生活事件（六项能力 A1）：来源面板 / 修订 / 删除 ----
+
+async function openMemoryReferences(messageIdValue) {
+  if (!messageIdValue) return;
+  setBusy(true);
+  try {
+    const payload = await api(`/messages/${encodeURIComponent(messageIdValue)}/memory-references`);
+    state.memoryRefsPanel = payload;
+  } catch (error) {
+    // 404=该消息没有引用记录（开关未开或本轮无注入），如实提示不装数据。
+    state.memoryRefsPanel = null;
+    setToast(error?.status === 404 ? "这一轮没有记忆引用记录。" : serverMessage(error));
+  } finally { setBusy(false); render(); }
+}
+
+async function submitEventRevision(eventId, expectedVersion) {
+  const title = document.querySelector("#event-revise-title")?.value?.trim() ?? "";
+  const local = document.querySelector("#event-revise-scheduled-at")?.value ?? "";
+  const status = document.querySelector("#event-revise-status")?.value ?? "PLANNED";
+  const scheduledAt = fromLocalInputValue(local);
+  setBusy(true);
+  try {
+    await api(`/life-events/${encodeURIComponent(eventId)}`, {
+      method: "PATCH", idempotent: uuid(),
+      body: { expected_version: expectedVersion, title, scheduled_at: scheduledAt, timezone: "Asia/Shanghai", status }
+    });
+    state.revisingEvent = null;
+    state.eventDraft = null;
+    setToast("事件已修订；旧版本保留历史。");
+    await refreshMemoryAndAssets();
+  } catch (error) {
+    if (error?.status === 409) {
+      // 版本冲突：保留草稿，提示用户基于服务端回传的当前值重试。
+      state.eventDraft = { title, scheduled_at: scheduledAt, status };
+      setToast("这份事件已被其他设备修改。你的修改已保留在表单里，请基于最新版本重试。");
+    } else {
+      setToast(serverMessage(error));
+    }
+  } finally { setBusy(false); render(); }
+}
+
+async function deleteLifeEventAction(entry) {
+  if (!entry) return;
+  if (!window.confirm(`删除「${entry.display_text ?? entry.title ?? "这个事件"}」？删除后带服务端回执，可随时在数据中心查看。`)) return;
+  setBusy(true);
+  try {
+    const payload = await api(`/life-events/${encodeURIComponent(entry.event_id)}`, { method: "DELETE", idempotent: uuid() });
+    state.eventDeletionReceipt = payload?.deletion_receipt ?? null;
+    state.deletionJob = payload?.deletion_job ?? null;
+    setToast(payload?.deletion_receipt ? `已删除。回执：${payload.deletion_receipt.completed_targets ?? 0} 项清理完成。` : "已删除。");
+    await refreshMemoryAndAssets();
+  } catch (error) {
+    setToast(serverMessage(error));
+  } finally { setBusy(false); render(); }
+}
+
+async function undoCandidateRejection() {  const rejected = state.lastRejectedCandidate;
   if (!rejected) return;
   setBusy(true);
   try {
@@ -2310,6 +2383,12 @@ function render() {
     : state.route === "call" ? renderCall()
     : renderChat();
   const undoMemory = state.lastRejectedCandidate ? `<div class="toast" role="status">已选择“不记住” <button class="btn btn-line" data-action="undo-memory-reject">撤销</button></div>` : "";
+  // A1 覆盖层：来源面板与事件修订表单以 bottom-sheet 叠加在当前视图上。
+  const overlaySheet = state.memoryRefsPanel
+    ? `<div class="sheet-layer">${memoryReferenceSheet(state.memoryRefsPanel)}</div>`
+    : state.revisingEvent
+      ? `<div class="sheet-layer">${lifeEventReviseForm(state.revisingEvent, state.eventDraft ?? {})}</div>`
+      : "";
   // 对话滚动记忆：整树重渲染会把 .chat-scroll 重置回顶部（此前发消息/播语音
   // 时页面“跳回第一次对话”的根因）。渲染前记录位置与消息数，渲染后——
   // 新消息或原本贴底 → 跟到最新消息；用户正回看历史 → 保持原阅读位置。
@@ -2318,7 +2397,7 @@ function render() {
     ? { top: prevScroller.scrollTop, height: prevScroller.scrollHeight, viewport: prevScroller.clientHeight, messageCount: chatScrollMemory?.messageCount ?? state.messages.length }
     : null;
   const hadFocusedMessageInput = document.activeElement?.getAttribute?.("name") === "message";
-  app.innerHTML = view + renderContinuousReminder() + undoMemory + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
+  app.innerHTML = view + renderContinuousReminder() + undoMemory + overlaySheet + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : "");
   if (state.route === "chat") {
     const scroller = app.querySelector(".chat-scroll");
     if (scroller) {
@@ -2519,6 +2598,17 @@ document.addEventListener("click", (event) => {
   if (action === "confirm-edited-candidate") resolveCandidate("confirm-edited");
   if (action === "reject-candidate") resolveCandidate("reject");
   if (action === "undo-memory-reject") undoCandidateRejection();
+  // ---- 生活事件（六项能力 A1）：来源面板 / 事件修订 / 事件删除 ----
+  if (action === "open-memory-refs") openMemoryReferences(button.dataset.messageId);
+  if (action === "close-memory-refs") { state.memoryRefsPanel = null; render(); }
+  if (action === "revise-event") {
+    state.revisingEvent = (state.timeline ?? []).find((entry) => entry.entry_type === "LIFE_EVENT" && String(entry.event_id) === button.dataset.eventId) ?? null;
+    state.eventDraft = null;
+    render();
+  }
+  if (action === "close-event-revision") { state.revisingEvent = null; state.eventDraft = null; render(); }
+  if (action === "submit-event-revision") submitEventRevision(button.dataset.eventId, Number(button.dataset.expectedVersion));
+  if (action === "delete-event") deleteLifeEventAction((state.timeline ?? []).find((entry) => entry.entry_type === "LIFE_EVENT" && String(entry.event_id) === button.dataset.eventId));
   if (action === "delete-asset") deleteAsset(state.assets.find((asset) => String(assetId(asset)) === button.dataset.assetId));
   if (action === "revise-asset") reviseTimelineAsset((state.timeline ?? []).find((entry) => String(entry.asset_id) === button.dataset.assetId));
   if (action === "refresh-deletion") refreshDeletionJob();
