@@ -113,3 +113,11 @@
 | 四·共同小计划 | 计划域 10 测试+卡片回归 10 条 | 提议器验收通过（硬断言全过，runs/qwen-plan-proposer-r1） | A3 6/6（部分唯一/乐观锁/全旅程） | 未验证 | E2E A3×2 步 | 未验证 |
 | 五·交互成果卡片 | 卡片边界回归（消毒/白名单/导出） | capabilities 运行包已执行（盲评待人工） | 随 A3 套件（一源一卡/删除下线） | 未验证 | E2E A3 卡片步（水合+输入法保持） | 未验证 |
 | 六·独立行动权限 | action-gate 7 测试+HTTP 白名单/重验 | capabilities 运行包已执行（盲评待人工） | 幂等唯一/并发恰一胜（随 A3/A4） | 未验证 | E2E A3 门禁步 | 未验证 |
+
+## 2026-10-02 A1–A4 部署登记：qiyu.qualisense.top 白名单灰度上线
+
+- **部署内容与流程**：git archive LF 包（规避 CRLF 坑）scp 至服务器（ai-repair/8.134.113.157）→ 旧源码备份 `backups/qiyu-src-before-a1a4-20261001.tar.gz`（25M）→ 原地解包（deploy/.env 与 backups/ 不在包内自动保留）→ compose 补透传 QIYU_DEV_FLAGS/QIYU_DEV_FLAG_ACCOUNTS（提交 65d4304）→ 服务器 .env 写六开关 + 白名单 → 强制重建 migrate（063–068 六迁移全部应用，账本核对一致）→ 重建 api/worker。
+- **灰度口径**：白名单仅 owner-001（01a0912b-91ee-7136-bf89-2df7f500394a，服务器库唯一非 tmp 的 OPEN 账户）；其余 15 个 tmp-* 验证账户与未来试用者默认关闭六项能力（路由 404 不暴露功能存在）。注意：服务器库无开发种子账户（a1/b2），dev token 在线上 401 属预期——首次白名单误配 a1 已发现并修正。
+- **验证（实跑）**：容器三健康（api healthy/worker/postgres）；`/health` 本机与公网 https://qiyu.qualisense.top/health 均 200；容器内六开关解析正确（enabled 六项、白名单 1 账户、owner-001 在/ tmp-verify 不在）；五张新表存在；worker 启动日志确认生活事件提取 qwen + 跟进调度 qwen（followup-composition.v1）已启用。
+- **顺手发现的既有问题（先登记不扩修，非本次部署引入）**：①4 个账户滞留 CLOSING/PARTIAL_CLEANUP_OBJECTS_PENDING_RETRY（媒体对象清理反复失败，13 天前旧代码即存在）；②内容权利清理报 qiyu_content_cleanup_worker 角色密码认证失败（QIYU_CONTENT_RIGHTS_CLEANUP_DATABASE_URL 配置问题）。
+- **owner 冒烟路径**：以 owner-001 登录后应见底部导航新增「计划」项；时间线事件卡出现「一起准备/查看卡片/提醒我」；聊天发送含面试/考试/聚餐等关键词的消息后出现候选横幅。
