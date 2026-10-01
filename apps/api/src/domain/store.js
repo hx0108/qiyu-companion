@@ -28,6 +28,14 @@ class DevelopmentStore {
     // A4 抑制原因遥测（键 `${action}|${reason}` → 累计次数）：不进 snapshot/
     // flush——PG 路径由发布事务直接 upsert 计数表，装载时从表回填。
     this.followupSuppressionCounters = new Map();
+    // 账户注销清理的硬删除登记（PG flush 据此发 DELETE；内存模式忽略）。
+    // 不能给 syncRows 配全局 remove 回调——部分加载表（提取任务只载在途、
+    // 跟进任务只载在途）会把 DB 里的终态行误删。
+    this.pendingHardDeletes = {
+      lifeEvents: new Set(), lifeEventExtractionJobs: new Set(), messageMemoryRefs: new Set(),
+      followupGrants: new Set(), followupJobs: new Set(), proactiveDailySlots: new Set(),
+      companionPlans: new Set(), companionPlanSteps: new Set(), artifactCards: new Set(), actionRequests: new Set()
+    };
     this.mediaJobs = new Map();
     this.mediaAssets = new Map();
     this.callSessions = new Map();

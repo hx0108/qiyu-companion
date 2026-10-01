@@ -28,6 +28,7 @@
     "test:pg-followup": "node scripts/run-pg-followup-dispatch.js",
     "test:pg-companion-plans": "node scripts/run-pg-companion-plans.js",
     "test:pg-worker-contention": "node scripts/run-pg-worker-contention.js",
+    "verify:deletion-recovery-drill": "node scripts/run-deletion-recovery-drill.js",
     "verify:life-event-extractor": "node scripts/run-life-event-extractor-acceptance.js",
     "verify:plan-proposer": "node scripts/run-plan-proposer-acceptance.js",
     "test:e2e-prototype-states": "node scripts/run-prototype-state-browser-e2e.js",

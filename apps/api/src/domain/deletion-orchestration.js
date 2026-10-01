@@ -14,6 +14,14 @@ const { clearExpiredMessageMemoryLinks } = require('./memory-reference-service')
 // 若清理半途失败：目标账本保留 FAILED 项与 attempts，Worker 下一轮重试；
 // 绝不把失败目标报告为已完成（与 content-rights 清理同一原则）。
 
+// 硬删除登记：删内存 Map 并记录 id（PG 模式 flush 据此发 DELETE；内存
+// 模式忽略登记）。不得改用 syncRows 全局 remove 回调——部分加载表会把
+// DB 终态行误删。
+function hardDelete(store, collection, key) {
+  store[collection].delete(key);
+  store.pendingHardDeletes?.[collection]?.add(key);
+}
+
 const RECEIPT_VERSION = 'qiyu-deletion-receipt-v1';
 const BACKUP_RETENTION_DAYS = 30;
 
@@ -116,49 +124,49 @@ async function runAccountDeletionCleanup(store, account, deletionJob, { mediaSto
   // 5b) 六项能力 A1：事件投影物理删除、提取任务清空、引用快照清空。资产侧
   // （life_event 类型 relationship_assets）已由第 4 步统一软删。
   for (const [eventId, event] of [...(store.lifeEvents ?? new Map())]) {
-    if (event.account_id === accountId) store.lifeEvents.delete(eventId);
+    if (event.account_id === accountId) hardDelete(store, 'lifeEvents', eventId);
   }
   completeDeletionTarget(store, deletionJob, 'LIFE_EVENTS', undefined, { deleted_domain: 'life_events', completed_at: nowIso }, nowIso);
   for (const [jobId, job] of [...(store.lifeEventExtractionJobs ?? new Map())]) {
-    if (job.account_id === accountId) store.lifeEventExtractionJobs.delete(jobId);
+    if (job.account_id === accountId) hardDelete(store, 'lifeEventExtractionJobs', jobId);
   }
   completeDeletionTarget(store, deletionJob, 'LIFE_EVENT_EXTRACTION_JOBS', undefined, { deleted_domain: 'life_event_extraction_jobs', completed_at: nowIso }, nowIso);
   for (const [refId, ref] of [...(store.messageMemoryRefs ?? new Map())]) {
-    if (ref.account_id === accountId) store.messageMemoryRefs.delete(refId);
+    if (ref.account_id === accountId) hardDelete(store, 'messageMemoryRefs', refId);
   }
   completeDeletionTarget(store, deletionJob, 'MESSAGE_MEMORY_REFS', undefined, { deleted_domain: 'message_memory_refs', completed_at: nowIso }, nowIso);
 
   // 5c) 六项能力 A2 补欠账：跟进许可/任务/每日槽位物理删除（事件删除联动
   // 不覆盖注销——注销必须清全部历史行，含已终态审计行）。
   for (const [grantId, grant] of [...(store.followupGrants ?? new Map())]) {
-    if (grant.account_id === accountId) store.followupGrants.delete(grantId);
+    if (grant.account_id === accountId) hardDelete(store, 'followupGrants', grantId);
   }
   completeDeletionTarget(store, deletionJob, 'FOLLOWUP_GRANTS', undefined, { deleted_domain: 'followup_grants', completed_at: nowIso }, nowIso);
   for (const [jobId, job] of [...(store.followupJobs ?? new Map())]) {
-    if (job.account_id === accountId) store.followupJobs.delete(jobId);
+    if (job.account_id === accountId) hardDelete(store, 'followupJobs', jobId);
   }
   completeDeletionTarget(store, deletionJob, 'FOLLOWUP_JOBS', undefined, { deleted_domain: 'followup_jobs', completed_at: nowIso }, nowIso);
   for (const slotKey of [...(store.proactiveDailySlots ?? new Map()).keys()]) {
-    if (slotKey.startsWith(`${accountId}:`)) store.proactiveDailySlots.delete(slotKey);
+    if (slotKey.startsWith(`${accountId}:`)) hardDelete(store, 'proactiveDailySlots', slotKey);
   }
   completeDeletionTarget(store, deletionJob, 'PROACTIVE_DAILY_SLOTS', undefined, { deleted_domain: 'proactive_daily_slots', completed_at: nowIso }, nowIso);
 
   // 5d) 六项能力 A3：计划/步骤/卡片身份/审批记录物理删除（卡片是视图无正文；
   // 审批只留状态行，参数正文本就不落库）。
   for (const [planId, plan] of [...(store.companionPlans ?? new Map())]) {
-    if (plan.account_id === accountId) store.companionPlans.delete(planId);
+    if (plan.account_id === accountId) hardDelete(store, 'companionPlans', planId);
   }
   completeDeletionTarget(store, deletionJob, 'COMPANION_PLANS', undefined, { deleted_domain: 'companion_plans', completed_at: nowIso }, nowIso);
   for (const [stepId, step] of [...(store.companionPlanSteps ?? new Map())]) {
-    if (step.account_id === accountId) store.companionPlanSteps.delete(stepId);
+    if (step.account_id === accountId) hardDelete(store, 'companionPlanSteps', stepId);
   }
   completeDeletionTarget(store, deletionJob, 'COMPANION_PLAN_STEPS', undefined, { deleted_domain: 'companion_plan_steps', completed_at: nowIso }, nowIso);
   for (const [artifactId, card] of [...(store.artifactCards ?? new Map())]) {
-    if (card.account_id === accountId) store.artifactCards.delete(artifactId);
+    if (card.account_id === accountId) hardDelete(store, 'artifactCards', artifactId);
   }
   completeDeletionTarget(store, deletionJob, 'ARTIFACT_CARDS', undefined, { deleted_domain: 'artifact_cards', completed_at: nowIso }, nowIso);
   for (const [actionId, action] of [...(store.actionRequests ?? new Map())]) {
-    if (action.account_id === accountId) store.actionRequests.delete(actionId);
+    if (action.account_id === accountId) hardDelete(store, 'actionRequests', actionId);
   }
   completeDeletionTarget(store, deletionJob, 'ACTION_REQUESTS', undefined, { deleted_domain: 'action_requests', completed_at: nowIso }, nowIso);
 

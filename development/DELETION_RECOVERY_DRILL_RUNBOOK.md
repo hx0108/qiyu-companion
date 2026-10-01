@@ -50,6 +50,7 @@
 | 日期 | 操作人 | 结果 | 备注 |
 |---|---|---|---|
 | （首次演练待执行：封测上线后 30 天内） | | | |
+| 2026-10-01 | Claude（A4·P4.6 自动化演练） | 通过 | 本地 Docker tmpfs 合成数据（`npm run verify:deletion-recovery-drill`，九域造数→pg_dump→注销清理→恢复→账本重放 dry-run+apply→九域清零核对；报告 `development/eval/runs/deletion-recovery-drill-r1/DRILL.md`）。**非生产备份介质**——生产首演仍按上行空位执行。本演练抓到并修复真缺口：PG 模式注销清理此前只删内存 Map，DB 行残留而账本已标 COMPLETED。 |
 
 ## 5. 红线（引用 PRD 7.3）
 

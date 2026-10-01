@@ -441,6 +441,9 @@ class PostgresRequestStore extends DevelopmentStore {
     await syncRows(this.client, this.companionPlanSteps, before.companionPlanSteps, persistCompanionPlanStep);
     await syncRows(this.client, this.artifactCards, before.artifactCards, persistArtifactCard);
     await syncRows(this.client, this.actionRequests, before.actionRequests, persistActionRequest);
+    // A4 注销清理硬删除落地（演练抓到的缺口：只删内存 Map 时 DB 行残留而
+    // 账本已标 COMPLETED）：按 hardDelete 登记的 id 精确发 DELETE。
+    await drainPendingHardDeletes(this);
     await syncRows(this.client, this.mediaAssets, before.mediaAssets, persistMediaAsset);
     assertAppendOnly(before.entitlementLedgers, this.entitlementLedgers);
     await syncRows(this.client, this.entitlementLedgers, before.entitlementLedgers, persistEntitlementLedger);
@@ -462,6 +465,41 @@ class PostgresRequestStore extends DevelopmentStore {
 async function syncRows(client, current, previous, persist, remove) {
   for (const [id, item] of current) if (changed(previous.get(id), item)) await persist(client, item, previous.has(id));
   if (remove) for (const [id, item] of previous) if (!current.has(id)) await remove(client, item);
+}
+
+// A4：注销清理登记的硬删除按 id 精确落地（表名→[主键列, account 过滤列]）。
+// 槽位表键是 `${account}:${date}` 复合字符串，单独拆列处理。
+async function drainPendingHardDeletes(store) {
+  const pending = store.pendingHardDeletes;
+  if (!pending) return;
+  const plan = [
+    ['lifeEvents', 'life_events', 'event_id'],
+    ['lifeEventExtractionJobs', 'life_event_extraction_jobs', 'job_id'],
+    ['messageMemoryRefs', 'message_memory_refs', 'ref_id'],
+    ['followupGrants', 'followup_grants', 'grant_id'],
+    ['followupJobs', 'followup_jobs', 'job_id'],
+    // 步骤先于计划（复合 FK 依赖 companion_plans 行）。
+    ['companionPlanSteps', 'companion_plan_steps', 'step_id'],
+    ['companionPlans', 'companion_plans', 'plan_id'],
+    ['artifactCards', 'artifact_cards', 'artifact_id'],
+    ['actionRequests', 'action_requests', 'action_id']
+  ];
+  for (const [collection, table, column] of plan) {
+    const ids = [...pending[collection]];
+    if (ids.length === 0) continue;
+    await store.client.query(`DELETE FROM ${table} WHERE ${column}::text = ANY($1::text[]) AND account_id = $2`, [ids, store.accountId]);
+    pending[collection].clear();
+  }
+  const slots = [...pending.proactiveDailySlots];
+  if (slots.length > 0) {
+    for (const key of slots) {
+      const separator = key.indexOf(':');
+      const accountId = key.slice(0, separator);
+      const localDate = key.slice(separator + 1);
+      await store.client.query('DELETE FROM proactive_daily_slots WHERE account_id = $1 AND local_date = $2::date', [accountId, localDate]);
+    }
+    pending.proactiveDailySlots.clear();
+  }
 }
 function assertAppendOnly(previous, current) {
   for (const [id, oldEntry] of previous) {
