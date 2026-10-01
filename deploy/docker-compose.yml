@@ -96,6 +96,12 @@ services:
       TENCENT_ASR_ENGINE_MODEL_TYPE: ${TENCENT_ASR_ENGINE_MODEL_TYPE:-}
       # 1:1 实时语音通话灰度开关：'1' 开启，默认关闭（通话创建路由 404）。
       QIYU_VOICE_CALL_ENABLED: ${QIYU_VOICE_CALL_ENABLED:-}
+      # 六项能力开发开关（白名单灰度）：QIYU_DEV_FLAGS 列能力名（逗号/空白
+      # 分隔），QIYU_DEV_FLAG_ACCOUNTS 非空时仅白名单账户生效（账户 UUID，
+      # 空白/逗号分隔；留空=对所有账户开启）。API 与 Worker 各自解析一次，
+      # 改名单需两边同步重建。
+      QIYU_DEV_FLAGS: ${QIYU_DEV_FLAGS:-}
+      QIYU_DEV_FLAG_ACCOUNTS: ${QIYU_DEV_FLAG_ACCOUNTS:-}
       QIYU_IMAGE_PROVIDER: ${QIYU_IMAGE_PROVIDER:-}
       QIYU_IMAGE_MODERATION_PROVIDER: ${QIYU_IMAGE_MODERATION_PROVIDER:-}
       TENCENT_HUNYUAN_REGION: ${TENCENT_HUNYUAN_REGION:-ap-guangzhou}
@@ -142,6 +148,9 @@ services:
       # Worker 的摘要任务需要模型；未配置时仅消费 Embedding 队列（确定性，无外呼）。
       QIYU_LLM_PROVIDER: ${QIYU_LLM_PROVIDER:-}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
+      # 六项能力开关与 API 同步（Worker 侧解析一次；语义见 api 服务注释）。
+      QIYU_DEV_FLAGS: ${QIYU_DEV_FLAGS:-}
+      QIYU_DEV_FLAG_ACCOUNTS: ${QIYU_DEV_FLAG_ACCOUNTS:-}
       # 图片任务后台推进（P0 后台任务化）：与 API 同一批供应商变量，
       # 未配置时跳过图片队列，前端手动刷新仍是兜底。
       QIYU_IMAGE_PROVIDER: ${QIYU_IMAGE_PROVIDER:-}
