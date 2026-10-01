@@ -25,6 +25,9 @@ class DevelopmentStore {
     this.companionPlanSteps = new Map();
     this.artifactCards = new Map();
     this.actionRequests = new Map();
+    // A4 抑制原因遥测（键 `${action}|${reason}` → 累计次数）：不进 snapshot/
+    // flush——PG 路径由发布事务直接 upsert 计数表，装载时从表回填。
+    this.followupSuppressionCounters = new Map();
     this.mediaJobs = new Map();
     this.mediaAssets = new Map();
     this.callSessions = new Map();

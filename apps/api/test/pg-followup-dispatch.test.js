@@ -144,6 +144,9 @@ test('PG A2：并发 publish 抢每日槽位恰一胜——输家 EXPIRED 零投
   const loserRow = (await sharedPool.query('SELECT state, last_error FROM followup_jobs WHERE job_id = $1', [loserId])).rows[0];
   assert.equal(loserRow.state, 'EXPIRED');
   assert.match(loserRow.last_error, /daily slot taken|DAILY_LIMIT_REACHED/);
+  // A4 抑制原因计数表（迁移 068）：输家的每日一条抑制被同事务计数。
+  const suppressed = (await sharedPool.query("SELECT count FROM followup_suppression_counters WHERE action = 'EXPIRE' AND reason = 'DAILY_LIMIT_REACHED'")).rows[0];
+  assert.equal(Number(suppressed?.count ?? 0), 1, 'PG 路抑制计数：EXPIRE/DAILY_LIMIT_REACHED 恰一次');
 });
 
 test('PG A2：runNext 全旅程——模板措辞→聊天流+来源引用+审计+槽位；第二任务同日 EXPIRED', options, async () => {
@@ -188,6 +191,9 @@ test('PG A2：静默时段 DEFER 顺延到静默结束；租约过期任务被�
     // pg 把 timestamptz 解析为 Date，统一转 ISO 再比较。
     assert.equal(new Date(quietRow.next_attempt_at).toISOString(), '2026-10-06T12:00:00.000Z');
     assert.equal(Number(quietRow.attempts), 1, '领取记一次尝试，顺延不额外耗尽');
+    // A4 抑制原因计数（迁移 068）：静默顺延被发布事务同事务计数。
+    const deferredCount = (await sharedPool.query("SELECT count FROM followup_suppression_counters WHERE action = 'DEFER' AND reason = 'QUIET_HOURS'")).rows[0];
+    assert.equal(Number(deferredCount?.count ?? 0), 1, 'PG 路抑制计数：DEFER/QUIET_HOURS 恰一次');
   } finally {
     // 列 NOT NULL：重置为空对象（域层按默认偏好处理），不能置 NULL。
     await sharedPool.query('UPDATE accounts SET proactive_preferences_json = $2::jsonb WHERE account_id = $1', [ALICE, '{}']);

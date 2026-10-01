@@ -80,11 +80,13 @@ class PostgresFollowupRepository {
         now
       });
       if (decision.action === 'DEFER') {
+        await bumpSuppressionCounter(client, 'DEFER', decision.reason);
         await guardUpdate(client, job.job_id, `state = 'PENDING', lease_owner = NULL, lease_expires_at = NULL,
           next_attempt_at = $2::timestamptz, last_error = $3`, [decision.defer_until ?? job.due_at, `deferred: ${decision.reason}`]);
         return { state: 'DEFERRED', job_id: job.job_id, reason: decision.reason, defer_until: decision.defer_until };
       }
       if (decision.action === 'CANCEL' || decision.action === 'EXPIRE') {
+        await bumpSuppressionCounter(client, decision.action, decision.reason);
         const terminal = decision.action === 'EXPIRE' ? 'EXPIRED' : 'CANCELLED';
         await guardUpdate(client, job.job_id, `state = $2::text, lease_owner = NULL, lease_expires_at = NULL, last_error = $3`,
           [terminal, `${decision.action.toLowerCase()}: ${decision.reason}`]);
@@ -94,6 +96,7 @@ class PostgresFollowupRepository {
       const slot = await client.query(`INSERT INTO proactive_daily_slots (account_id, local_date, claimed_by)
         VALUES ($1, $2::date, $3) ON CONFLICT (account_id, local_date) DO NOTHING`, [job.account_id, job.local_date, job.job_id]);
       if (slot.rowCount !== 1) {
+        await bumpSuppressionCounter(client, 'EXPIRE', 'DAILY_LIMIT_REACHED');
         await guardUpdate(client, job.job_id, `state = 'EXPIRED', lease_owner = NULL, lease_expires_at = NULL, last_error = 'expire: daily slot taken'`, []);
         return { state: 'EXPIRED', job_id: job.job_id, reason: 'DAILY_LIMIT_REACHED' };
       }
@@ -184,6 +187,14 @@ class PostgresFollowupRepository {
       client.release();
     }
   }
+}
+
+// A4 抑制原因计数（同事务原子累加；表与语义见迁移 068）。双进程 Worker 经
+// 表聚合，各自进程内存会互相看不见且重启即丢。
+async function bumpSuppressionCounter(client, action, reason) {
+  await client.query(`INSERT INTO followup_suppression_counters (action, reason, count)
+    VALUES ($1, $2, 1) ON CONFLICT (action, reason) DO UPDATE SET count = followup_suppression_counters.count + 1, updated_at = CURRENT_TIMESTAMP`,
+  [action, reason]);
 }
 
 async function guardUpdate(client, jobId, setClause, params) {

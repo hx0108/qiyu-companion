@@ -14,6 +14,24 @@ const COMPOSE_FILE = path.join(REPO_ROOT, 'infra', 'postgres', 'docker-compose.t
 const SERVICE = 'postgres-test';
 const TEST_DATABASE_URL = process.env.QIYU_PG_TEST_DATABASE_URL || 'postgres://postgres:qiyu-a1-test-only@127.0.0.1:54329/qiyu_a1_test';
 
+const pg = require('pg');
+
+// healthcheck 通过后连接仍可能被初始化期重置（A2 轮登记的瞬时问题）：
+// 正式跑测试前用轻量连接探测预热，最多 5 次 × 2 秒。
+async function warmupConnection(databaseUrl) {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    const client = new pg.Client({ connectionString: databaseUrl });
+    try {
+      await client.connect();
+      await client.query('SELECT 1');
+      return true;
+    } catch { /* 继续重试 */ }
+    finally { await client.end().catch(() => {}); }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  return false;
+}
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: ['ignore', 'inherit', 'inherit'], shell: process.platform === 'win32', ...options });
   return result.status === 0;
@@ -28,6 +46,10 @@ async function main() {
   if (process.env.QIYU_PG_TEST_DATABASE_URL) {
     // 外部库直连模式：跳过编排（便携版 PG 或远程测试库）。
     console.log('[pg-a1-test] 使用 QIYU_PG_TEST_DATABASE_URL 直连，不起 Docker。');
+    if (!(await warmupConnection(TEST_DATABASE_URL))) {
+      console.error('[pg-a1-test] 预热连接失败（连续 5 次）。');
+      return 1;
+    }
     return run(process.execPath, ['--test', path.join(__dirname, '..', 'test', 'pg-companion-continuity.test.js')], {
       env: { ...process.env, QIYU_PG_TEST_DATABASE_URL: process.env.QIYU_PG_TEST_DATABASE_URL }
     }) ? 0 : 1;

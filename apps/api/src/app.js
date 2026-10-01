@@ -863,6 +863,14 @@ function internalMetricsText(store) {
   lines.push('# HELP qiyu_image_jobs_inflight 处于 PENDING/RUNNING 的图片任务数（滞留告警口径）');
   lines.push('# TYPE qiyu_image_jobs_inflight gauge');
   lines.push(`qiyu_image_jobs_inflight ${stuckImageJobs}`);
+  // A4 跟进投递抑制原因计数（灰度检查口径；内存路 Worker 递增、PG 路发布
+  // 事务 upsert 计数表、装载回填——store 形状统一）。
+  lines.push('# HELP qiyu_followup_suppressed_total 跟进投递抑制累计（按裁决动作与原因）');
+  lines.push('# TYPE qiyu_followup_suppressed_total counter');
+  for (const [key, count] of (store.followupSuppressionCounters ?? new Map())) {
+    const [action, ...reasonParts] = key.split('|');
+    lines.push(`qiyu_followup_suppressed_total{action="${escapeLabel(action)}",reason="${escapeLabel(reasonParts.join('|'))}"} ${count}`);
+  }
   let costReport = { rows: [] };
   try { costReport = buildCostReport([...store.operationMetrics?.values() ?? []], parseRateCard(process.env.QIYU_COST_RATE_CARD_JSON)); } catch { /* cost endpoint exposes invalid configuration explicitly */ }
   lines.push('# HELP qiyu_provider_latency_quantile_ms 供应商调用时延分位数（当前内存窗口）');
@@ -4219,4 +4227,4 @@ function reapExpiredVoiceCalls(store, resolveAccount, summaryGenerator = null) {
   return reaped;
 }
 
-module.exports = { createApp, TOKENS, rankAssetsForContext, callAudioRegistry, reapExpiredVoiceCalls };
+module.exports = { createApp, TOKENS, rankAssetsForContext, callAudioRegistry, reapExpiredVoiceCalls, internalMetricsText };

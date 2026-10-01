@@ -211,6 +211,14 @@ function evaluateFollowupPublish({ event, grant, job, account, preferences, sent
   return fail('CANCEL', dispatch.reason);
 }
 
+// —— A4 抑制原因遥测（内存路；PG 路径由发布事务 upsert 计数表）——
+// 键 `${action}|${reason}`；灰度检查的可观测出口，不参与任何投递裁决。
+function bumpFollowupSuppression(store, action, reason) {
+  if (!store || typeof action !== 'string' || typeof reason !== 'string') return;
+  const key = `${action}|${reason}`;
+  store.followupSuppressionCounters.set(key, (store.followupSuppressionCounters.get(key) ?? 0) + 1);
+}
+
 // —— 内存模式每日槽位（PG 走 store.claimProactiveDailySlot SQL 原子）——
 function claimDailySlot(store, accountId, localDate, claimedBy) {
   const key = `${accountId}:${localDate}`;
@@ -250,7 +258,7 @@ function publicFollowupJob(job) {
 
 module.exports = {
   FOLLOWUP_JOB_IN_FLIGHT_STATES,
-  computeLocalDateInZone, grantFollowup, revokeFollowup, revokeFollowupGrantById, listFollowupStatus,
+  computeLocalDateInZone, grantFollowup, revokeFollowup, revokeFollowupGrantById, listFollowupStatus, bumpFollowupSuppression,
   invalidateFollowupsOnRevision, revokeFollowupsOnDeletion,
   evaluateFollowupPublish, claimDailySlot, transitionFollowupJob,
   publicFollowupGrant, publicFollowupJob

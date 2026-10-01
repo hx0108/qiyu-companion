@@ -1,7 +1,7 @@
 'use strict';
 
 const { composeFollowupText } = require('./followup-composer');
-const { evaluateFollowupPublish, claimDailySlot, transitionFollowupJob, FOLLOWUP_JOB_IN_FLIGHT_STATES } = require('./followup-service');
+const { evaluateFollowupPublish, claimDailySlot, transitionFollowupJob, bumpFollowupSuppression, FOLLOWUP_JOB_IN_FLIGHT_STATES } = require('./followup-service');
 const { recordMessageMemoryRefs, buildMemoryRefs } = require('./memory-reference-service');
 const { recordOperationMetric } = require('./operation-metrics');
 
@@ -77,6 +77,7 @@ async function publishFollowupJob({ store, job, composer, workerId, now = new Da
     sentAt, now
   });
   if (decision.action === 'DEFER') {
+    bumpFollowupSuppression(store, 'DEFER', decision.reason);
     const deferred = transitionFollowupJob(store, job.job_id, ['LEASED'], {
       state: 'PENDING', lease_owner: null, lease_expires_at: null,
       next_attempt_at: decision.defer_until ?? job.due_at, // 静默顺延不耗 attempts
@@ -85,6 +86,7 @@ async function publishFollowupJob({ store, job, composer, workerId, now = new Da
     return deferred ? { state: 'DEFERRED', job_id: job.job_id, reason: decision.reason, defer_until: decision.defer_until } : { state: 'SUPERSEDED', job_id: job.job_id };
   }
   if (decision.action === 'CANCEL' || decision.action === 'EXPIRE') {
+    bumpFollowupSuppression(store, decision.action, decision.reason);
     const terminal = decision.action === 'EXPIRE' ? 'EXPIRED' : 'CANCELLED';
     const done = transitionFollowupJob(store, job.job_id, ['LEASED'], {
       state: terminal, lease_owner: null, lease_expires_at: null, last_error: `${decision.action.toLowerCase()}: ${decision.reason}`
@@ -93,6 +95,7 @@ async function publishFollowupJob({ store, job, composer, workerId, now = new Da
   }
   // 3) PUBLISH：先抢每日槽位（占用→EXPIRED 不补发过时提醒）。
   if (!claimDailySlot(store, job.account_id, job.local_date, job.job_id)) {
+    bumpFollowupSuppression(store, 'EXPIRE', 'DAILY_LIMIT_REACHED');
     const done = transitionFollowupJob(store, job.job_id, ['LEASED'], {
       state: 'EXPIRED', lease_owner: null, lease_expires_at: null, last_error: 'expire: daily slot taken'
     });
