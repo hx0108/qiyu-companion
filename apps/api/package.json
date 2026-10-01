@@ -28,6 +28,7 @@
     "test:pg-followup": "node scripts/run-pg-followup-dispatch.js",
     "test:pg-companion-plans": "node scripts/run-pg-companion-plans.js",
     "verify:life-event-extractor": "node scripts/run-life-event-extractor-acceptance.js",
+    "verify:plan-proposer": "node scripts/run-plan-proposer-acceptance.js",
     "test:e2e-prototype-states": "node scripts/run-prototype-state-browser-e2e.js",
     "test:e2e-ops": "node scripts/run-ops-browser-e2e.js"
   },

@@ -14,7 +14,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const DATASET_ROOT = path.resolve(__dirname, '../../../development/eval/datasets/qiyu-companion-v0.1');
+const DATASETS_ROOT = path.resolve(__dirname, '../../../development/eval/datasets');
 const DEFAULT_OUTPUT_ROOT = path.resolve(__dirname, '../../../development/eval/runs');
 const SCORE_COLUMNS = [
   'persona_consistency', 'emotional_attunement', 'context_relevance',
@@ -23,7 +23,7 @@ const SCORE_COLUMNS = [
 ];
 
 function parseArgs(argv) {
-  const args = { repetitions: 3, provider: 'unassigned', modelVersion: 'unassigned', promptVersion: 'unassigned', personaVersion: 'unassigned', retrievalVersion: 'unassigned', dryRun: false };
+  const args = { repetitions: 3, provider: 'unassigned', modelVersion: 'unassigned', promptVersion: 'unassigned', personaVersion: 'unassigned', retrievalVersion: 'unassigned', dryRun: false, dataset: 'qiyu-companion-v0.1' };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     if (value === '--dry-run') { args.dryRun = true; continue; }
@@ -35,22 +35,15 @@ function parseArgs(argv) {
     const map = {
       'run-id': 'runId', provider: 'provider', 'model-version': 'modelVersion',
       'prompt-version': 'promptVersion', 'persona-version': 'personaVersion',
-      'retrieval-version': 'retrievalVersion', repetitions: 'repetitions', 'out-dir': 'outputRoot'
+      'retrieval-version': 'retrievalVersion', repetitions: 'repetitions', 'out-dir': 'outputRoot',
+      dataset: 'dataset'
     };
     if (!map[key]) throw new Error(`不支持的参数：${value}`);
     args[map[key]] = key === 'repetitions' ? Number(next) : next;
   }
   if (!Number.isInteger(args.repetitions) || args.repetitions < 1 || args.repetitions > 10) throw new Error('--repetitions 必须是 1 到 10 的整数');
+  if (!/^qiyu-[a-z0-9.-]+$/u.test(args.dataset)) throw new Error('--dataset 只能使用小写字母、数字、点、连字符');
   return args;
-}
-
-function loadJsonl(filename) {
-  const source = fs.readFileSync(path.join(DATASET_ROOT, filename), 'utf8').trim();
-  if (!source) return [];
-  return source.split(/\r?\n/u).map((line, index) => {
-    try { return JSON.parse(line); }
-    catch (error) { throw new Error(`${filename}:${index + 1} 不是有效 JSON：${error.message}`); }
-  });
 }
 
 function csvCell(value) {
@@ -68,19 +61,18 @@ function safeRunId(value) {
 }
 
 function generatedRunId() {
-  return `companion-v0.1-${new Date().toISOString().replace(/[-:.]/gu, '').replace('Z', 'z')}`;
+  // toISOString 含大写 T/Z，safeRunId 只收小写——统一转小写。
+  return `companion-v0.1-${new Date().toISOString().replace(/[-:.]/gu, '').toLowerCase()}`;
 }
 
-function validateDataset(manifest, coreCases, longCases, ttsCases) {
+function validateDataset(manifest, loaded) {
   const errors = [];
   const ids = new Set();
-  const specs = [
-    ['cases', coreCases], ['long_horizon', longCases], ['tts_listening', ttsCases]
-  ];
-  for (const [kind, items] of specs) {
-    const expected = manifest.files[kind].expected_count;
-    if (items.length !== expected) errors.push(`${kind} 应有 ${expected} 条，实际 ${items.length}`);
+  for (const [kind, spec] of Object.entries(manifest.files)) {
+    const items = loaded[kind] ?? [];
+    if (items.length !== spec.expected_count) errors.push(`${kind} 应有 ${spec.expected_count} 条，实际 ${items.length}`);
     for (const item of items) {
+      if (kind === 'distractor_assets') continue; // 干扰资产无 case_id，由各数据集 validate 校验
       if (!item.case_id || ids.has(item.case_id)) errors.push(`case_id 缺失或重复：${item.case_id || '(空)'}`);
       ids.add(item.case_id);
     }
@@ -92,7 +84,7 @@ function buildRequests(runId, metadata, cases, kind, repetitions) {
   return cases.flatMap((testCase) => Array.from({ length: repetitions }, (_, offset) => ({
     request_id: `${runId}:${testCase.case_id}:r${String(offset + 1).padStart(2, '0')}`,
     run_id: runId,
-    dataset_id: 'qiyu-companion-v0.1',
+    dataset_id: metadata.dataset_id,
     kind,
     case_id: testCase.case_id,
     attempt: offset + 1,
@@ -161,11 +153,24 @@ function renderGuide(runId, metadata, requestCount, ttsCount) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const manifest = JSON.parse(fs.readFileSync(path.join(DATASET_ROOT, 'manifest.json'), 'utf8'));
-  const coreCases = loadJsonl(manifest.files.cases.path);
-  const longCases = loadJsonl(manifest.files.long_horizon.path);
-  const ttsCases = loadJsonl(manifest.files.tts_listening.path);
-  validateDataset(manifest, coreCases, longCases, ttsCases);
+  const datasetRoot = path.resolve(__dirname, '../../../development/eval/datasets', args.dataset);
+  const manifest = JSON.parse(fs.readFileSync(path.join(datasetRoot, 'manifest.json'), 'utf8'));
+  const loaded = {};
+  for (const [kind, spec] of Object.entries(manifest.files)) {
+    const source = fs.readFileSync(path.join(datasetRoot, spec.path), 'utf8').trim();
+    loaded[kind] = source ? source.split(/\r?\n/u).map((line, index) => {
+      try { return JSON.parse(line); }
+      catch (error) { throw new Error(`${spec.path}:${index + 1} 不是有效 JSON：${error.message}`); }
+    }) : [];
+  }
+  validateDataset(manifest, loaded);
+  // manifest 声明的排除标签（capabilities：channel-replay 由奇偶性测试消费，
+  // 不进模型运行包——避免同一剧本双计费）。
+  const excludeTags = manifest.exclude_from_run_package_tags ?? [];
+  const runnable = (cases) => cases.filter((testCase) => !(testCase.tags ?? []).some((tag) => excludeTags.includes(tag)));
+  const coreCases = runnable(loaded.cases ?? []);
+  const longCases = runnable(loaded.long_horizon ?? []);
+  const ttsCases = loaded.tts_listening ?? [];
 
   const runId = safeRunId(args.runId || generatedRunId());
   const metadata = {
@@ -177,13 +182,15 @@ function main() {
     repetitions: args.repetitions,
     created_at: new Date().toISOString(),
     dataset_id: manifest.dataset_id,
-    data_classification: manifest.data_classification
+    data_classification: manifest.data_classification,
+    excluded_tags: excludeTags,
+    excluded_case_count: (loaded.cases ?? []).length + (loaded.long_horizon ?? []).length - coreCases.length - longCases.length
   };
   const requests = [
     ...buildRequests(runId, metadata, coreCases, 'core', args.repetitions),
     ...buildRequests(runId, metadata, longCases, 'long_horizon', args.repetitions)
   ];
-  const summary = `运行包已准备：${runId}；文本/长期请求 ${requests.length} 条；TTS盲听 ${ttsCases.length} 条；每条重复 ${args.repetitions} 次。`;
+  const summary = `运行包已准备：${runId}；数据集 ${manifest.dataset_id}；文本/长期请求 ${requests.length} 条${metadata.excluded_case_count > 0 ? `（按标签排除 ${metadata.excluded_case_count} 条）` : ''}；TTS盲听 ${ttsCases.length} 条；每条重复 ${args.repetitions} 次。`;
   if (args.dryRun) { console.log(`${summary}（dry-run，未写文件）`); return; }
 
   const outputRoot = path.resolve(args.outputRoot || DEFAULT_OUTPUT_ROOT);
