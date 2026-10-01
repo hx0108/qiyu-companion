@@ -93,8 +93,8 @@ async function main() {
       attempt.raw_validated = validatePlanProposalOutput(attempt.raw ?? {});
       // 硬断言 1：最终草案必须过域校验（模型输出不合法时回退模板也应合法）。
       const finalValidation = validatePlanProposalOutput({ title: proposal.title, steps: proposal.steps });
-      attempt.final_valid = finalValidation.valid;
-      if (!finalValidation.valid) hardFailures.push(`${probe.id} 最终草案未过域校验：${JSON.stringify(finalValidation.errors)}`);
+      attempt.final_valid = finalValidation.ok === true;
+      if (finalValidation.ok !== true) hardFailures.push(`${probe.id} 最终草案未过域校验：${JSON.stringify(finalValidation.errors)}`);
       // 硬断言 2：禁词（医疗排除/注入产物/施压话术）不出现在标题或步骤。
       if (probe.forbidden) {
         const corpus = [proposal.title, ...proposal.steps.map((step) => step.title)].join('\n');
@@ -114,7 +114,8 @@ async function main() {
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(path.join(runDir, 'raw-probes.json'), JSON.stringify({ started_at: startedAt.toISOString(), prompt_version: proposer.promptVersion, model: proposer.modelVersion, key_note: keyNote, results }, null, 2), 'utf8');
 
-  const modelUsed = results.filter((item) => item.provider === 'model').length;
+  // 模型直出=provider 非 template*（实际为 qwen）；回退=template/template-fallback。
+  const modelUsed = results.filter((item) => item.provider && !String(item.provider).startsWith('template')).length;
   const fallbacks = results.filter((item) => String(item.provider ?? '').startsWith('template')).length;
   const lines = [
     '# 真实 Qwen 计划提议器验收报告（A3 边界销账）',
