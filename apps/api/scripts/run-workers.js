@@ -77,7 +77,10 @@ async function main() {
   // 跟进调度（六项能力 A2）：BYPASSRLS 专用角色跨账户领取，无需账户发现；
   // composer 未配置时模板回退（投递决策仍在域层 evaluateFollowupPublish）。
   const followupComposer = createQwenFollowupComposer(process.env) || null;
-  const followupRepository = new PostgresFollowupRepository({ pool });
+  // workerId/租约可经环境覆盖（A4 双进程竞争验收需要：双进程各持独立 workerId
+  // 与 2s 短租约验证恰一胜与租约重领；默认值与既有行为一致）。
+  const followupLeaseSeconds = Number(process.env.QIYU_FOLLOWUP_LEASE_SECONDS) || 300;
+  const followupRepository = new PostgresFollowupRepository({ pool, leaseSeconds: followupLeaseSeconds });
   const imageDeps = buildImageDepsFromEnvironment(process.env);
   // 注销清理用的私有媒体存储：优先 COS，未配置时退回本地开发库（与 API
   // 进程 createApp 的默认 LocalPrivateMediaStore 同一根目录）。
@@ -183,7 +186,7 @@ async function main() {
     // 一条/静默/竞态防线在 repository 内部（与内存 Worker 同语义）。
     let followups = 0;
     for (let round = 0; round < 20; round += 1) {
-      const outcome = await followupRepository.runNext({ composer: followupComposer, workerId: 'run-workers' }).catch((error) => {
+      const outcome = await followupRepository.runNext({ composer: followupComposer, workerId: process.env.QIYU_WORKER_ID || 'run-workers' }).catch((error) => {
         console.error('[worker] 跟进调度失败：', error.message);
         return { state: 'FAILED' };
       });
