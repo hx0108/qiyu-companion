@@ -30,7 +30,11 @@ test.after(async () => { if (sharedPool) await sharedPool.end(); });
 async function scopedClient(accountId) {
   const client = await sharedPool.connect();
   await client.query('BEGIN');
-  await client.query("SELECT set_config('app.current_account_id', $1, true)", [accountId]);
+  // A4 强化（此前实测的是事务隔离而非 RLS——superuser 绕过行安全）：
+  // 与生产请求路径同款 SET LOCAL ROLE qiyu_app + app.account_id（函数读的
+  // 是 app.account_id，不是 app.current_account_id），RLS 策略真正生效。
+  await client.query('SET LOCAL ROLE qiyu_app');
+  await client.query("SELECT set_config('app.account_id', $1, true), set_config('app.character_id', '', true)", [accountId]);
   return client;
 }
 
@@ -44,7 +48,7 @@ async function seedDevelopmentAccounts() {
   const client = await sharedPool.connect();
   try {
     await client.query('BEGIN');
-    await client.query("SELECT set_config('app.current_account_id', $1, true)", [ALICE]);
+    await client.query("SELECT set_config('app.account_id', $1, true)", [ALICE]);
     await client.query(`INSERT INTO characters (character_id, account_id, display_name, status) VALUES ($1, $2, '栖夏', 'ACTIVE') ON CONFLICT (character_id) DO NOTHING`, [ALICE_CHARACTER, ALICE]);
     await client.query(`INSERT INTO conversations (conversation_id, account_id, character_id, status, retention_expires_at) VALUES ($1, $2, $3, 'ACTIVE', CURRENT_TIMESTAMP + INTERVAL '90 days') ON CONFLICT (conversation_id) DO NOTHING`, [ALICE_CONVERSATION, ALICE, ALICE_CHARACTER]);
     await client.query('COMMIT');

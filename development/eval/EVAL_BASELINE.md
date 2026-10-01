@@ -12,6 +12,14 @@
 | `npm run eval:latency-cost` | CHAT_GENERATION / TEXT_MODERATION 的 P50/P95、token、成本估算 | 仅 FAILED 判败；时延只提示不设硬门槛 |
 | `npm run test:e2e-browser` | 浏览器全链路（系统 Edge 无头，playwright-core，免下载 Chromium）：告知→年龄→角色→对话 SSE→TTS 降级→时间线→数据中心→主题 | 全步骤 PASS + 控制台 0 错误 + 非预期 5xx 为 0 |
 | `npm run eval:all` | 依次串联以上四项，任一失败即整体失败 | 同上 |
+| `npm run eval:dataset:validate:capabilities` | 六项能力扩展数据集 `qiyu-capabilities-v0.1`（100 条七类 + 50 干扰资产 + channel-replay 10 + multi-day 20）结构校验，不调模型 | 数量/分布/标记断言全过（fail-loud） |
+| `npm run eval:followup-policy` | 主动跟进许可固定回归：`evaluateFollowupPublish` 唯一写者 15 分支 (action,reason) 精确对（PUBLISH 1 + CANCEL 9 + EXPIRE 3 + DEFER 2） | 零容差，任一漂移判败 |
+| `npm run eval:plan-card` | 计划提议与卡片固定回归：三路回退 3 + schema 拒绝 4 + 卡片边界 3 | 零容差（HTML/链接/未知动作一律拒绝而非转义） |
+| `npm run verify:plan-proposer` | 真实 Qwen 计划提议器验收（10 探针经生产 composer 路径；医疗禁词/注入产物/施压话术硬断言） | 硬断言全过 + 人工语义复核销账；key 不可用退出 1 不假装跑过 |
+| `npm run test:pg-worker-contention` | 双进程 Worker 竞争（spawn 两个真实 run-workers）：恰一胜/崩溃租约重领/零重复投递 | 全断言 PASS（连跑三轮无 flaky） |
+| `npm run verify:deletion-recovery-drill` | 删除账本本地恢复演练：九域造数→pg_dump→注销→恢复→账本重放→九域清零 | 全链通过；本地合成数据非生产备份介质 |
+
+六项能力 A4 新增口径：`eval:companion:prepare --dataset qiyu-capabilities-v0.1` 展开运行包（channel-replay 标记的 10 条由 `test/life-event-channel-parity.test.js` 三通道奇偶性测试消费，不进运行包避免双计费）；`eval:companion:execute --dry-run` 先产 `budget-estimate.md`（上限口径=门禁、经验口径=参考，动态采样既有运行包实测 usage），真实执行三道门禁：预算表必须存在、单价必须配置（不猜价格）、上限口径超 `QIYU_EVAL_BUDGET_FEN`（默认 5000 分）退出码 2 拒跑；执行中按实际 usage 熔断，剩余条目标 `EXECUTION_SKIPPED_BUDGET` 如实登记。评审边界：运行包（模型输出）双人盲评不变；数据集题目为设计产物，产品过目 + manifest 冻结即生效，题目本身不盲评。
 
 ## 栖语陪伴质量数据集 v0.1
 

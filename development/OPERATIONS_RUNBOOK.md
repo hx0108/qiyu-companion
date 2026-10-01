@@ -56,3 +56,10 @@ rule_files: [monitoring/prometheus-rules.yml]
 - 无新后台 Worker：计划全部写入由用户操作驱动的请求事务完成；linked 提醒的到期投递仍归 qiyu_followup_worker（065 授权，A3 零改动）。运维上没有计划队列可积压——排查计划问题时看请求日志与 companion_plans 行状态即可。
 - 排障查询：`SELECT plan_id, state, state_reason, version FROM companion_plans WHERE account_id = $1 ORDER BY updated_at DESC;`（state_reason 解释 event_cancelled/event_deleted/superseded）；审批状态 `SELECT action_id, action_type, state, failure_code, expires_at FROM action_requests WHERE account_id = $1;`——FAILED 的 failure_code 如实记域层错误码，EXPIRED 是正常超期终态不是故障。
 - 暂停语义：暂停计划只撤销 linked 的那条 followup 许可（`revokeFollowupGrantById`），同事件上用户独立开启的提醒不受影响；恢复不补发，只提示重新开启。若用户报「暂停计划后提醒还在发」，先查该提醒是否为独立许可（followup_grants 中非 linked_followup_grant_id 的 ACTIVE 行）。
+
+### 灰度检查清单（六项能力 A4，内部合成账户灰度窗口内每 24h 留档）
+1. **抑制原因**：`SELECT action, reason, count FROM followup_suppression_counters ORDER BY count DESC;`（迁移 068；或 `/internal/metrics` 的 `qiyu_followup_suppressed_total{action,reason}`）。交叉核对 `followup_jobs.last_error` 分布。异常信号：`SAFETY_MODE`/`USER_PAUSED` 占比畸高（安全模式被常态化触发需查账户安全状态），`QUIET_HOURS` 远大于 `PUBLISH`（静默窗配置与用户群作息不符）。
+2. **成本**：`/internal/metrics` 的 `qiyu_provider_estimated_cost_fen`（费率卡 `QIYU_COST_RATE_CARD_JSON`）+ `SELECT capability, provider, sum(input_tokens), sum(output_tokens) FROM operation_metrics WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours' GROUP BY 1,2;`。
+3. **失败队列**：`SELECT state, count(*) FROM life_event_extraction_jobs GROUP BY 1;`（FAILED 留表待人工，不自动重放）+ `SELECT job_id, last_error FROM followup_jobs WHERE state = 'FAILED';`。EXPIRED 是正常频控终态不是故障。
+4. **死信与积压**：`qiyu_dead_letters_open`（conversation_summary/asset_embedding 两队列）、`qiyu_deletion_jobs_pending`（超 24h 告警）、`qiyu_image_jobs_inflight`。
+5. **灰度范围**：确认 `QIYU_DEV_FLAG_ACCOUNTS` 白名单当前值（空=全局开启；非空=仅白名单账户）；API 进程与 Worker 进程各自解析一次环境，改名单需两边同步重启。
