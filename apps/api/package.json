@@ -16,6 +16,8 @@
     "eval:latency-cost": "node eval/run-latency-cost-regression.js",
     "eval:dataset:validate": "node ../../development/eval/datasets/qiyu-companion-v0.1/validate-dataset.js",
     "eval:dataset:validate:capabilities": "node ../../development/eval/datasets/qiyu-capabilities-v0.1/validate.js",
+    "eval:followup-policy": "node eval/run-followup-policy-regression.js",
+    "eval:plan-card": "node eval/run-plan-card-regression.js",
       "eval:companion:prepare": "node eval/prepare-companion-eval-run.js",
       "eval:companion:execute": "node eval/execute-companion-eval-run.js",
     "eval:bad-case": "node eval/add-bad-case.js",

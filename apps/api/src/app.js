@@ -1475,7 +1475,12 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     if (authorityClaim) {
       releaseDailyChatUsage(store, reservation);
       reservation = null;
-      return createModelAuthorityGuardResponse(store, account, conversation, text, authorityClaim);
+      // A1 三通道一致性（A4 奇偶性测试抓到的缺口）：输出侧守卫拦截的是模型
+      // 回复，用户消息本身已通过安全与输入审核并落库——SSE 通道在受理时即
+      // 入队提取，非流式在此也必须入队，否则同一条消息两通道提取行为分叉。
+      const guardResponse = createModelAuthorityGuardResponse(store, account, conversation, text, authorityClaim);
+      if (lifeEventExtractionEnabled) enqueueLifeEventExtraction({ store, account, conversation, message: guardResponse.body.user_message });
+      return guardResponse;
     }
     if (typeof textModerator === 'function') {
       const moderation = await moderateTextWithMetric(store, account, textModerator, { text: modelReply.reply_text, conversationId: conversation.conversation_id, direction: 'OUTPUT' });
@@ -1488,7 +1493,10 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
         // that the system replaces with a deterministic safety message.
         releaseDailyChatUsage(store, reservation);
         reservation = null;
-        return createOutputModerationResponse(store, account, conversation, text, moderation);
+        // 同上：输出审核拦截的是回复不是用户消息，提取照常入队（与 SSE 一致）。
+        const guardResponse = createOutputModerationResponse(store, account, conversation, text, moderation);
+        if (lifeEventExtractionEnabled) enqueueLifeEventExtraction({ store, account, conversation, message: guardResponse.body.user_message });
+        return guardResponse;
       }
     }
     const createdAt = new Date().toISOString();
