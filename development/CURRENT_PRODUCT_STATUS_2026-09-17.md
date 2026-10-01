@@ -72,3 +72,17 @@
 - **测试（2026-10-01 实跑）**：`node --test` 474 用例 / 465 通过 / 0 失败 / 9 跳过（跳过=两个 PG 专属套件需 DATABASE_URL，预期行为；新增 followup-schema/service/composer/worker/http 五个内存套件）；`test:pg-followup` 5/5（迁移 065 可执行+RLS/FORCE/BYPASSRLS、双连接并发 claim 不相交、并发 publish 抢槽恰一胜且输家 EXPIRED 零投递、runNext 全旅程含模板措辞/来源引用绑定事件版本/审计/槽位归属赢家/同日第二任务 EXPIRED、静默 DEFER 精确顺延、租约过期重领 attempts 累计——Docker 临时库 tmpfs）；`test:e2e-companion-continuity` 门禁通过（A1 三步+A2 三步 PASS：开启提醒落库、到期投递主动角标+来源面板、同日第二任务 EXPIRED 不补发；0 控制台错误、0 服务端 5xx，报告 `development/eval/browser-e2e-2026-09-30.md`）。
 - **边界与残余风险**：模型改写槽未做真实 Qwen 验收（模板措辞为已实测基准路径，模型槽失败三路回退到模板）；E2E 的主动消息可见性依赖用户回到应用时拉取历史（无推送、前端不轮询——站内投递的产品语义，E2E 以 reload 模拟）；PG 实测覆盖单进程内双连接竞态，未含多进程生产压测。
 - **操作口径**：开关（QIYU_DEV_FLAGS 增 `FOLLOWUP_DISPATCH`，默认关）与任务积压/FAILED 处置见 OPERATIONS_RUNBOOK「跟进调度开关与排障」。
+
+## 2026-10-01 A3「计划、卡片与站内审批」交付登记（六项能力三轮：能力四/五/六）
+
+- **范围**：A3 完整闭环（共同小计划 INTERVIEW_PREP_V1 + 交互成果卡片三固定组件 + 最小 action gate 参数绑定审批）。B1 外部日历不在本轮。核心原则：计划建议不自动成为用户承诺（草案→接受才建立）；卡片是事件/计划的视图不存第二份可编辑事实；角色提议不等于执行成功——用户确认的是具体对象、参数和影响。
+- **已实现并验证（本轮实跑）**：
+  - 迁移 066（companion_plans 部分唯一 (account,event) WHERE 非终态=一事件至多一个未终结计划、companion_plan_steps UNIQUE(plan,step_order)、artifact_cards 一源一卡薄表——内容永不落库 GET 现场渲染、operation_metrics 增 COMPANION_PLAN_PROPOSAL）/067（action_requests 九态+parameters_digest+全量幂等唯一+15 分钟惰性过期）；无新 Worker 角色（计划全部由用户操作驱动的请求事务完成；投递归既有 followup worker）。
+  - 域层：plan-schema（模板白名单首批仅 INTERVIEW_PREP_V1，医疗/危机/法律/财务靠无对应模板结构性排除；模型提议输出拒 HTML/链接/越界）、plan-service（投影唯一写者：草案 supersede/五操作状态机/事件联动；accept 可选 followup 子对象复用 A2 全量裁决记 linked_grant_id；暂停经新 revokeFollowupGrantById 只撤那一条——同事件独立许可存活；恢复不补发；完成需步骤全终态或显式 confirm）、artifact-card（消毒拒绝而非转义；动作白名单映射真实路由按源状态收敛；Markdown 导出）、action-gate（注册表首批仅 ACCEPT_PLAN→WRITE_MEMORY；canonicalParametersDigest 服务器规范化哈希；approve 短事务重验 digest/过期/目标版本/账户准入；recordTransparentAction 同一次确认=审批+执行两状态且白名单只约束显式入口）、plan-composer 三路回退（LISTEN_ONLY 不调模型零待办）；qwen createQwenPlanProposer + mock 提议器。
+  - API（三平级开关 COMPANION_PLANS/ARTIFACT_CARDS/ACTION_EXECUTION）：计划 10 路由+卡片 1（format=json|markdown）+审批 4；五条计划 action 成功后透明留痕（失败不占幂等键）；事件确认路径急切建卡片身份行；PATCH 事件转 CANCELLED 响应带 plans_paused、DELETE 带 plans_cleaned_up。
+  - 数据权利补缺（用户拍板）：注销账本补 A2 欠账三域（followup 许可/任务/槽位）+A3 四域，关系档案导出增 life_events/followups/companion_plans/artifact_cards/action_requests 五段（审批无参数正文）。
+  - Web：「计划」主导航；草案卡步骤行内编辑（change 即存）+接受时「到期提醒我」勾选（接受≠自动开提醒）；聊天卡片消息 provider=companion-card 惰性水合——定点替换节点绝不整树重渲染（组合输入/焦点/滚动不受打扰，E2E 硬门禁）；时间线事件卡「一起准备」「查看卡片」；卡片 bottom-sheet+Markdown 导出；三重登记 bump 20261001-a3。
+- **测试（2026-10-01 实跑）**：内存全量 517 用例 / 508 通过 / 0 失败 / 15 跳过（三个 PG 套件需 DATABASE_URL，预期；新增 plan-schema/plan-service/artifact-card/action-gate/plan-composer/companion-plans-http/a3-deletion-links 七套件）；`test:pg-companion-plans` 6/6（迁移+RLS/FORCE、部分唯一、action 幂等唯一、乐观锁恰一胜、复合 FK、域层全旅程含暂停撤 linked 恢复不补发；编排脚本加连接预热后连续三轮稳定）；`test:e2e-companion-continuity` 门禁通过（A1 三步+A2 三步+A3 四步 PASS：草案可编辑接受+勾提醒落库、暂停撤 linked 恢复不补发、卡片水合+组合输入保持、事件取消联动+未知动作 400+ACCEPT_PLAN 审批执行；两轮稳定，报告 `development/eval/browser-e2e-2026-10-01.md`）；`test:e2e-prototype-states` 42/42。
+- **探查副产品（如实登记）**：A1 PG 套件的「RLS 生效」用例实际测的是事务隔离（superuser 绕过 RLS，未提交行对另一连接本就不可见）；本轮 A3 PG 用正确手法（SET LOCAL ROLE qiyu_app + app.account_id）做了真实 RLS 过滤断言。A1 该用例的强化留待下轮（2 行改法已知）。
+- **边界与残余风险**：qwen 提议器（模型槽）未做真实验收——mock 提议器与模板三步为已实测路径，真实模型输出由 validatePlanProposalOutput 拒不合法形态（未实测真实返回分布）；无后台清扫（DRAFT 30 天/action 15 分钟均惰性裁决，残留行由注销/保留期收口）；卡片导出为文件下载，不写入外部系统；A2 遗留的「读路径可见性依赖用户回到应用」语义在卡片上相同（reload 拉历史）。
+- **操作口径**：三开关关闭语义、DRAFT 过期、action 15 分钟与无 Worker 运维含义见 OPERATIONS_RUNBOOK「计划与卡片开关排障」。

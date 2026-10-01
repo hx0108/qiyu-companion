@@ -94,6 +94,7 @@ const STATIC_FILES = new Map([
   ['/media-input.js', { file: path.resolve(__dirname, '../../web/media-input.js'), type: 'text/javascript; charset=utf-8' }],
   ['/call-client.js', { file: path.resolve(__dirname, '../../web/call-client.js'), type: 'text/javascript; charset=utf-8' }],
   ['/memory-panel.js', { file: path.resolve(__dirname, '../../web/memory-panel.js'), type: 'text/javascript; charset=utf-8' }],
+  ['/companion-cards.js', { file: path.resolve(__dirname, '../../web/companion-cards.js'), type: 'text/javascript; charset=utf-8' }],
   ['/manifest.webmanifest', { file: path.resolve(__dirname, '../../web/manifest.webmanifest'), type: 'application/manifest+json; charset=utf-8' }],
   ['/service-worker.js', { file: path.resolve(__dirname, '../../web/service-worker.js'), type: 'text/javascript; charset=utf-8' }],
   ['/styles.css', { file: path.resolve(__dirname, '../../web/styles.css'), type: 'text/css; charset=utf-8' }],

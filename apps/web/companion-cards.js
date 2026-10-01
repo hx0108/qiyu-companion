@@ -62,9 +62,17 @@ function eventCardSheet(card) {
   return `<section class="sheet" role="dialog" aria-modal="true" aria-label="事件卡片"><div class="grabber"></div><div class="sheet-head"><div><span class="aigc">来源视图</span><h3>事件卡片</h3><p>这是事件当前状态的卡片视图，内容以事件为准</p></div><button class="close" data-action="close-card-sheet" aria-label="关闭">×</button></div><div class="companion-card-sheet-body">${eventCardBody(card)}</div><div class="sheet-actions"><button class="btn btn-line" data-action="export-card" data-artifact-id="${escapeHtml(card.artifact_id)}" data-format="markdown">导出 Markdown</button><button class="btn btn-secondary wide" data-action="close-card-sheet">关闭</button></div></section>`;
 }
 
-// 计划页的计划卡（草案可接受+可选提醒勾选；进行中可暂停/完成/取消）。
+// 计划页的计划卡（草案步骤可行内编辑+接受时可选提醒勾选；进行中可暂停/
+// 完成/取消）。草案编辑：step-title-input 的 change 事件触发 PATCH（app.js
+// change 监听器接线），保持草案「可编辑、接受才开始」的产品语义。
 function planPageCard(plan, { busy = false } = {}) {
-  const steps = (plan.steps ?? []).map((step) => `<li class="plan-step-row"><button type="button" class="step-toggle ${step.state === "TODO" ? "" : "done"}" data-action="toggle-plan-step" data-plan-id="${escapeHtml(plan.plan_id)}" data-step-id="${escapeHtml(step.step_id)}" data-step-state="${escapeHtml(step.state)}" data-expected-version="${escapeHtml(String(plan.version))}" aria-label="${step.state === "TODO" ? "标记完成" : "退回待做"}" ${busy || plan.state === "DRAFT" ? "disabled" : ""}><span class="step-state ${escapeHtml(step.state)}">${escapeHtml(STEP_STATE_LABELS[step.state] ?? step.state)}</span></button><span class="step-title">${escapeHtml(step.title)}</span>${step.estimated_minutes ? `<small>约 ${escapeHtml(String(step.estimated_minutes))} 分钟</small>` : ""}</li>`).join("");
+  const editable = plan.state === "DRAFT" && !plan.expired;
+  const steps = (plan.steps ?? []).map((step) => {
+    const title = editable
+      ? `<input class="step-title-input" data-plan-id="${escapeHtml(plan.plan_id)}" data-step-id="${escapeHtml(step.step_id)}" data-expected-version="${escapeHtml(String(plan.version))}" value="${escapeHtml(step.title)}" maxlength="80" aria-label="步骤标题（可编辑）">`
+      : `<span class="step-title">${escapeHtml(step.title)}</span>`;
+    return `<li class="plan-step-row"><button type="button" class="step-toggle ${step.state === "TODO" ? "" : "done"}" data-action="toggle-plan-step" data-plan-id="${escapeHtml(plan.plan_id)}" data-step-id="${escapeHtml(step.step_id)}" data-step-state="${escapeHtml(step.state)}" data-expected-version="${escapeHtml(String(plan.version))}" aria-label="${step.state === "TODO" ? "标记完成" : "退回待做"}" ${busy || editable ? "disabled" : ""}><span class="step-state ${escapeHtml(step.state)}">${escapeHtml(STEP_STATE_LABELS[step.state] ?? step.state)}</span></button>${title}${step.estimated_minutes ? `<small>约 ${escapeHtml(String(step.estimated_minutes))} 分钟</small>` : ""}</li>`;
+  }).join("");
   const actions = planPageActions(plan, busy);
   return `<article class="card plan-card" data-plan-id="${escapeHtml(plan.plan_id)}"><header><b>${escapeHtml(plan.title)}</b><small>${escapeHtml(PLAN_STATE_LABELS[plan.state] ?? plan.state)} · ${escapeHtml(SUPPORT_MODE_LABELS[plan.support_mode] ?? plan.support_mode)} · 版本 ${escapeHtml(String(plan.version))}${plan.expired ? " · 草案已过期" : ""}</small></header>${steps ? `<ol class="plan-step-list">${steps}</ol>` : '<p class="muted">只听模式：没有待办，想聊就聊。</p>'}${plan.state === "DRAFT" && !plan.expired ? '<label class="field plan-reminder-optin"><input type="checkbox" class="plan-followup-checkbox"> 接受时顺便开启到期提醒（每天最多一条，可随时关）</label>' : ""}${plan.state === "PAUSED" && plan.reminder?.regrant_available ? '<p class="muted">提醒已随暂停停止；恢复后如需提醒请到事件卡重新开启。</p>' : ""}<div class="button-row">${actions}</div></article>`;
 }

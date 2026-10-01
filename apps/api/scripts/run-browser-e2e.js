@@ -64,7 +64,8 @@ async function main() {
   // 六项能力 A1：陪伴连续性场景走确定性 mock 提取器（关键词→固定候选），
   // 开关全开；内存 worker 500ms 轮询，页面轮询等候选横幅。
   // 六项能力 A2：跟进调度 worker 同场启动（composer=null 走模板措辞）。
-  const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH' });
+  // 六项能力 A3：计划/卡片/审批三开关同场开启（createApp 默认 mock 提议器）。
+  const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH,COMPANION_PLANS,ARTIFACT_CARDS,ACTION_EXECUTION' });
   const a1Worker = startLifeEventExtractionWorker(store, mockLifeEventExtractor, { intervalMs: 500 });
   startFollowupWorker(store, null, { intervalMs: 500, workerId: 'e2e-followup' });
   const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true, devFlags: a1DevFlags });
@@ -100,7 +101,7 @@ async function main() {
   const onlyIndex = cliArgs.indexOf('--only');
   const onlyScenario = onlyIndex >= 0 ? cliArgs[onlyIndex + 1] : null;
   const ONLY_SCENARIO_STEPS = {
-    'companion-continuity': ['必要告知', '年龄声明', '角色创建', '对话：', 'A1 ', 'A2 ']
+    'companion-continuity': ['必要告知', '年龄声明', '角色创建', '对话：', 'A1 ', 'A2 ', 'A3 ']
   };
   const step = async (name, run) => {
     if (onlyScenario && ONLY_SCENARIO_STEPS[onlyScenario] && !ONLY_SCENARIO_STEPS[onlyScenario].some((prefix) => name.startsWith(prefix))) {
@@ -507,6 +508,146 @@ async function main() {
         `同日第二任务应 EXPIRED/DAILY_LIMIT_REACHED，实际 ${dinnerJob?.state}/${dinnerJob?.last_error}`);
       assert([...store.proactiveMessages.values()].filter((item) => item.kind === 'NORMAL').length === 1, '审计应仍只有一条 NORMAL');
       assert([...store.messages.values()].filter((message) => message.provider === 'proactive-followup').length === 1, '聊天流应仍只有一条主动消息');
+      await backToChat();
+    });
+
+    // ---- 六项能力 A3：计划/卡片/审批 ----
+
+    await step('A3 计划草案与接受：时间线「一起准备」→草案可编辑→接受+勾提醒→许可任务落库', async () => {
+      // 造一个新的面试事件（mock 提取器关键词表只认「面试/考试/聚餐」等——
+      // A1 的面试事件已在其删除步骤清空，这里复用面试关键词安全）。
+      await backToChat();
+      await confirmLifeEventCandidate(page, store, { message: '下周四要去公司参加复试面试，想提前练练', localTime: toLocalInput(Date.now() + 120_000), titlePart: '面试' });
+      const interview = [...store.lifeEvents.values()].find((item) => !item.deleted_at && (item.title ?? '').includes('面试'));
+      assert(interview, '应存在已确认的面试事件');
+      // 时间线事件卡「一起准备」→ 草案（mock 提议器固定三步）+ 聊天卡片消息。
+      await page.locator('nav.bottom-nav [data-action="open-assets"]').click();
+      await page.waitForSelector(`[data-entry-type="LIFE_EVENT"] [data-action="create-plan-for-event"][data-event-id="${interview.event_id}"]`, { timeout: 10_000 });
+      await page.locator(`[data-entry-type="LIFE_EVENT"] [data-action="create-plan-for-event"][data-event-id="${interview.event_id}"]`).click();
+      await page.waitForFunction(() => document.body.innerText.includes('草案'), null, { timeout: 10_000 });
+      const draftPlan = [...store.companionPlans.values()].find((plan) => plan.event_id === interview.event_id && plan.state === 'DRAFT');
+      assert(draftPlan, '服务端应有 DRAFT 计划');
+      assert([...store.companionPlanSteps.values()].filter((step) => step.plan_id === draftPlan.plan_id).length === 3, 'mock 提议器固定三步');
+      assert([...store.messages.values()].some((message) => message.provider === 'companion-card'), '草案创建写聊天卡片消息');
+      // 计划页：编辑一步标题（行内输入 change 即存）→ 勾「到期提醒我」→ 接受。
+      // 时间线页无底部导航，先返回聊天页再进计划页。
+      await page.locator('[data-action="back-chat"]').first().click();
+      await page.waitForSelector('#message-form', { timeout: 10_000 });
+      await page.locator('nav.bottom-nav [data-action="open-plans"]').click();
+      await page.waitForSelector('.plan-card .step-title-input', { timeout: 10_000 });
+      const titleInput = page.locator('.plan-card .step-title-input').first();
+      await titleInput.fill('对着镜子练一遍自我介绍');
+      await titleInput.blur();
+      await page.waitForFunction(() => document.body.innerText.includes('步骤已保存'), null, { timeout: 10_000 });
+      assert([...store.companionPlanSteps.values()].some((step) => step.plan_id === draftPlan.plan_id && step.title === '对着镜子练一遍自我介绍'), '行内编辑已落库');
+      await page.locator('.plan-followup-checkbox').check();
+      await page.locator('[data-action="plan-accept"]').click();
+      await page.waitForFunction(() => document.body.innerText.includes('计划已开始'), null, { timeout: 10_000 });
+      // 先等服务端终态再断言（接受≠开提醒的例外：这里显式勾选了）。
+      const activePlan = store.companionPlans.get(draftPlan.plan_id);
+      assert(activePlan.state === 'ACTIVE', '计划应已接受为 ACTIVE');
+      const linkedGrant = [...store.followupGrants.values()].find((grant) => grant.grant_id === activePlan.linked_followup_grant_id);
+      assert(linkedGrant && linkedGrant.state === 'ACTIVE', '勾选提醒→linked 许可 ACTIVE');
+      const linkedJob = [...store.followupJobs.values()].find((job) => job.grant_id === activePlan.linked_followup_grant_id);
+      assert(linkedJob && linkedJob.state === 'PENDING', 'linked 任务 PENDING');
+    });
+
+    await step('A3 步骤与暂停恢复：勾 DONE→暂停撤 linked→恢复不补发', async () => {
+      const activePlan = [...store.companionPlans.values()].find((plan) => plan.state === 'ACTIVE');
+      assert(activePlan, '应有进行中计划');
+      // 勾一个步骤 DONE（计划页 step-toggle）。
+      await page.locator('[data-action="toggle-plan-step"]').first().click();
+      await page.waitForFunction(() => [...document.querySelectorAll('.plan-card .step-state')].some((node) => node.textContent.includes('已完成')), null, { timeout: 10_000 });
+      const doneStep = [...store.companionPlanSteps.values()].find((step) => step.plan_id === activePlan.plan_id && step.state === 'DONE');
+      assert(doneStep, '步骤勾选落库 DONE');
+      // 暂停：linked 许可撤销 + 在途任务取消。
+      await page.locator('[data-action="plan-action"][data-plan-action="pause"]').click();
+      await page.waitForFunction(() => document.body.innerText.includes('计划已暂停'), null, { timeout: 10_000 });
+      const grantId = activePlan.linked_followup_grant_id;
+      assert(store.followupGrants.get(grantId).state === 'REVOKED', '暂停撤销 linked 许可');
+      assert([...store.followupJobs.values()].find((job) => job.grant_id === grantId).state === 'CANCELLED', 'linked 任务取消');
+      // 恢复：不补发（无新任务），页面只有重新开启提醒的提示。
+      await page.locator('[data-action="plan-action"][data-plan-action="resume"]').click();
+      await page.waitForFunction(() => document.body.innerText.includes('已恢复'), null, { timeout: 10_000 });
+      assert(store.companionPlans.get(activePlan.plan_id).state === 'ACTIVE', '恢复后计划 ACTIVE');
+      assert([...store.followupJobs.values()].filter((job) => job.event_id === activePlan.event_id && ['PENDING', 'LEASED'].includes(job.state)).length === 0, '恢复不补发');
+      assert(await page.locator('.plan-card').innerText().then((text) => text.includes('如需提醒请到事件卡重新开启') || !text.includes('提醒已随暂停停止')), '暂停提示消失/无补发暗示');
+    });
+
+    await step('A3 卡片与输入法：聊天卡片壳水合出步骤；异步卡片更新不冲掉组合输入', async () => {
+      // 回聊天流：reload 拉历史（卡片消息随草案已落库）。心跳等周期请求会
+      // 让 networkidle 永不静默，用 domcontentloaded+显式等待表单就绪。
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#message-form', { timeout: 15_000 });
+      await page.waitForSelector('.companion-card', { timeout: 15_000 });
+      await page.waitForSelector('.companion-card .plan-step-list', { timeout: 15_000 });
+      const cardText = await page.locator('.companion-card').first().innerText();
+      assert(cardText.includes('对着镜子练一遍自我介绍'), `水合后的卡片应含已编辑步骤，实际：${cardText.slice(0, 80)}`);
+      // 组合输入保持（§9.1 硬门禁）：输入框挂标记 + 模拟 composition 中间态，
+      // 触发一次卡片重渲染（updateCardNode 定点替换），断言草稿/光标/节点未动。
+      const input = page.locator('#message-form [name="message"]');
+      await input.click();
+      await page.evaluate(() => {
+        const target = document.querySelector('#message-form [name="message"]');
+        target.value = '复试好紧张';
+        target.setAttribute('data-e2e-marker', 'composition-guard');
+        target.dispatchEvent(new CompositionEvent('compositionstart', { data: '复试好紧张' }));
+        target.setSelectionRange(4, 4);
+      });
+      await page.evaluate(() => {
+        // 强制对卡片节点做一次定点重渲染（与 hydrateCompanionCards 同路径）。
+        const card = document.querySelector('.companion-card[data-artifact-id]');
+        card.dataset.hydrated = '';
+        delete card.dataset.hydrated;
+      });
+      await page.waitForTimeout(1_200); // 水合重放窗口
+      const guard = await page.evaluate(() => {
+        const target = document.querySelector('#message-form [name="message"]');
+        return { value: target.value, selection: target.selectionStart, marker: target.getAttribute('data-e2e-marker'), stillComposing: document.activeElement === target };
+      });
+      assert(guard.value === '复试好紧张', '组合输入草稿未被动');
+      assert(guard.selection === 4, '光标位置未被动');
+      assert(guard.marker === 'composition-guard', '输入框节点未被替换（无整树重渲染）');
+      assert(guard.stillComposing === true, '焦点保持');
+    });
+
+    await step('A3 联动与门禁：事件取消→计划 PAUSED；未知动作 400；ACCEPT_PLAN 审批执行', async () => {
+      const activePlan = [...store.companionPlans.values()].find((plan) => plan.state === 'ACTIVE');
+      assert(activePlan, '应有进行中计划');
+      // 事件取消联动：PATCH 事件 status=CANCELLED → 计划 PAUSED（Node 侧直调，
+      // UI 侧等下一条用 store 断言——UI 旅程已在 HTTP 测试覆盖）。
+      const patchResponse = await fetch(`${base}/api/v1/life-events/${encodeURIComponent(activePlan.event_id)}`, {
+        method: 'PATCH', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-a3-cancel-${Date.now()}` },
+        body: JSON.stringify({ expected_version: store.lifeEvents.get(activePlan.event_id).version, status: 'CANCELLED' })
+      });
+      const patchBody = await patchResponse.json();
+      assert(patchResponse.ok, `事件取消 PATCH 失败：HTTP ${patchResponse.status}`);
+      assert(patchBody.plans_paused?.plans_paused === 1, '响应带 plans_paused 计数');
+      assert(store.companionPlans.get(activePlan.plan_id).state === 'PAUSED', '计划随事件取消暂停');
+      // 门禁：显式审批入口拒绝未知动作（模型/客户端不能发明动作）。
+      const unknown = await fetch(`${base}/api/v1/action-requests`, {
+        method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-a3-unknown-${Date.now()}` },
+        body: JSON.stringify({ action_type: 'DELETE_ACCOUNT', target_ref: activePlan.plan_id, idempotency_key: 'e2e-unknown-1' })
+      });
+      assert(unknown.status === 400, '未知动作必须 400');
+      // 显式审批全链：新草案 → 提议 ACCEPT_PLAN → approve → SUCCEEDED。
+      const draftResponse = await fetch(`${base}/api/v1/companion-plans`, {
+        method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-a3-draft-${Date.now()}` },
+        body: JSON.stringify({ template_version: 'INTERVIEW_PREP_V1', support_mode: 'BREAK_DOWN_STEPS' })
+      });
+      const draft = (await draftResponse.json()).plan;
+      assert(draftResponse.ok && draft.state === 'DRAFT', '无事件草案可创建');
+      const proposed = await (await fetch(`${base}/api/v1/action-requests`, {
+        method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-a3-propose-${Date.now()}` },
+        body: JSON.stringify({ action_type: 'ACCEPT_PLAN', target_ref: draft.plan_id, target_version: draft.version, parameters: { expected_version: draft.version }, idempotency_key: `e2e-accept-${draft.plan_id}` })
+      })).json();
+      assert(proposed.action_request.state === 'PROPOSED', '提议落库 PROPOSED');
+      const approved = await (await fetch(`${base}/api/v1/action-requests/${proposed.action_request.action_id}/approve`, {
+        method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': `e2e-a3-approve-${Date.now()}` }
+      })).json();
+      assert(approved.action_request.state === 'SUCCEEDED', '批准即短事务重验后执行');
+      assert(approved.result.plan.state === 'ACTIVE', '执行结果=计划接受成功');
+      assert(store.actionRequests.get(proposed.action_request.action_id).state === 'SUCCEEDED', '服务端审批行 SUCCEEDED');
       await backToChat();
     });
 

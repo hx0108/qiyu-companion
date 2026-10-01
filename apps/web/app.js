@@ -2422,6 +2422,28 @@ async function togglePlanStep(button) {
   } finally { setBusy(false); render(); }
 }
 
+// 草案步骤标题行内编辑：change 即保存；409 保输入值提示刷新（不整页重置）。
+async function savePlanStepTitle(input) {
+  const planId = input.dataset.planId;
+  const stepId = input.dataset.stepId;
+  const expectedVersion = Number(input.dataset.expectedVersion);
+  const title = String(input.value ?? "").trim();
+  if (!planId || !stepId || !Number.isFinite(expectedVersion) || !title) return;
+  try {
+    await api(`/companion-plans/${encodeURIComponent(planId)}/steps/${encodeURIComponent(stepId)}`, {
+      method: "PATCH", idempotent: uuid(), body: { expected_version: expectedVersion, title }
+    });
+    await refreshPlans();
+    setToast("步骤已保存；接受前都可以改。");
+    render();
+  } catch (error) {
+    if (error?.status === 409) setToast("计划刚被修改，这处编辑没保存；已刷新，请重新调整。");
+    else setToast(serverMessage(error));
+    await refreshPlans().catch(() => {});
+    render();
+  }
+}
+
 // 让角色提议一份草案（时间线事件卡入口 / 过期草案重提）。
 async function createPlanForEvent(eventId) {
   setBusy(true);
@@ -2731,6 +2753,9 @@ document.addEventListener("change", (event) => {
     if (event.target.checked) state.noticeChecks.add(id); else state.noticeChecks.delete(id);
     render();
   }
+  // A3 草案步骤行内编辑：失焦/回车提交即 PATCH（计划聚合乐观锁）。
+  const stepInput = event.target?.classList?.contains("step-title-input") ? event.target : null;
+  if (stepInput) savePlanStepTitle(stepInput);
   if (event.target?.id === "asr-file") setAsrFile(event.target.files?.[0]);
   if (event.target?.id === "reference-image-file") setReferenceImageFile(event.target.files?.[0]);
   if (event.target?.id === "context-image-file") uploadContextImage(event.target.files?.[0]);
