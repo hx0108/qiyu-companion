@@ -4,6 +4,32 @@
  * feedback facts continue to come from /api/v1 in app.js.
  */
 :root { --qy-line: rgba(63,42,54,.14); }
+#app[data-portrait="original"] { --qy-character-background: url('/assets/qiyu-character.png'); }
+#app[data-portrait="male-01"] { --qy-character-background: url('/assets/portraits/male-01.png'); }
+#app[data-portrait="male-02"] { --qy-character-background: url('/assets/portraits/male-02.png'); }
+#app[data-portrait="male-03"] { --qy-character-background: url('/assets/portraits/male-03.png'); }
+#app[data-portrait="female-01"] { --qy-character-background: url('/assets/portraits/female-01.png'); }
+#app[data-portrait="female-02"] { --qy-character-background: url('/assets/portraits/female-02.png'); }
+#app[data-portrait="female-03"] { --qy-character-background: url('/assets/portraits/female-03.png'); }
+.avatar-picker-trigger { display: grid; place-items: center; min-width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.qiyu-prototype .portrait-picker-entry { display: block; width: 100%; padding: 0; border: 0; cursor: pointer; }
+.appearance-entry { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 76px; padding: 12px; border: 1px solid var(--qy-line); border-radius: 20px; background: var(--qy-bg-elevated); color: var(--qy-ink); text-align: left; cursor: pointer; }
+.appearance-entry img { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; object-position: center 28%; }
+.appearance-entry small { display: block; margin-top: 4px; color: var(--qy-muted); }
+.portrait-current { position: relative; height: 190px; margin-top: 18px; overflow: hidden; border-radius: 24px; background: var(--qy-rose-soft); }
+.portrait-current img { width: 100%; height: 100%; object-fit: cover; object-position: center 28%; }
+.portrait-current span { position: absolute; bottom: 10px; left: 12px; padding: 5px 10px; border-radius: 999px; color: white; background: rgba(32,24,30,.7); font-size: 12px; }
+.qiyu-prototype .portrait-group h2 { margin: 24px 0 12px; font-size: 19px; }
+.portrait-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.portrait-option { min-width: 0; padding: 5px 5px 9px; border: 2px solid transparent; border-radius: 19px; background: rgba(255,255,255,.55); color: var(--qy-ink); cursor: pointer; }
+.portrait-option img { display: block; width: 100%; aspect-ratio: 4/5; object-fit: cover; object-position: center 28%; border-radius: 13px; }
+.portrait-option span { display: block; margin-top: 8px; font-size: 12px; }
+.portrait-option small { display: block; margin-top: 3px; color: var(--qy-muted); font-size: 10px; }
+.portrait-option.selected { border-color: var(--qy-plum); background: var(--qy-rose-soft); }
+.qiyu-prototype .app-header > [data-action="close-portrait-picker"] { width: auto; min-width: 68px; min-height: 44px; padding: 0 18px; }
+.qiyu-prototype .app-header:has([data-action="close-portrait-picker"]) .step { white-space: nowrap; }
+.portrait-option:focus-visible, .avatar-picker-trigger:focus-visible { outline: 3px solid var(--qy-plum); outline-offset: 3px; }
+.qiyu-prototype.night .scene-state b { color: var(--qy-night-ink); }
 
 @media (min-width: 761px) {
   body { background: #d9d3cc; }
@@ -81,7 +107,7 @@
 .qiyu-prototype .ai-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--qy-rose); }
 .qiyu-prototype .icon-btn { width: 44px; height: 44px; min-width: 44px; display: grid; place-items: center; border: 0; border-radius: 50%; color: currentColor; background: transparent; }
 .qiyu-prototype .icon-btn.soft { background: rgba(91,54,83,.06); }
-.qiyu-prototype .chat-scroll { flex: 1; overflow: auto; padding: 8px 18px calc(155px + var(--qy-composer-extra, 0px)); position: relative; z-index: 2; overflow-anchor: none; }
+.qiyu-prototype .chat-scroll { flex: 1; overflow: auto; padding: 8px 18px calc(178px + var(--qy-composer-extra, 0px)); position: relative; z-index: 2; overflow-anchor: none; }
 .qiyu-prototype .date-rule { display: flex; gap: 10px; align-items: center; margin: 7px 0 16px; color: #96888f; font-size: 9px; letter-spacing: .1em; }
 .qiyu-prototype .date-rule::before, .qiyu-prototype .date-rule::after { content: ""; height: 1px; flex: 1; background: var(--qy-line); }
 .qiyu-prototype .scene-state { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; padding: 13px 14px; border: 1px solid var(--qy-line); border-radius: 18px; background: rgba(255,255,255,.45); }
@@ -111,8 +137,9 @@
 .qiyu-prototype .voice-trigger[data-synthesizing="true"] { pointer-events: none; }.qiyu-prototype .voice-trigger[data-synthesizing="true"] .voice-trigger-visual { animation: qy-voice-loading 1.1s ease-in-out infinite; }
 @keyframes qy-voice-loading { 0%, 100% { transform: scale(1); opacity: .7; } 50% { transform: scale(1.14); opacity: 1; } }
 .qiyu-prototype .voice-audio { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
-.qiyu-prototype .composer-wrap { position: absolute; z-index: 5; right: 0; bottom: calc(63px + env(safe-area-inset-bottom)); left: 0; padding: 10px 14px 12px; background: linear-gradient(180deg, transparent, var(--qy-paper) 30%); }
-.qiyu-prototype .composer { min-height: 56px; display: flex; gap: 0; align-items: flex-end; padding: 6px 6px 6px 8px; border: 1px solid var(--qy-line); border-radius: 999px; background: rgba(255,255,255,.92); box-shadow: 0 14px 30px rgba(66,41,54,.13); }
+.qiyu-prototype .bottom-dock { position: absolute; z-index: 7; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom) - var(--qy-keyboard-inset, 0px)); left: 10px; overflow: hidden; padding: 8px 8px 5px; border: 1px solid rgba(91,54,83,.07); border-radius: 30px; background: rgba(255,253,251,.96); box-shadow: 0 16px 38px rgba(66,41,54,.15); backdrop-filter: blur(22px); }
+.qiyu-prototype .composer-wrap { position: relative; z-index: 2; padding: 0; background: transparent; }
+.qiyu-prototype .composer { min-height: 56px; display: flex; gap: 0; align-items: flex-end; padding: 6px 6px 6px 8px; border: 1px solid rgba(91,54,83,.055); border-radius: 999px; background: rgba(246,242,241,.68); box-shadow: inset 0 1px 0 rgba(255,255,255,.72); }
 .qiyu-prototype .composer input, .qiyu-prototype .composer textarea { min-width: 0; min-height: 0; flex: 1; padding: 0 10px; border: 0; border-radius: 0; color: var(--qy-ink); background: transparent; outline: 0; font-size: 13px; }
 /* 多行输入框：单行时与原 input 几何一致（44px 高、文字垂直居中），
    随内容增高到上限后内部滚动；JS autosizeMessageInput 写内联 height。 */
@@ -147,18 +174,18 @@
 .qiyu-prototype .composer .icon-btn { width: 42px; height: 42px; color: #6d5f66; }.qiyu-prototype .composer .send { width: 44px; height: 44px; color: #fff; background: var(--qy-plum); box-shadow: 0 8px 18px rgba(91,54,83,.28); }
 /* --qy-keyboard-inset 由 app.js 在软键盘压缩布局视口时写入等量高度：
    导航栏保持锚在物理屏幕底部（藏在键盘后面），不会被顶到键盘上方。 */
-.qiyu-prototype .bottom-nav { height: calc(64px + env(safe-area-inset-bottom)); display: flex; padding: 4px 10px env(safe-area-inset-bottom); position: absolute; z-index: 7; right: 0; bottom: calc(0px - var(--qy-keyboard-inset, 0px)); left: 0; border-top: 1px solid var(--qy-line); background: rgba(246,241,234,.92); backdrop-filter: blur(18px); }
+.qiyu-prototype .bottom-nav { height: 58px; display: flex; padding: 5px 2px 0; position: relative; z-index: 1; border-top: 0; background: transparent; }
 /* 键盘打开时对话屏高度改用实际可视高度（部分 WebView 100dvh 滞后不缩，
    文档高出一截会在输入行与键盘之间露出聊天流尾巴）；body.qy-keyboard-open
    同时收缩 styles.css 里的 body/.device-shell/.app 链路。 */
 .qiyu-prototype.app-screen { height: var(--qy-app-height, calc(100dvh - 28px)); min-height: var(--qy-app-height, calc(100dvh - 28px)); }
 /* 键盘打开时导航已被推走，输入行去掉导航预留位，贴住键盘顶部；
    导航直接隐藏（display:none），避免它把文档撑出可滚动的一截。 */
-body.qy-keyboard-open .qiyu-prototype.app-screen .composer-wrap { bottom: 0; }
+body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-dock { right: 8px; bottom: 6px; left: 8px; padding-bottom: 8px; border-radius: 29px; }
 body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-nav { display: none; }
-.qiyu-prototype .nav-item { min-height: 54px; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border: 0; color: #93868d; background: transparent; font-size: 9px; }.qiyu-prototype .nav-item.on { color: var(--qy-plum); }
-.qiyu-prototype.night { color: var(--qy-night-ink); background: linear-gradient(180deg, rgba(13,9,16,.22) 0%, rgba(16,11,18,.67) 48%, #151019 80%), url('/assets/qiyu-night-scene.png') center top/100% auto no-repeat #151019; }
-.qiyu-prototype.night .identity small, .qiyu-prototype.night .date-rule, .qiyu-prototype.night .scene-state small, .qiyu-prototype.night .memory-banner small { color: var(--qy-night-muted); }.qiyu-prototype.night .scene-state { border-color: rgba(255,255,255,.12); background: rgba(35,25,37,.68); backdrop-filter: blur(15px); }.qiyu-prototype.night .ai .bubble { background: rgba(33,29,36,.92); backdrop-filter: blur(15px); }.qiyu-prototype.night .memory-banner { border-color: rgba(229,192,203,.3); color: #f1d8df; background: rgba(125,77,105,.23); }.qiyu-prototype.night .composer-wrap { background: linear-gradient(180deg, transparent, #151019 28%); }.qiyu-prototype.night .composer { border-color: rgba(255,255,255,.12); background: rgba(37,28,39,.86); }.qiyu-prototype.night .composer input, .qiyu-prototype.night .composer textarea { color: #fff; }.qiyu-prototype.night .composer input::placeholder, .qiyu-prototype.night .composer textarea::placeholder { color: #8d8089; }.qiyu-prototype.night .composer .icon-btn { color: #cfc2c9; }.qiyu-prototype.night .bottom-nav { border-color: rgba(255,255,255,.09); background: rgba(18,13,21,.9); }.qiyu-prototype.night .nav-item.on { color: #e8bec9; }.qiyu-prototype.night .icon-btn.soft { background: rgba(255,255,255,.08); }
+.qiyu-prototype .nav-item { min-height: 48px; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; border: 0; color: #93868d; background: transparent; font-size: 9px; transition: color .16s ease; }.qiyu-prototype .nav-icon-shell { width: 48px; height: 30px; display: grid; place-items: center; border-radius: 999px; transition: color .16s ease, background .16s ease, transform .16s ease; }.qiyu-prototype .nav-icon { display: block; }.qiyu-prototype .nav-item.on { color: var(--qy-plum); }.qiyu-prototype .nav-item.on .nav-icon-shell { color: #352d33; background: rgba(91,54,83,.12); transform: translateY(-1px); }
+.qiyu-prototype.night { color: var(--qy-night-ink); background: linear-gradient(180deg, rgba(13,9,16,.36), rgba(16,11,18,.68)), var(--qy-character-background, url('/assets/qiyu-character.png')) center 28%/cover no-repeat #151019; }
+.qiyu-prototype.night .identity small, .qiyu-prototype.night .date-rule, .qiyu-prototype.night .scene-state small, .qiyu-prototype.night .memory-banner small { color: var(--qy-night-muted); }.qiyu-prototype.night .scene-state { border-color: rgba(255,255,255,.12); background: rgba(35,25,37,.68); backdrop-filter: blur(15px); }.qiyu-prototype.night .ai .bubble { background: rgba(33,29,36,.92); backdrop-filter: blur(15px); }.qiyu-prototype.night .memory-banner { border-color: rgba(229,192,203,.3); color: #f1d8df; background: rgba(125,77,105,.23); }.qiyu-prototype.night .bottom-dock { border-color: rgba(255,255,255,.1); background: rgba(25,20,28,.96); box-shadow: 0 16px 38px rgba(0,0,0,.32); }.qiyu-prototype.night .composer { border-color: rgba(255,255,255,.075); background: rgba(255,255,255,.055); box-shadow: inset 0 1px 0 rgba(255,255,255,.035); }.qiyu-prototype.night .composer input, .qiyu-prototype.night .composer textarea { color: #fff; }.qiyu-prototype.night .composer input::placeholder, .qiyu-prototype.night .composer textarea::placeholder { color: #8d8089; }.qiyu-prototype.night .composer .icon-btn { color: #cfc2c9; }.qiyu-prototype.night .bottom-nav { background: transparent; }.qiyu-prototype.night .nav-item.on { color: #f0cfda; }.qiyu-prototype.night .nav-item.on .nav-icon-shell { color: #fff; background: rgba(232,190,201,.16); }.qiyu-prototype.night .icon-btn.soft { background: rgba(255,255,255,.08); }
 .qiyu-prototype.night .ai .bubble { background: #1d1e20; backdrop-filter: none; }
 .qiyu-prototype.night .voice-trigger-visual { background: linear-gradient(180deg,#323337 0%,#28292c 100%); box-shadow: 0 3px 8px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.05); }
 

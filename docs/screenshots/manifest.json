@@ -1,0 +1,94 @@
+{
+  "captured_at": "2026-10-22T01:44:44.729Z",
+  "viewport_css": {
+    "width": 402,
+    "height": 874
+  },
+  "device_scale_factor": 2,
+  "browser": "isolated Microsoft Edge",
+  "frontend": "20261021-chat-menu-v32",
+  "data": "local synthetic account; deterministic mock reply; fake microphone and inert mock native provider; no real provider, user data or physical microphone",
+  "sources": {
+    "apps/web/index.html": "111db38fc0c65a1b09654eb23e4c9bc3bae7fbbf6c40891f1495fc23674b740a",
+    "apps/web/app.js": "71a8342bc432844bec3dc433d8bc8f0588e464d848b91258ea231d2ed22ecea6",
+    "apps/web/apricot-ui.js": "6465bfc7ab7d532ae403b8ec4163b29b933270d2d991ee20595d9b3291165f0b",
+    "apps/web/apricot.css": "d1c9f9cee3792449bbb0f393c713cf4ce53b5a382e123465b91be0ddbbc24929"
+  },
+  "images": [
+    {
+      "file": "01-notices.png",
+      "title": "必要告知",
+      "sha256": "cb928a8d880ef019af76a691c12aeafec1264e9896f91868b3f08c2d097fb74a"
+    },
+    {
+      "file": "02-age.png",
+      "title": "年龄声明",
+      "sha256": "e5bfcda79bee961c418071998b63fe16cfef863232b8a8a544b733f4ac724c28"
+    },
+    {
+      "file": "03-character.png",
+      "title": "创建角色",
+      "sha256": "b068b44e7c4b37c68e9db0fc21e8a2802241b028e2c80388fb7c7b80e2b45959"
+    },
+    {
+      "file": "04-chat-day.png",
+      "title": "陪伴 · 日间",
+      "sha256": "eed92f4fa34b2b214e2c89d09e40c4bea994547be97ca34afc27a9ce5d3d0a6f"
+    },
+    {
+      "file": "05-chat-night.png",
+      "title": "陪伴 · 夜间",
+      "sha256": "193bb1fdff532304d23a0e29ee440baf6e6adc93c53c0621c8ac9d95330a4783"
+    },
+    {
+      "file": "10-profile.png",
+      "title": "我的",
+      "sha256": "9ddbe9acce11a63ae2271d40e39f805279932bc16e9043ca97e030f8041e6e56"
+    },
+    {
+      "file": "07-character-profile.png",
+      "title": "角色档案",
+      "sha256": "ed02034ae2c5b81f190566498dce8055d1deded4cf13c8a64ef73b8030166659"
+    },
+    {
+      "file": "11-persona-versions.png",
+      "title": "人格版本",
+      "sha256": "f8070b6e6b77e5020450f9060c5794bc068c237d7877db0346401d6c84964622"
+    },
+    {
+      "file": "08-data-center.png",
+      "title": "数据与隐私",
+      "sha256": "ed7cbea155a533e8667ed0093ce001cd1bde20ddd2e4b8422c23a28e9d434541"
+    },
+    {
+      "file": "14-proactive.png",
+      "title": "主动消息与静默时间",
+      "sha256": "3da5b54b1dd00e0f7bf1c4dc825bb4b6def016d317a53709b5813f628b74bb7b"
+    },
+    {
+      "file": "09-home.png",
+      "title": "此刻",
+      "sha256": "e09d0f0f3ca36e5f75855be0ad96bc49c013d61f0705b1e7fa0ac90531c800fa"
+    },
+    {
+      "file": "13-notifications.png",
+      "title": "站内通知",
+      "sha256": "bf59c06b223c5b207844c087d8fbc11113f23f9d4a7a64a1b29fb9cd48e28e94"
+    },
+    {
+      "file": "06-timeline.png",
+      "title": "回忆 · 空状态",
+      "sha256": "a0ed62c1304ea5db2ed731a60b9f2205f5097453955938df9520348f88e3d12f"
+    },
+    {
+      "file": "12-chat-menu.png",
+      "title": "陪伴选项",
+      "sha256": "bd9c0f00a9dfaf260dbfba947964abf617a93cf056d6c5b5ffc2de2117c8fe9d"
+    },
+    {
+      "file": "15-voice-call.png",
+      "title": "语音通话 · 本机假麦克风与 Mock 连接",
+      "sha256": "9005ed7e45bfa58cced7c0b15be45643ff30a636311cd00bb2a8d2278d80fc67"
+    }
+  ]
+}

@@ -4,7 +4,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const webRoot = path.resolve(__dirname, '../../web');
-const css = fs.readFileSync(path.join(webRoot, 'prototype-restoration.css'), 'utf8');
+const css = fs.readFileSync(path.join(webRoot, 'prototype-restoration.css'), 'utf8') + '\n' + fs.readFileSync(path.join(webRoot, 'apricot.css'), 'utf8');
+const ui = fs.readFileSync(path.join(webRoot, 'apricot-ui.js'), 'utf8');
 const app = fs.readFileSync(path.join(webRoot, 'app.js'), 'utf8');
 const session = fs.readFileSync(path.join(webRoot, 'encrypted-session.js'), 'utf8');
 const mediaInput = fs.readFileSync(path.join(webRoot, 'media-input.js'), 'utf8');
@@ -13,113 +14,80 @@ function rule(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const matches = [...css.matchAll(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`, 'g'))];
   assert.ok(matches.length, `missing CSS rule: ${selector}`);
-  return matches.at(-1)[1];
+  // Desktop breakpoint rules override individual declarations, not the entire base rule.
+  const declarations = new Map();
+  for (const match of matches) for (const entry of match[1].split(';')) {
+    const pair = entry.trim().match(/^([-\w]+)\s*:\s*(.*)$/);
+    if (pair) declarations.set(pair[1], pair[2]);
+  }
+  return [...declarations].map(([key, value]) => `${key}:${value}`).join(';');
 }
 
-test('assistant voice control is a compact edge-docked capsule in the bubble lower-right', () => {
-  const message = rule('.qiyu-prototype .message.ai');
-  const bubble = rule('.qiyu-prototype .ai .bubble');
-  const bubbleWithVoice = rule('.qiyu-prototype .ai .bubble:has(.voice-control-row)');
+test('B3 voice control is inline before reply text with no separate player row', () => {
+  assert.ok(app.includes('class="bubble">') && app.includes('voiceRow'));
+  assert.ok(app.includes('<span class="message-copy">'));
   const row = rule('.qiyu-prototype .voice-control-row');
-  const trigger = rule('.qiyu-prototype .voice-trigger');
-  const visual = rule('.qiyu-prototype .voice-trigger-visual');
-
-  assert.match(bubble, /background:\s*#1d1e20/);
-  assert.match(bubble, /border:\s*0/);
-  assert.doesNotMatch(bubble, /linear-gradient/);
-  assert.match(bubble, /border-bottom-left-radius:\s*20px/);
-  assert.match(bubble, /position:\s*relative/);
-  assert.match(bubble, /overflow:\s*hidden/);
-  assert.match(message, /max-width:\s*100%/);
-  assert.match(bubbleWithVoice, /padding-right:\s*60px/);
-  assert.match(row, /position:\s*absolute/);
-  assert.match(row, /right:\s*2px/);
-  assert.match(row, /bottom:\s*2px/);
-  assert.match(row, /margin:\s*0/);
-  assert.match(row, /width:\s*52px/);
-  assert.match(row, /min-height:\s*44px/);
-  assert.match(row, /padding:\s*0/);
-  assert.match(trigger, /width:\s*44px/);
-  assert.match(trigger, /height:\s*44px/);
-  assert.match(trigger, /border-radius:\s*999px/);
-  assert.match(visual, /width:\s*40px/);
-  assert.match(visual, /height:\s*24px/);
-  assert.match(visual, /border-radius:\s*999px/);
+  assert.match(row, /position:\s*static/);
+  assert.match(row, /display:\s*inline/);
+  assert.match(rule('.qiyu-prototype .voice-control-row::before'), /display:\s*none/);
+  assert.match(rule('.qiyu-prototype .voice-trigger'), /width:\s*16px/);
+  assert.match(rule('.qiyu-prototype .voice-trigger::before'), /width:\s*44px/);
 });
 
-test('selected edge dock uses a small recess without creating a bottom row', () => {
-  const recess = rule('.qiyu-prototype .voice-control-row::before');
-  const trigger = rule('.qiyu-prototype .voice-trigger');
-  const visual = rule('.qiyu-prototype .voice-trigger-visual');
-
-  assert.match(recess, /width:\s*58px/);
-  assert.match(recess, /height:\s*42px/);
-  assert.match(recess, /border-radius:\s*28px 0 18px 28px/);
-  assert.match(recess, /z-index:\s*0/);
-  assert.match(trigger, /position:\s*relative/);
-  assert.match(trigger, /z-index:\s*1/);
-  assert.match(visual, /linear-gradient/);
+test('B3 bubble shares warm matte surface, rounded outline and readable body text', () => {
+  assert.ok(css.includes('background:#f7f2ee'));
+  assert.ok(css.includes('border-radius:23px 23px 23px 5px'));
+  assert.ok(css.includes('font:16px/1.7'));
+  assert.ok(css.includes('padding-right:18px;padding-bottom:15px'));
 });
 
-test('option 1 keeps the same matte reply surface in night mode', () => {
-  const nightBubble = rule('.qiyu-prototype.night .ai .bubble');
-  assert.match(nightBubble, /background:\s*#1d1e20/);
+test('B3 night mode has independent text, surface and audible highlight colors', () => {
+  assert.ok(css.includes('background:#352923;color:#fff4eb'));
+  assert.ok(css.includes('color:#ffcaab'));
+  assert.ok(css.includes('box-shadow:inset 0 -.29em #694630'));
 });
 
-test('assistant voice control stays inside the message bubble and has no visible label or duration', () => {
-  assert.match(app, /<div class="bubble">[\s\S]*\$\{voiceRow\}<\/div><\/article>/);
-  assert.doesNotMatch(app, /<span[^>]*>\s*(?:播放|播放语音|AI 生成语音|\d+[″"'])\s*<\/span>/);
-  assert.doesNotMatch(app, /class="voice-trigger"[^>]*\stitle=/);
+test('voice duration comes from decoded audio and playback UI uses real audio state', () => {
+  assert.ok(app.includes('formatVoiceDuration(audio?.duration)'));
+  assert.ok(app.includes('formatVoiceDuration(active.player.holdDuration)'));
+  assert.ok(app.includes('active.player.outputPaused = active.paused'));
+  assert.ok(app.includes('active.player.context.suspend()'));
+  assert.ok(app.includes('active.player.context.resume()'));
+  assert.ok(app.includes('refreshMessageAudioUi()'));
+  assert.ok(!app.includes('0:12'));
 });
 
-test('软键盘弹出时底部导航保持锚在物理屏幕底部，不被顶到键盘上方', () => {
-  const nav = rule('.qiyu-prototype .bottom-nav');
-  assert.match(nav, /position:\s*absolute/);
-  // 键盘压缩布局视口时，JS 写入等量 inset 把导航推回屏幕底部（藏在键盘后）。
-  assert.match(nav, /bottom:\s*calc\(0px - var\(--qy-keyboard-inset, 0px\)\)/);
-  assert.match(app, /--qy-keyboard-inset/);
-  assert.match(app, /KEYBOARD_INSET_THRESHOLD_PX/);
-  assert.match(app, /visualViewport\?\.addEventListener\("resize", syncKeyboardInset\)/);
+test('four approved primary tabs retain hidden secondary capabilities and full-width nav', () => {
+  assert.ok(ui.includes("['home','navHome','此刻','open-home']"));
+  assert.ok(ui.includes("['chat','navCompanion','陪伴','back-chat']"));
+  assert.ok(ui.includes("['assets','navMemory','回忆','open-assets']"));
+  assert.ok(ui.includes("['profile','navProfile','我的','open-profile']"));
+  assert.ok(ui.includes('data-action="open-plans"'));
+  const nav = rule('.qiyu-prototype .bottom-nav.apricot-nav');
+  assert.match(nav, /left:\s*0/);
+  assert.match(nav, /right:\s*0/);
+  assert.match(nav, /repeat\(4,minmax\(0,1fr\)\)/);
+  assert.ok(ui.includes('查看角色档案') && ui.includes('主动关心与提醒'));
 });
 
-test('键盘打开时对话屏按可视视口收缩，输入行贴住键盘顶部不留空档', () => {
-  // 部分 WebView 100dvh 滞后：对话屏高度必须由 JS 按实际可视高度重设，
-  // 且 body/.device-shell/.app 链路同步收缩，否则文档高出一截被下滚露出空档。
-  const screenRule = rule('.qiyu-prototype.app-screen');
-  assert.match(screenRule, /height:\s*var\(--qy-app-height, calc\(100dvh - 28px\)\)/);
-  assert.match(screenRule, /min-height:\s*var\(--qy-app-height, calc\(100dvh - 28px\)\)/);
-  const wrap = rule('body.qy-keyboard-open .qiyu-prototype.app-screen .composer-wrap');
-  assert.match(wrap, /bottom:\s*0/);
-  const navHidden = rule('body.qy-keyboard-open .qiyu-prototype.app-screen .bottom-nav');
-  assert.match(navHidden, /display:\s*none/);
-  assert.match(app, /--qy-app-height/);
-  assert.match(app, /qy-keyboard-open/);
-  const styles = fs.readFileSync(path.join(webRoot, 'styles.css'), 'utf8');
-  assert.match(styles, /body\.qy-keyboard-open \.app \{ min-height: var\(--qy-app-height/);
-  assert.match(styles, /body\.qy-keyboard-open \.device-shell \{ min-height: calc\(var\(--qy-app-height/);
+test('keyboard resizes chat, hides navigation and keeps composer at keyboard edge', () => {
+  assert.ok(css.includes('body.qy-keyboard-open .qiyu-prototype.apricot-chat'));
+  assert.ok(css.includes('body.qy-keyboard-open .qiyu-prototype.apricot-chat .composer-wrap{bottom:6px}'));
+  assert.ok(css.includes('body.qy-keyboard-open .qiyu-prototype .bottom-nav.apricot-nav{display:none}'));
+  assert.ok(app.includes('--qy-app-height'));
+  assert.ok(app.includes('visualViewport?.addEventListener("resize", syncKeyboardInset)'));
 });
 
-test('聊天输入框是多行 textarea：随内容自动增高，Enter 发送、Shift+Enter 换行', () => {
-  // 单行 input 天生不能换行；用户长文本必须换行展示。上限后内部滚动。
+test('multiline input preserves composition, draft and scrolling while matching B3 composer', () => {
   assert.match(app, /<textarea name="message" rows="1" maxlength="2000"/);
   assert.doesNotMatch(app, /<input name="message"/);
-  assert.match(app, /MESSAGE_INPUT_MAX_HEIGHT_PX/);
-  assert.match(app, /function autosizeMessageInput/);
-  // 增长量补进聊天滚动底部预留，输入行长高不盖住最后一条消息。
-  assert.match(app, /--qy-composer-extra/);
-  const scroll = rule('.qiyu-prototype .chat-scroll');
-  assert.match(scroll, /padding: 8px 18px calc\(155px \+ var\(--qy-composer-extra, 0px\)\)/);
-  const composer = rule('.qiyu-prototype .composer');
-  assert.match(composer, /min-height: 56px/);
-  assert.match(composer, /align-items: flex-end/);
-  const textarea = rule('.qiyu-prototype .composer textarea');
-  assert.match(textarea, /height: 44px/);
-  assert.match(textarea, /max-height: 112px/);
-  assert.match(textarea, /resize: none/);
-  // Enter=发送（与原单行 input 一致）；Shift+Enter 换行；输入法组字（isComposing/229）不误发。
+  assert.ok(app.includes('MESSAGE_INPUT_MAX_HEIGHT_PX'));
+  assert.ok(app.includes('--qy-composer-extra'));
+  assert.ok(app.includes('state.pendingTranscript = event.target.value'));
   assert.match(app, /event\.key !== "Enter" \|\| event\.shiftKey \|\| event\.isComposing \|\| event\.keyCode === 229/);
-  // 草稿同步进 state：流式回复逐 chunk 全量重渲染时不冲掉正在输入的文字。
-  assert.match(app, /state\.pendingTranscript = event\.target\.value/);
+  const baseTextarea = [...css.matchAll(/\.qiyu-prototype\.apricot-chat \.composer textarea\s*\{([^}]*)\}/g)][0]?.[1] ?? '';
+  assert.match(baseTextarea, /max-height:\s*112px/);
+  assert.ok(css.includes('padding:31px 19px calc(220px + var(--qy-composer-extra,0px))'));
 });
 
 test('人格表单提供角色性别选择，性别值随 persona 提交给服务端驱动男/女声', () => {
@@ -127,6 +95,11 @@ test('人格表单提供角色性别选择，性别值随 persona 提交给服�
   assert.match(app, /genderOption\("female", "女性 · 女声"\)/);
   assert.match(app, /genderOption\("male", "男性 · 男声"\)/);
   assert.match(app, /gender:\s*\["male", "female"\]\.includes\(form\.elements\.persona_gender\?\.value\)/);
+});
+
+test('历史通话消息缺少情境快照时显示准确错误而不是归因于语音供应商', () => {
+  assert.match(app, /MULTIMODAL_SOURCE_SNAPSHOT_MISSING/);
+  assert.match(app, /这条历史通话消息缺少生成语音所需的情境记录，无法播放/);
 });
 
 test('微信 XWEB 等 MediaRecorder 不可用的内核：按住说话降级 AudioContext 直采 PCM 自封 WAV', () => {

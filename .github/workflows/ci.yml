@@ -16,7 +16,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run test:e2e-browser
-      - run: npm run test:e2e-prototype-states
+      - run: npm run test:e2e-ui-states
       - run: npm run test:e2e-ops
   compose-config:
     runs-on: ubuntu-latest

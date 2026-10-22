@@ -138,7 +138,7 @@ function renderReport(summary) {
     '| 已确认事实 Top-1 错误率 | ≤' + percent(WRONG_REFERENCE_RATE_LIMIT) + ' | ' + summary.wrongTopReferenceCount + '/' + summary.positiveCount + '（' + percent(summary.wrongReferenceRate) + '） | ' + (summary.wrongReferenceRate <= WRONG_REFERENCE_RATE_LIMIT ? 'PASS' : 'FAIL') + ' |',
     '| 已删除记忆召回 | 0 | ' + summary.deletedRecallCount + ' | ' + (summary.deletedRecallCount === 0 ? 'PASS' : 'FAIL') + ' |',
     '| 跨账户/角色召回 | 0 | ' + summary.scopeLeakCount + ' | ' + (summary.scopeLeakCount === 0 ? 'PASS' : 'FAIL') + ' |',
-    '| 语义改写 Top-3 命中（qwen 模式计门禁） | FAIL=0 | ' + summary.semantic.filter((item) => item.status === 'FAIL').length + '/' + summary.semantic.length + ' | ' + (summary.semantic.every((item) => item.status !== 'FAIL') ? 'PASS' : 'FAIL') + ' |',
+    '| 语义改写 Top-3 失败数（qwen 模式计门禁） | FAIL=0 | ' + summary.semantic.filter((item) => item.status === 'FAIL').length + '/' + summary.semantic.length + ' | ' + (summary.semantic.every((item) => item.status !== 'FAIL') ? 'PASS' : 'FAIL') + ' |',
     '| 跨版本向量隔离（不抛错、不混算、不丢召回） | PASS | ' + (summary.versionGuard.passed ? '通过' : '违反：' + (summary.versionGuard.error || '行为异常')) + ' | ' + (summary.versionGuard.passed ? 'PASS' : 'FAIL') + ' |',
     '',
     '| 用例 | 查询 | 预期 Top-1 | 实际候选 | 禁止命中 | 结论 |',

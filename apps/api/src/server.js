@@ -5,6 +5,7 @@ const { assertRuntimeConfiguration, assertLocalSyntheticRuntimeAllowed } = requi
 const { createPersistenceFromEnvironment } = require('./persistence/composition');
 const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenEmotionJudge, createQwenLifeEventExtractor, createQwenFollowupComposer, createQwenReplyGenerator, createQwenSkillDistiller, createQwenStreamingReplyGenerator } = require('./providers/qwen-adapter');
 const { createTencentImageModeratorFromEnvironment, createTencentTextModeratorFromEnvironment } = require('./providers/tencent-moderation-adapter');
+const { createVolcengineRealtimeAdapterFromEnvironment } = require('./providers/volcengine-realtime-adapter');
 const { createTencentAsrTranscriberFromEnvironment } = require('./providers/tencent-asr-adapter');
 const { createTencentTtsGeneratorFromEnvironment } = require('./providers/tencent-tts-adapter');
 const { createTencentHunyuanImageGeneratorFromEnvironment } = require('./providers/tencent-hunyuan-image-adapter');
@@ -44,6 +45,7 @@ const smsSender = createTencentSmsSenderFromEnvironment(process.env) || null;
 const textModerator = createTencentTextModeratorFromEnvironment(process.env) || undefined;
 const asrTranscriber = createTencentAsrTranscriberFromEnvironment(process.env) || undefined;
 const ttsGenerator = createTencentTtsGeneratorFromEnvironment(process.env) || undefined;
+const realtimeProvider = createVolcengineRealtimeAdapterFromEnvironment(process.env, { maxSessionMs: require('./domain/call-session').CALL_MAX_DURATION_MS });
 assertImagePipelineConfiguration(process.env);
 const imageGenerator = createTencentHunyuanImageGeneratorFromEnvironment(process.env) || undefined;
 const imageModerator = createTencentImageModeratorFromEnvironment(process.env) || undefined;
@@ -55,7 +57,7 @@ const imageResultFetcher = imageGenerator ? fetchTencentGeneratedImage : undefin
 const mediaEntitlementService = process.env.QIYU_PERSISTENCE === 'postgres' ? null : new MediaEntitlementService({ store });
 // 六项能力开发开关：默认全关；QIYU_DEV_FLAGS/QIYU_DEV_FLAG_ACCOUNTS 控制开启与账户白名单。
 const devFlags = parseDevFlags(process.env);
-createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, emotionJudge, skillDistiller, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService, trialAuthEnabled: process.env.QIYU_TRIAL_AUTH === 'invite', embeddingProvider, featureFlags: runtime.featureFlags, smsSender, voiceCallEnabled: process.env.QIYU_VOICE_CALL_ENABLED === '1', devFlags }).listen(port, host, () => {
+createApp({ store, replyGenerator, streamingReplyGenerator, summaryGenerator, emotionJudge, skillDistiller, summaryEnabled: runtime.mode !== 'production' || runtime.featureFlags.CONVERSATION_SUMMARY_WRITE, textModerator, asrTranscriber, ttsGenerator, mediaStore, imageGenerator, imageModerator, imageStore, imageResultFetcher, imageEntitlementService: mediaEntitlementService, trialAuthEnabled: process.env.QIYU_TRIAL_AUTH === 'invite', embeddingProvider, featureFlags: runtime.featureFlags, smsSender, voiceCallEnabled: process.env.QIYU_VOICE_CALL_ENABLED === '1', realtimeProvider, realtimeCallEnabled: process.env.QIYU_REALTIME_CALL_ENABLED === '1', devFlags }).listen(port, host, () => {
   console.log(`栖语 M1 本地合成 API 已监听 http://${host}:${port}`);
   console.log(`运行模式：${runtime.mode}；外部高风险能力默认关闭，必须经生产配置门禁启用。`);
   console.log(`持久化：${process.env.QIYU_PERSISTENCE || 'memory'}；模型：${process.env.QIYU_LLM_PROVIDER === 'qwen' ? 'qwen（本地开发接线）' : 'mock'}。`);

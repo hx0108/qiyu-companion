@@ -25,6 +25,7 @@ const { mockLifeEventExtractor } = require('../src/domain/mock-adapter');
 const { startLifeEventExtractionWorker } = require('../src/domain/life-event-extraction-worker');
 const { startFollowupWorker } = require('../src/domain/followup-worker');
 const { parseDevFlags } = require('../src/development/dev-flags');
+const { launchIsolatedBrowser } = require('./isolated-browser');
 const { createControlledPng } = require('./controlled-probe-png');
 
 // 2 秒 16k PCM16 连续正弦（640Hz、幅值 0.25）：Chromium 以 --use-file-for-
@@ -48,7 +49,6 @@ function assert(condition, message) {
 }
 
 async function main() {
-  const { chromium } = require('playwright-core');
 
   // 假麦克风音源：Chromium 默认假设备是间歇蜂鸣（<250ms），免提自动开回合需要
   // ≥250ms 持续起说能量，必须换成受控的连续正弦（640Hz、幅值 0.25、2 秒循环）。
@@ -67,32 +67,43 @@ async function main() {
   // 六项能力 A3：计划/卡片/审批三开关同场开启（createApp 默认 mock 提议器）。
   const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH,COMPANION_PLANS,ARTIFACT_CARDS,ACTION_EXECUTION' });
   const a1Worker = startLifeEventExtractionWorker(store, mockLifeEventExtractor, { intervalMs: 500 });
-  startFollowupWorker(store, null, { intervalMs: 500, workerId: 'e2e-followup' });
+  const followupWorker = startFollowupWorker(store, null, { intervalMs: 500, workerId: 'e2e-followup' });
   const server = createApp({ store, ...(replyGenerator ? { replyGenerator } : {}), ...providerRuntime.appOptions, voiceCallEnabled: true, devFlags: a1DevFlags });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${fakeMicWav.replace(/\\/g, '/')}`] });
-  const page = await browser.newPage();
+  const { browser, close: closeBrowser } = await launchIsolatedBrowser({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${fakeMicWav.replace(/\\/g, '/')}`] });
+  const page = await browser.newPage({ serviceWorkers: 'block' });
   const consoleErrors = [];
   const expectedFailures = [];
   page.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(message.text());
   });
+  page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${String(error?.message || error)}`));
   page.on('response', (response) => {
     // 默认模式下 TTS 未启用是预期降级；真实媒体模式不豁免供应商失败。
-    if (response.status() >= 500 && !(response.url().includes('/tts-jobs') && !realTencentMedia)) {
+    const expectedDisabledTts = !realTencentMedia && response.status() === 503
+      && /\/messages\/[^/]+\/tts-(?:jobs|stream)(?:\?|$)/.test(response.url());
+    if (response.status() >= 500 && !expectedDisabledTts) {
       expectedFailures.push(`${response.status()} ${response.url().replace(base, '')}`);
     }
   });
 
   const backToChat = async () => {
+    // Navigation is ignored while an API mutation is busy. Wait for that
+    // operation to settle before clicking a back control that remains visible.
+    await page.waitForFunction(() => document.querySelector('#app')?.getAttribute('aria-busy') !== 'true', null, { timeout: 10_000 });
     const back = page.locator('[data-action="back-chat"]');
-    if (await back.count() > 0) { await back.first().click(); }
+    const notificationBack = page.locator('[data-action="back-notifications"]');
+    if (await notificationBack.count() > 0) { await notificationBack.click(); }
+    else if (await back.count() > 0) { await back.first().click(); }
     else {
       const generic = page.locator('button', { hasText: '返回' }).first();
       if (await generic.count() > 0) await generic.click();
     }
-    await page.waitForSelector('nav.bottom-nav', { timeout: 10_000 });
+    // Secondary pages return to their real origin; explicitly enter chat.
+    if (await page.locator('nav.apricot-nav').count()) await page.getByRole('button', { name: '陪伴', exact: true }).click();
+    await page.waitForSelector('nav.apricot-nav', { timeout: 10_000 });
+    await page.waitForSelector('#message-form textarea:not(:disabled)', { timeout: 10_000 });
   };
   const steps = [];
   // --only <scenario>：只跑该场景的前置 setup 与场景步骤（其余记 SKIP，
@@ -113,6 +124,17 @@ async function main() {
       steps.push({ name, status: 'PASS', detail: '' });
     } catch (error) {
       steps.push({ name, status: 'FAIL', detail: String(error?.message || error).slice(0, 300) });
+      // Preserve the failed UI before browser teardown. Synthetic E2E content
+      // contains no account credentials; do not capture request headers/storage.
+      const evidenceDir = path.resolve(__dirname, '../../../output/playwright');
+      fs.mkdirSync(evidenceDir, { recursive: true });
+      const evidenceName = `browser-e2e-failure-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      await page.screenshot({ path: path.join(evidenceDir, `${evidenceName}.png`), fullPage: true }).catch(() => {});
+      const ui = await page.evaluate(() => ({ title: document.querySelector('#app-title')?.textContent ?? null, body: document.body.innerText.slice(0, 18000), buttons: [...document.querySelectorAll('[data-action]')].map((button) => ({ action: button.dataset.action, disabled: button.disabled, text: button.textContent?.trim().slice(0, 80) })) })).catch(() => null);
+      fs.writeFileSync(path.join(evidenceDir, `${evidenceName}.json`), JSON.stringify({ failed_step: name, error: String(error?.stack || error), ui, console_errors: consoleErrors, server_errors: expectedFailures, steps }, null, 2), 'utf8');
+      const failedReportDir = path.resolve(__dirname, '../../../development/eval');
+      fs.mkdirSync(failedReportDir, { recursive: true });
+      fs.writeFileSync(path.join(failedReportDir, `browser-e2e-${new Date().toISOString().slice(0, 10)}.md`), renderReport(steps, consoleErrors, expectedFailures, false, realQwen, realTencentMedia), 'utf8');
       throw error;
     }
   };
@@ -174,8 +196,10 @@ async function main() {
       await page.waitForFunction(() => { const el = document.querySelector('.chat-scroll'); return el && el.scrollHeight - el.scrollTop - el.clientHeight < 160; }, null, { timeout: 15_000 });
       // 回看保护：手动滚到顶部再触发重渲染（日夜主题切换），阅读位置必须保持。
       await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); el.scrollTop = 0; });
+      await page.getByRole('button', { name: '我的', exact: true }).click();
       await page.locator('[data-action="toggle-theme"]').click();
       await page.locator('[data-action="toggle-theme"]').click();
+      await page.getByRole('button', { name: '陪伴', exact: true }).click();
       const preserved = await page.evaluate(() => document.querySelector('.chat-scroll').scrollTop < 60);
       assert(preserved, '回看历史时重渲染不得改变阅读位置');
       await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); el.scrollTop = el.scrollHeight; });
@@ -219,7 +243,23 @@ async function main() {
     }
 
     if (!realTencentMedia) {
-      await step('语音通话（免提）：发起→静默监听自动开回合→边录边传→静音断句→转写与回复→挂断→通话记录卡片', async () => {
+      await step('旧通话客户端兼容（非公开入口）：免提上传→静音断句→转写回复→挂断落库', async () => {
+        // Compatibility harness explicitly substitutes only the local module's
+        // client constructor. This is not evidence for the public native UI;
+        // verify-native-call-browser.js covers that unchanged entry point.
+        const legacyModule = async route => {
+          const response = await route.fetch();
+          const body = (await response.text())
+            .replace("import { AudioOutPipeline }", "import { CallSessionClient, AudioOutPipeline }")
+            .replace("if (!realtimeCallAvailable())", "if (!state.voiceCallEnabled)")
+            .replaceAll('realtimeCallAvailable() && characterId()', 'state.voiceCallEnabled && characterId()')
+            .replace("const mode = 'native-realtime';", "const mode = 'legacy-compatibility';")
+            .replace('new RealtimeCallClient({', 'new CallSessionClient({');
+          await route.fulfill({ response, body });
+        };
+        await page.route('**/app.js?*', legacyModule);
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('[data-action="start-call"]').waitFor();
         // 通话受理前有语音额度预检：先开通 7 天完整体验（ASR 10 分钟 / TTS 30 分钟）。
         const trialResponse = await fetch(`${base}/api/v1/subscription-trials`, {
           method: 'POST', headers: { authorization: 'Bearer dev-alice-token', 'content-type': 'application/json', 'idempotency-key': 'e2e-call-trial' }, body: '{}'
@@ -322,11 +362,16 @@ async function main() {
         const callMessages = [...store.messages.values()].filter((message) => message.call_session_id === call.call_id);
         assert(callMessages.some((message) => message.actor === 'USER' && message.text === '这是一段浏览器录音。'), '转写应以 USER 消息落库并带通话标记');
         assert(callMessages.some((message) => message.actor === 'ASSISTANT' && message.text.includes('开发 Mock 已收到')), '回复应落库并带通话标记');
+        await page.unroute('**/app.js?*', legacyModule);
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.getByRole('button', { name: '陪伴', exact: true }).click();
+        await page.locator('#message-form textarea:not(:disabled)').waitFor();
       });
     }
 
     if (!realQwen) {
       await step('记忆拒绝撤销：不记住后 30 秒内可由服务端恢复候选', async () => {
+        await page.getByRole('button', { name: '此刻', exact: true }).click();
         const candidate = page.locator('[data-action="open-candidate"]');
         await candidate.waitFor({ state: 'visible', timeout: 10_000 });
         await candidate.click();
@@ -334,6 +379,7 @@ async function main() {
         const undo = page.locator('[data-action="undo-memory-reject"]');
         await undo.waitFor({ state: 'visible', timeout: 10_000 });
         await undo.click();
+        await page.getByRole('button', { name: '此刻', exact: true }).click();
         await page.locator('[data-action="open-candidate"]').waitFor({ state: 'visible', timeout: 10_000 });
       });
     }
@@ -353,8 +399,7 @@ async function main() {
           else if (Date.now() - started > 10_000) { clearInterval(timer); reject(new Error('提取 worker 未在 10 秒内产出 life_event 候选')); }
         }, 200);
       });
-      await page.waitForSelector('.memory-banner', { timeout: 10_000 });
-      await page.locator('.memory-banner').click();
+      await openPendingCandidate(page);
       // 同一条消息会先产生普通 dev-note 候选（回复生成器附带）再产生生活事件
       // 候选（提取 worker）；横幅一次只显示一个，先确认掉普通候选直到
       // life_event 专用 sheet 出现（确认 dev-note 无害——它只是普通记忆）。
@@ -362,8 +407,7 @@ async function main() {
         assert((await page.locator('[data-action="confirm-candidate"]').count()) > 0, '普通候选应可确认');
         await page.locator('[data-action="confirm-candidate"]').click();
         await page.waitForSelector('#message-form', { timeout: 10_000 });
-        await page.waitForSelector('.memory-banner', { timeout: 10_000 });
-        await page.locator('.memory-banner').click();
+        await openPendingCandidate(page);
       }
       await page.waitForSelector('#life-event-title', { timeout: 10_000 });
       assert((await page.locator('#life-event-title').inputValue()).includes('面试'), '候选标题应含面试');
@@ -379,14 +423,16 @@ async function main() {
     await step('A1 来源与注入：新回复“本轮参考”面板显示事件可用；时间线筛选事件可见', async () => {
       await page.locator('#message-form [name="message"]').fill('帮我加油打打气');
       await page.locator('#message-form .send').click();
-      await page.waitForSelector('.memory-refs-trigger', { timeout: 15_000 });
-      await page.locator('.memory-refs-trigger').last().click();
+      await page.waitForFunction(() => document.querySelector('#app')?.getAttribute('aria-busy') !== 'true');
+      await page.locator('[data-action="open-chat-menu"]').click();
+      await page.locator('.apricot-chat-menu [data-action="latest-memory-refs"]').click();
       await page.waitForSelector('.memory-ref-row.available', { timeout: 10_000 });
       const refText = await page.locator('.memory-ref-list').innerText();
       assert(refText.includes('面试'), '来源面板应显示已确认事件');
       await page.locator('[data-action="close-memory-refs"]').click();
       await backToChat();
       await page.locator('nav.bottom-nav [data-action="open-assets"]').click();
+      await page.getByText('更多回忆管理', { exact: true }).click();
       await page.waitForSelector('[data-timeline-filter="event"]', { timeout: 10_000 });
       await page.locator('[data-timeline-filter="event"]').click();
       await page.waitForSelector('[data-entry-type="LIFE_EVENT"]', { timeout: 10_000 });
@@ -472,13 +518,16 @@ async function main() {
       // 等投递：Worker 领取→模板措辞→evaluateFollowupPublish 放行→聊天流消息。
       // 主动消息不推送、前端也不轮询——用户下次回到应用（刷新）才从消息流
       // 读到，这正是站内投递的产品语义；E2E 用 reload 模拟「回到应用」。
-      await page.reload({ waitUntil: 'networkidle' });
+      // Heartbeat requests continue after login; wait for the actual UI below.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.getByRole('button', { name: '陪伴', exact: true }).click();
       await page.waitForSelector('#message-form', { timeout: 15_000 });
       await page.waitForSelector('.proactive-flag', { timeout: 15_000 });
       const proactiveText = await page.locator('article.message.ai', { has: page.locator('.proactive-flag') }).last().innerText();
       assert(proactiveText.includes('考试安排'), `主动消息应含事件标题，实际：${proactiveText.slice(0, 80)}`);
       // 来源透明：主动消息自带 LIFE_EVENT 引用（「本轮参考」面板可查）。
-      await page.locator('.memory-refs-trigger').last().click();
+      await page.locator('[data-action="open-chat-menu"]').click();
+      await page.locator('.apricot-chat-menu [data-action="latest-memory-refs"]').click();
       await page.waitForSelector('.memory-ref-row.available', { timeout: 10_000 });
       const refText = await page.locator('.memory-ref-list').innerText();
       assert(refText.includes('考试安排'), '主动消息来源面板应显示事件');
@@ -533,7 +582,8 @@ async function main() {
       // 时间线页无底部导航，先返回聊天页再进计划页。
       await page.locator('[data-action="back-chat"]').first().click();
       await page.waitForSelector('#message-form', { timeout: 10_000 });
-      await page.locator('nav.bottom-nav [data-action="open-plans"]').click();
+      await page.getByRole('button', { name: '我的', exact: true }).click();
+      await page.locator('[data-action="open-plans"]').click();
       await page.waitForSelector('.plan-card .step-title-input', { timeout: 10_000 });
       const titleInput = page.locator('.plan-card .step-title-input').first();
       await titleInput.fill('对着镜子练一遍自我介绍');
@@ -578,6 +628,7 @@ async function main() {
       // 回聊天流：reload 拉历史（卡片消息随草案已落库）。心跳等周期请求会
       // 让 networkidle 永不静默，用 domcontentloaded+显式等待表单就绪。
       await page.reload({ waitUntil: 'domcontentloaded' });
+      await page.getByRole('button', { name: '陪伴', exact: true }).click();
       await page.waitForSelector('#message-form', { timeout: 15_000 });
       await page.waitForSelector('.companion-card', { timeout: 15_000 });
       await page.waitForSelector('.companion-card .plan-step-list', { timeout: 15_000 });
@@ -656,6 +707,10 @@ async function main() {
       await backToChat(); // A1 场景结束在时间线页；语音按钮在聊天流里。
       const ttsButton = page.locator('[data-action="synthesize-message-audio"]').first();
       assert(await ttsButton.count() > 0, '助手回复应提供语音按钮');
+      // Clicking an older message scrolls its control into view. Capture that
+      // deliberate reading position rather than assuming the reader is at bottom.
+      await ttsButton.scrollIntoViewIfNeeded();
+      const readingPosition = await page.locator('.chat-scroll').evaluate((el) => el.scrollTop);
       await ttsButton.click();
       if (realTencentMedia) {
         await page.waitForFunction(() => Boolean(document.querySelector('article.message.ai audio')) || Boolean(document.querySelector('[data-media-type="TTS"]')), null, { timeout: 60_000 });
@@ -671,8 +726,8 @@ async function main() {
       // 等待语音生成期间页面必须保持阅读位置，不得跳回最早对话。
       // 横幅出现后留 300ms 让 toast 清除等重渲染落定，再一次性检查（避免负载下误采）。
       await page.waitForTimeout(300);
-      const nearBottom = await page.evaluate(() => { const el = document.querySelector('.chat-scroll'); return Boolean(el) && el.scrollHeight - el.scrollTop - el.clientHeight < 200; });
-      assert(nearBottom, '语音生成等待期间对话不得跳回最早消息');
+      const retainedPosition = await page.locator('.chat-scroll').evaluate((el) => el.scrollTop);
+      assert(Math.abs(retainedPosition - readingPosition) < 2, `语音生成等待期间应保留阅读位置：${readingPosition} → ${retainedPosition}`);
     });
 
     if (realTencentMedia) {
@@ -748,13 +803,14 @@ async function main() {
       await backToChat();
       await page.locator('nav.bottom-nav [data-action="open-assets"]').click();
       await page.waitForSelector('#app-title', { timeout: 10_000 });
-      await page.waitForFunction(() => document.body.innerText.includes('关系时间线'), null, { timeout: 10_000 });
+      await page.waitForFunction(() => document.querySelector('#app-title')?.textContent === '我们的回忆', null, { timeout: 10_000 });
     });
 
     await step('数据中心：保留期 90→30 切换按 API 回读显示', async () => {
       await backToChat();
-      await page.locator('nav.bottom-nav [data-action="open-data"]').click();
-      await page.waitForFunction(() => document.body.innerText.includes('数据中心'), null, { timeout: 10_000 });
+      await page.getByRole('button', { name: '我的', exact: true }).click();
+      await page.locator('[data-action="open-data"]').click();
+      await page.waitForFunction(() => document.querySelector('#app-title')?.textContent === '数据与隐私', null, { timeout: 10_000 });
       const ninety = page.locator('[data-action="set-retention-90"]');
       if (await ninety.count() > 0) {
         await ninety.click();
@@ -767,23 +823,25 @@ async function main() {
     await step('数据中心：安全中心与站内通知入口可达', async () => {
       await page.locator('[data-action="open-safety"]').click();
       await page.waitForFunction(() => /安全中心|安全/.test(document.body.innerText), null, { timeout: 10_000 });
-      // 安全中心设计为回到对话页（不是 data center）；通过其“打开数据中心”
-      // 入口返回，避免把原型的真实导航契约错当成浏览器故障。
-      await page.locator('[data-action="open-data"]').click();
-      await page.waitForFunction(() => document.body.innerText.includes('数据中心'), null, { timeout: 10_000 });
+      // 当前二级页返回真实入口；用返回图标从帮助页回到数据页。
+      await page.locator('[data-action="back-chat"]').click();
+      await page.waitForFunction(() => document.querySelector('#app-title')?.textContent === '数据与隐私', null, { timeout: 10_000 });
+      await backToChat();
+      await page.getByRole('button', { name: '此刻', exact: true }).click();
       await page.locator('[data-action="open-notifications"]').click();
       await page.waitForFunction(() => /通知|暂无通知/.test(document.body.innerText), null, { timeout: 10_000 });
-      await page.locator('[data-action="back-data"]').click();
-      // 通知页的“返回数据中心”按钮本身带有“数据中心”文案，不能把该文案
-      // 当作路由已切换的证据；等待数据中心独有的通知入口重新出现。
-      await page.waitForSelector('[data-action="open-notifications"]', { state: 'visible', timeout: 10_000 });
+      await page.locator('[data-action="back-notifications"]').click();
+      // 通知从首页进入，返回后必须仍在首页，不进入数据中心。
+      await page.waitForFunction(() => document.querySelector('#app').dataset.route === 'home');
     });
 
     await step('日夜主题：切换控件触发重渲染', async () => {
       await backToChat();
       await page.waitForSelector('#message-form', { timeout: 10_000 });
       const beforeTheme = await page.locator('.app-screen').getAttribute('class');
+      await page.getByRole('button', { name: '我的', exact: true }).click();
       await page.locator('[data-action="toggle-theme"]').click();
+      await page.getByRole('button', { name: '陪伴', exact: true }).click();
       await page.waitForFunction((before) => {
         const current = document.querySelector('.app-screen')?.className ?? '';
         return current !== before;
@@ -792,7 +850,10 @@ async function main() {
 
     await page.screenshot({ path: path.join(screenshotDir, 'browser-e2e-final.png'), fullPage: true });
   } finally {
-    await browser.close().catch(() => {});
+    a1Worker.stop();
+    followupWorker.stop();
+    await closeBrowser();
+    server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
     if (realTencentMedia) await cleanupControlledMedia(store, providerRuntime).catch((error) => console.error(`受控媒体清理失败：${error.message}`));
   }
@@ -800,7 +861,7 @@ async function main() {
   const unexpectedConsoleErrors = consoleErrors.filter((text) => !text.includes('tts') && !text.includes('Failed to load resource'));
   const unexpectedServerErrors = expectedFailures;
   const passed = steps.every((item) => item.status !== 'FAIL') && unexpectedConsoleErrors.length === 0 && unexpectedServerErrors.length === 0;
-  const report = renderReport(steps, consoleErrors, unexpectedServerErrors, passed, realQwen, realTencentMedia);
+  const report = renderReport(steps, unexpectedConsoleErrors, unexpectedServerErrors, passed, realQwen, realTencentMedia);
   console.log(report);
   const outputDir = path.resolve(__dirname, '../../../development/eval');
   fs.mkdirSync(outputDir, { recursive: true });
@@ -817,7 +878,7 @@ function renderReport(steps, consoleErrors, serverErrors, passed, realQwen, real
     `- 运行时间：${new Date().toISOString()}`,
     `- 环境：内存开发 Store + ${realQwen ? '真实 Qwen 回复' : 'Mock 回复'}${realTencentMedia ? ' + 真实腾讯 TTS/ASR/IMS/混元/COS' : ' + Mock 图片审核/私有对象库'}；系统 Edge 无头（channel: msedge，不下载 Chromium）。`,
     `- 覆盖：必要告知 → 年龄声明 → 角色创建 → 对话 SSE 回放 → ${realTencentMedia ? '真实 TTS → 真实 ASR → 真实受控图片' : '聊天图片上传/气泡/删除 → TTS 未启用降级'} → 时间线 → 数据中心保留期切换 → 安全中心/通知入口 → 日夜主题。`,
-    realTencentMedia ? '- 边界：媒体由同一浏览器会话触发并使用受控资产；账户/权益仍为内存开发态，支付、第三方年龄核验和生产删除不在本链路。' : realQwen ? '- 边界：本轮仅把浏览器聊天替换为真实 Qwen；TTS/ASR/图片仍须由各自腾讯验收脚本覆盖，支付、增强年龄核验和生产删除不在本链路。' : '- 边界：该脚本仍是内存开发 Store + Mock；外部供应商、支付、增强年龄核验和生产删除不在本链路。',
+    realTencentMedia ? '- 边界：媒体由同一浏览器会话触发并使用受控资产；账户/权益仍为内存开发态，支付、第三方年龄核验和生产删除不在本链路。' : realQwen ? '- 边界：本轮仅把浏览器聊天替换为真实 Qwen；TTS/ASR/图片仍须由各自腾讯验收脚本覆盖，支付、增强年龄核验和生产删除不在本链路。' : '- 边界：该脚本仍是内存开发 Store + Mock；外部供应商、支付、增强年龄核验和生产删除不在本链路。23项中22项是正常用户流程，1项旧通话兼容测试通过本地模块替换构造器完成，不是公开通话入口；公开原生直拨由 verify-native-call-browser.js 单独覆盖。',
     '',
     '| 步骤 | 结论 | 说明 |',
     '|---|---|---|'
@@ -854,6 +915,12 @@ function toLocalInput(ms) {
 // 生活事件确认 sheet 全流程（A1 内联逻辑固化，A2 复用）：发消息 → 等提取
 // worker 产出 life_event 候选（Node 侧先等落库再轮询 UI）→ 确认掉先行的普通
 // 候选直到专用 sheet 出现 → 补具体时间 → confirm-edited 固化字段集。
+async function openPendingCandidate(page) {
+  await page.getByRole('button', { name: '此刻', exact: true }).click();
+  await page.locator('[data-action="open-candidate"]').waitFor({ state: 'visible', timeout: 10000 });
+  await page.locator('[data-action="open-candidate"]').click();
+}
+
 async function confirmLifeEventCandidate(page, store, { message, localTime, titlePart }) {
   await page.locator('#message-form [name="message"]').fill(message);
   await page.locator('#message-form .send').click();
@@ -864,14 +931,12 @@ async function confirmLifeEventCandidate(page, store, { message, localTime, titl
       else if (Date.now() - started > 10_000) { clearInterval(timer); reject(new Error('提取 worker 未在 10 秒内产出 life_event 候选')); }
     }, 200);
   });
-  await page.waitForSelector('.memory-banner', { timeout: 10_000 });
-  await page.locator('.memory-banner').click();
+  await openPendingCandidate(page);
   for (let attempt = 0; attempt < 4 && (await page.locator('#life-event-title').count()) === 0; attempt += 1) {
     assert((await page.locator('[data-action="confirm-candidate"]').count()) > 0, '普通候选应可确认');
     await page.locator('[data-action="confirm-candidate"]').click();
     await page.waitForSelector('#message-form', { timeout: 10_000 });
-    await page.waitForSelector('.memory-banner', { timeout: 10_000 });
-    await page.locator('.memory-banner').click();
+    await openPendingCandidate(page);
   }
   await page.waitForSelector('#life-event-title', { timeout: 10_000 });
   assert((await page.locator('#life-event-title').inputValue()).includes(titlePart), `候选标题应含「${titlePart}」`);
@@ -904,7 +969,7 @@ async function cleanupControlledMedia(store, runtime) {
   await Promise.allSettled(deletions);
 }
 
-main().catch((error) => {
+main().then(() => process.exit(process.exitCode || 0)).catch((error) => {
   // 工具/终端偶尔会吞掉浏览器子进程 stderr；保留无凭据失败摘要，避免把
   // “没有报告”误判为通过或网络问题。
   try {

@@ -6,6 +6,54 @@ const { createApp } = require('../src/app');
 const { DevelopmentStore } = require('../src/domain/store');
 const { MemoryTrialInviteAuth } = require('../src/domain/trial-invite-auth');
 
+test('Postgres 封闭试用健康检查和能力发现不初始化账户权益服务', async (t) => {
+  const { PostgresStore } = require('../src/persistence/postgres-store');
+  const store = new PostgresStore({ pool: { async query() { return { rows: [] }; }, connect() { assert.fail('公共健康请求不应进入账户事务'); } } });
+  const base = await start(t, { store, trialAuthEnabled: true });
+  assert.equal((await request(base, '/health')).status, 200);
+  assert.equal((await request(base, '/api/v1/trial-access')).status, 200);
+});
+
+test('封闭试用无需领取：旧体验到期仍可转写、合成、通话并访问计划，且不发订阅或扣额', async (t) => {
+  const store = new DevelopmentStore();
+  const auth = new MemoryTrialInviteAuth({ store });
+  await auth.provisionInvite({ inviteCode: 'QYFULL-ACCESS-TEST', initialSecret: 'secure_full_access_secret_123456' });
+  const base = await start(t, { store, trialAuthEnabled: true, trialAuth: auth, voiceCallEnabled: true,
+    asrTranscriber: async () => ({ text: '今天很好', providerRequestId: 'asr-test' }),
+    ttsGenerator: async () => ({ asset: { bytes: Buffer.from('mp3'), mimeType: 'audio/mpeg' }, providerRequestId: 'tts-test' }) });
+  const login = await request(base, '/api/v1/auth/trial-sessions', { method: 'POST', body: { invite_code: 'QYFULL-ACCESS-TEST' } });
+  const token = login.body.tokens.access_token;
+  const notices = await request(base, '/api/v1/required-notices', { token });
+  const notice = notices.body.notices[0];
+  await request(base, `/api/v1/required-notices/${notice.notice_id}/displayed`, { method: 'POST', token, key: 'full-notice', body: { notice_version: notice.notice_version } });
+  await request(base, '/api/v1/age/declarations', { method: 'POST', token, key: 'full-age', body: { date_of_birth: '1990-01-01', confirmed_18_plus: true } });
+  const accountId = await auth.resolveAccessToken(token);
+  store.subscriptions.set('old-trial', { subscription_id: 'old-trial', account_id: accountId, channel: 'DEVELOPMENT_TRIAL', state: 'EXPIRED', period_end: '2020-01-01T00:00:00Z' });
+  const current = await request(base, '/api/v1/subscriptions/current', { token });
+  assert.equal(current.body.trial.state, 'CLOSED_TRIAL');
+  assert.equal(current.body.trial.period_end, null);
+  const balances = await request(base, '/api/v1/entitlements', { token });
+  assert.ok(balances.body.entitlements.every((item) => item.quota_policy === 'CLOSED_TRIAL_FULL_ACCESS' && item.resets_at === null));
+  const character = await request(base, '/api/v1/characters', { token, method: 'POST', key: 'full-char', body: { name: '试用角色' } });
+  const conversation = await request(base, '/api/v1/conversations', { token, method: 'POST', key: 'full-conv', body: { character_id: character.body.character.character_id } });
+  const id = conversation.body.conversation.conversation_id;
+  const message = await request(base, `/api/v1/conversations/${id}/messages`, { token, method: 'POST', key: 'full-msg', body: { content: { text: '你好' } } });
+  const tts = await request(base, `/api/v1/messages/${message.body.assistant_message.message_id}/tts-jobs`, { token, method: 'POST', key: 'full-tts' });
+  assert.equal(tts.body.tts_job.state, 'COMPLETED');
+  const asr = await request(base, `/api/v1/conversations/${id}/asr-jobs`, { token, method: 'POST', key: 'full-asr', body: { mime_type: 'audio/wav', audio_base64: Buffer.alloc(32000).toString('base64') } });
+  assert.equal(asr.body.asr_job.state, 'COMPLETED');
+  const call = await request(base, `/api/v1/conversations/${id}/calls`, { token, method: 'POST', key: 'full-call' });
+  assert.equal(call.status, 201);
+  const greeting = await fetch(`${base}${call.body.greeting.stream.stream_url}`, { headers: { authorization: `Bearer ${token}` } });
+  assert.match(await greeting.text(), /call.turn.completed/);
+  assert.equal((await request(base, '/api/v1/companion-plans', { token })).status, 200);
+  assert.equal((await request(base, '/api/v1/checkout-sessions', { token, method: 'POST', key: 'full-buy', body: { sku: 'qiyu_public_monthly_v1' } })).status, 403);
+  const claim = await request(base, '/api/v1/subscription-trials', { token, method: 'POST', key: 'full-claim' });
+  assert.equal(claim.body.trial.state, 'CLOSED_TRIAL');
+  assert.equal(store.subscriptions.size, 1);
+  assert.equal(store.entitlementLedgers.size, 0);
+});
+
 async function start(t, options) {
   const server = createApp(options);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -29,7 +77,7 @@ test('封闭试用：邀请码首次登录、年龄准入、反馈持久化与�
 
   const access = await request(base, '/api/v1/trial-access');
   // voice_call_enabled：1:1 通话灰度开关随能力发现接口透出（默认关闭）。
-  assert.deepEqual(access.body, { enabled: true, authentication: 'closed-trial-invite', payment: 'disabled', external_age_verification: 'disabled', voice_call_enabled: false });
+  assert.deepEqual(access.body, { enabled: true, authentication: 'closed-trial-invite', payment: 'disabled', external_age_verification: 'disabled', voice_call_enabled: false, realtime_call: { enabled: false, mode: 'native-realtime', max_duration_ms: 900000, max_responses: null, reason: 'REALTIME_TRIAL_UNAVAILABLE' } });
   const legacyToken = await request(base, '/api/v1/usage/daily', { token: 'dev-alice-token' });
   assert.equal(legacyToken.status, 401);
   // 登录只凭邀请码（2026-09-11 取消初始口令）：错误邀请码必须被拒。

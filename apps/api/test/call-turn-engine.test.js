@@ -382,3 +382,110 @@ test('生活事件提取（六项能力 A1 通话通道）：用户消息落库�
   await executeCallTurn(deps2, { store: store2, account: store2.account(ACCOUNT_ID), call: call2, turn: turn2, emit: collect().emit, signal: null });
   assert.equal([...store2.lifeEventExtractionJobs.values()].length, 0);
 });
+
+
+test('通话跨片段身份错误先修复再字幕/朗读，修复失败固定兜底', async () => {
+  for (const repairedText of ['我在呢。', '我是AI助手。']) {
+    const store = fixtureStore();
+    let repairs = 0;
+    const deps = buildDeps({
+      generateStream: async (text, context, onFragment) => {
+        await onFragment('我是栖语的');
+        await onFragment('AI助手。');
+        throw new Error('must stop before this');
+      },
+      replyGenerator: async (text, context) => {
+        assert.equal(context.ooc_repair.code, 'OOC_GENERIC_ASSISTANT_IDENTITY');
+        repairs += 1;
+        return { reply_text: repairedText, provider: 'test', model_version: 'test', ai_generated: true };
+      }
+    });
+    const { call, turn } = finalizedTurn(store, deps);
+    const { events, emit } = collect();
+    await executeCallTurn(deps, { store, account: store.accounts.get(ACCOUNT_ID), call, turn, emit });
+    assert.equal(repairs, 1);
+    assert.equal(turn.state, 'COMPLETED');
+    const spoken = events.filter((e) => e.event === 'call.turn.text').map((e) => e.data.text).join('');
+    assert.doesNotMatch(spoken, /AI助手|我是栖语的/);
+    assert.equal(store.messages.get(turn.assistant_message_id).text, spoken);
+  }
+});
+
+test('通话已播前缀后身份错误或断流不重新生成已播内容', async () => {
+  for (const identityError of [true, false]) {
+    const store = fixtureStore();
+    let retries = 0;
+    const deps = buildDeps({
+      generateStream: async (text, context, onFragment) => {
+        await onFragment('我在呢。');
+        if (identityError) await onFragment('我是AI助手。');
+        throw new Error('provider disconnected');
+      },
+      replyGenerator: async () => { retries += 1; return { reply_text: '我在呢。' }; }
+    });
+    const { call, turn } = finalizedTurn(store, deps);
+    const { events, emit } = collect();
+    await executeCallTurn(deps, { store, account: store.accounts.get(ACCOUNT_ID), call, turn, emit });
+    assert.equal(retries, 0);
+    assert.equal(turn.state, identityError ? 'COMPLETED' : 'FAILED');
+    if (!identityError) {
+      assert.ok(events.some((e) => e.event === 'call.turn.failed'));
+      assert.equal(store.messages.get(turn.assistant_message_id).text, '我在呢。');
+    }
+    const spoken = events.filter((e) => e.event === 'call.turn.text').map((e) => e.data.text).join('');
+    assert.equal(spoken.split('我在呢。').length - 1, 1);
+    assert.doesNotMatch(spoken, /AI助手/);
+  }
+});
+
+test('basic TTS 只有聚合资产时同样下发可播放音频', async () => {
+  const store = fixtureStore();
+  const ttsGenerator = async ({ text }) => ({ asset: { bytes: Buffer.from(`mp3:${text}`), mimeType: 'audio/mpeg' } });
+  ttsGenerator.voiceProfileFor = () => ({ voice_id: 'test', voice_version: 'test' });
+  const deps = buildDeps({ ttsGenerator });
+  const { call, turn } = finalizedTurn(store, deps);
+  const { events, emit } = collect();
+  await executeCallTurn(deps, { store, account: store.accounts.get(ACCOUNT_ID), call, turn, emit });
+  assert.equal(turn.state, 'COMPLETED');
+  assert.equal(events.filter((e) => e.event === 'call.turn.audio').length, 2);
+});
+
+
+test('已播前缀后 OOC 兜底若被审核 BLOCK，保留安全前缀并明确 FAILED', async () => {
+  const store = fixtureStore();
+  const deps = buildDeps({ generateStream: async (text, context, onFragment) => {
+    await onFragment('我在呢。');
+    await onFragment('我是AI助手。');
+  } });
+  deps.textModerator = async ({ text }) => ({ decision: text.includes('表达不够贴合') ? 'BLOCK' : 'PASS', policyVersion: 'test' });
+  const { call, turn } = finalizedTurn(store, deps);
+  const { events, emit } = collect();
+  await executeCallTurn(deps, { store, account: store.accounts.get(ACCOUNT_ID), call, turn, emit });
+  assert.equal(turn.state, 'FAILED');
+  assert.equal(store.messages.get(turn.assistant_message_id).text, '我在呢。');
+  assert.equal(events.some((e) => e.event === 'call.turn.completed'), false);
+  assert.equal(events.some((e) => e.event === 'call.turn.failed' && e.data.code === 'QWEN_STREAM_INTERCEPTED'), true);
+});
+
+test('正常通话提供服务端阶段耗时，首音频事件早于生成终稿', async () => {
+  const store = fixtureStore();
+  let resolveAudio;
+  const firstAudio = new Promise((resolve) => { resolveAudio = resolve; });
+  const deps = buildDeps({ generateStream: async (text, context, onFragment) => {
+    await onFragment('我在呢。');
+    await firstAudio;
+    return { reply_text: '我在呢。', provider: 'test', model_version: 'test' };
+  } });
+  const { call, turn } = finalizedTurn(store, deps);
+  const { events, emit } = collect();
+  await executeCallTurn(deps, { store, account: store.accounts.get(ACCOUNT_ID), call, turn, emit: (event, data) => {
+    emit(event, data);
+    if (event === 'call.turn.audio') resolveAudio();
+  } });
+  const completed = events.find((e) => e.event === 'call.turn.completed');
+  assert.equal(turn.state, 'COMPLETED');
+  for (const key of ['asr', 'input_moderation', 'context', 'first_text', 'first_audio', 'total']) {
+    assert.equal(Number.isFinite(completed.data.timings_ms[key]), true, key);
+    assert.ok(completed.data.timings_ms[key] >= 0);
+  }
+});

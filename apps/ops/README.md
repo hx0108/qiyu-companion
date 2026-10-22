@@ -1,5 +1,7 @@
 # 栖语独立运营台（开发验证）
 
+维护核对：2026-10-22。此应用是独立审核工具，不是杏桃用户端「我的」页面。[当前状态](../../development/CURRENT_PRODUCT_STATUS.md) 与 [运维手册](../../development/OPERATIONS_RUNBOOK.md) 是部署/验收入口；运营台截图不得包含真实令牌或用户正文。
+
 该进程与用户 Web 分离，通过反向代理访问 API 的 `/internal/*` 审核接口。审核令牌仅保存在页面内存，不写 LocalStorage、SessionStorage、Cookie 或日志。年龄/权利决策、摘要与向量 DLQ 单次重放、人格发布状态机均调用既有服务端门禁；投诉、安全和删除异常保持只读。
 
 ```powershell

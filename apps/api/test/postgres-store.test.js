@@ -161,6 +161,41 @@ test('PostgresStore normalizes subscription timestamps so persisted trial TTS qu
   });
 });
 
+test('expired trial does not break bootstrap reads and persists expiry with a valid PostgreSQL parameter list', async (t) => {
+  const pool = fakePool({ loadActiveTrial: true });
+  const client = await pool.connect();
+  const query = client.query.bind(client);
+  client.query = async (sql, values) => {
+    if (String(sql).startsWith('UPDATE subscriptions')) {
+      const referenced = new Set([...String(sql).matchAll(/\$(\d+)/g)].map((match) => Number(match[1])));
+      for (let index = 1; index <= values.length; index++) {
+        if (!referenced.has(index)) {
+          const error = new Error(`could not determine data type of parameter $${index}`);
+          error.code = '42P18';
+          throw error;
+        }
+      }
+    }
+    const result = await query(sql, values);
+    if (String(sql).includes('FROM subscriptions WHERE')) {
+      result.rows[0].period_start = new Date('2000-01-01T00:00:00Z');
+      result.rows[0].period_end = new Date('2000-01-08T00:00:00Z');
+    }
+    return result;
+  };
+  const app = createApp({ store: new PostgresStore({ pool }) });
+  await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => app.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${app.address().port}/api/v1/required-notices`, {
+    headers: { authorization: 'Bearer dev-alice-token' }
+  });
+  assert.equal(response.status, 200);
+  const update = pool.calls.find((call) => call.sql.startsWith('UPDATE subscriptions'));
+  assert.ok(update);
+  assert.ok(update.values.includes('EXPIRED'));
+  assert.ok(pool.calls.some((call) => call.sql === 'COMMIT'));
+});
+
 test('PostgresStore vector recall stays inside the authenticated account, character, active state, indexed version, and matching embedding model version', async () => {
   const pool = fakePool();
   const store = new PostgresStore({ pool });

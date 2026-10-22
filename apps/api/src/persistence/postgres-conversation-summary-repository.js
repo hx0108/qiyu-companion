@@ -1,6 +1,6 @@
 'use strict';
 
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { createSummary, validSummary } = require('../domain/conversation-summary');
 
 const DEFAULT_LEASE_SECONDS = 300;
@@ -34,7 +34,7 @@ class PostgresConversationSummaryRepository {
         FROM conversation_summaries WHERE conversation_id = $1 AND state = 'ACTIVE'`, [job.conversation_id]);
       const previous = validSummary(summaries.rows.map(mapSummary), source, job.conversation_id, Number(job.captured_revocation_epoch));
       const pending = previous ? source.slice(source.findIndex((message) => message.message_id === previous.source_to_id) + 1) : source;
-      return { ...job, previous_summary: previous, pending_messages: pending.map(({ message_id, actor, text }) => ({ message_id, actor, text })) };
+      return { ...job, captured_source_checksum: sourceChecksum(source), previous_summary: previous, pending_messages: pending.map(({ message_id, actor, text }) => ({ message_id, actor, text })) };
     });
   }
 
@@ -45,7 +45,7 @@ class PostgresConversationSummaryRepository {
        WHERE a.account_id = $1 AND c.conversation_id = $2 FOR UPDATE`, [job.account_id, job.conversation_id]);
       const current = guard.rows[0];
       const source = await sourceMessages(client, job.conversation_id, job.source_to_id);
-      if (!current || current.account_status !== 'OPEN' || current.status === 'DELETED' || Number(current.revocation_epoch) !== Number(job.captured_revocation_epoch) || !source.length || source.at(-1).message_id !== job.source_to_id) {
+      if (!current || current.account_status !== 'OPEN' || current.status === 'DELETED' || Number(current.revocation_epoch) !== Number(job.captured_revocation_epoch) || !source.length || source.at(-1).message_id !== job.source_to_id || sourceChecksum(source) !== job.captured_source_checksum) {
         await client.query(`UPDATE conversation_summary_jobs SET state = 'CANCELLED', completed_at = CURRENT_TIMESTAMP,
           lease_expires_at = NULL, last_error = 'source revoked before summary commit' WHERE job_id = $1 AND state = 'PROCESSING'`, [job.job_id]);
         return { state: 'CANCELLED' };
@@ -53,7 +53,7 @@ class PostgresConversationSummaryRepository {
       const expiry = source.map((message) => message.retention_expires_at).filter(Boolean).sort()[0];
       const summary = createSummary({ summaryId: randomUUID(), accountId: job.account_id, conversationId: job.conversation_id, messages: source,
         revocationEpoch: Number(job.captured_revocation_epoch), text: generated.text, modelRouteId: generated.modelVersion,
-        promptVersion: generated.promptVersion || 'conversation-summary.v1', retentionExpiresAt: expiry, createdAt: new Date().toISOString() });
+        promptVersion: generated.promptVersion || 'conversation-summary.v2', retentionExpiresAt: expiry, createdAt: new Date().toISOString() });
       await client.query(`UPDATE conversation_summaries SET state = 'SUPERSEDED'
         WHERE account_id = $1 AND conversation_id = $2 AND state = 'ACTIVE'`, [job.account_id, job.conversation_id]);
       await client.query(`INSERT INTO conversation_summaries (summary_id, account_id, conversation_id, source_from_id, source_to_id, summary_ciphertext, model_route_id, prompt_version, source_checksum, revocation_epoch, state, created_at, retention_expires_at)
@@ -92,6 +92,7 @@ async function sourceMessages(client, conversationId, sourceToId) {
   return result.rows.map((row) => ({ ...row, created_at: value(row.created_at), retention_expires_at: value(row.retention_expires_at) }));
 }
 function mapSummary(row) { return { ...row, revocation_epoch: Number(row.revocation_epoch), created_at: value(row.created_at), invalidated_at: row.invalidated_at ? value(row.invalidated_at) : null, retention_expires_at: value(row.retention_expires_at) }; }
+function sourceChecksum(messages) { return createHash('sha256').update(JSON.stringify(messages.map(({ message_id, actor, text }) => ({ message_id, actor, text })))).digest('hex'); }
 function value(input) { return input instanceof Date ? input.toISOString() : String(input); }
 async function persistSummaryOperationMetric(client, { job, generated = null, latencyMs = 0, outcome }) {
   const usage = generated?.usage || {};

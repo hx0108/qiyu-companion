@@ -3,6 +3,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DEV_FLAG_NAMES, safeDevFlags, parseDevFlags, devFlagEnabled } = require('../src/development/dev-flags');
 
+test('邀请码封闭试用对全部账户开放六项能力，API 与 Worker 使用相同解析规则', () => {
+  const flags = parseDevFlags({ QIYU_TRIAL_AUTH: 'invite', QIYU_DEV_FLAG_ACCOUNTS: 'owner-only' });
+  for (const name of DEV_FLAG_NAMES) assert.equal(devFlagEnabled(flags, name, 'another-invited-account'), true);
+  assert.equal(flags.accounts, null);
+});
+
 test('dev flags default to fully off and parse environment with whitelist accounts', () => {
   // 默认（无环境变量）：六个开关全关、无白名单。
   const safe = safeDevFlags();

@@ -1,38 +1,49 @@
-# 栖语 M1 本地 Web 壳
+# 栖语 Web · 杏桃微光
 
-无框架、无安装依赖的移动端开发前端。它只请求同源 `/api/v1`，用于 M1 主链：必要告知、年龄声明、单角色创建、文字对话、候选记忆确认/拒绝、关系资产列表与删除任务回执，以及受控短音频 ASR 转写确认。
+更新：2026-10-22。当前为无框架 ES Module 前端，向同源 `/api/v1` 读取服务端事实。[设计规范](../../DESIGN.md) · [产品状态](../../development/CURRENT_PRODUCT_STATUS.md) · [截图](../../docs/screenshots/README.md)
 
-## 本地运行
+## 本地启动
 
-由同源 API 服务启动：
+项目根目录执行：
 
 ```powershell
-cd C:\Users\ASUS\Desktop\AI社交\apps\api
-node src\server.js
+cd apps/api
+npm ci
+npm start
 ```
 
-在浏览器打开 `http://127.0.0.1:3000/`。该 Node 服务只在 localhost 托管必要静态资源和 `/api/v1`；不要另起静态服务器或跨端口访问，避免 CORS 及脱离服务端事实的假路径。
+访问 `http://127.0.0.1:3000/`。按告知、年龄声明、创建角色进入。直接查看合成角色可运行 `node apps/api/scripts/start-apricot-preview.js` 并打开 4314。内存预览重启即重置，不调用收费供应商，不能作为真实语音入口。不要另起跨端口静态服务。
 
-该页面仅在 `localhost`、`127.0.0.1` 或 `::1` 使用合同指定、代码内明确标识的合成开发 Bearer token `dev-alice-token`，并发送 `X-Qiyu-Client-Environment: local-development-synthetic`。它不是生产鉴权，禁止部署到非本地环境。
+`start-apricot-voice.js` 是显式授权的本机真实语音联调入口：读取根 .env，创建内存邀请服务；启动后拨打才产生供应商调用，文字仍为 Mock，账号/对话不持久。邀请码保存在 Git 忽略的 output，不得上传。在线持久化封测请按 deploy 说明操作。
 
-## 当前 API 假设
+## 当前页面
 
-所有端点以 `/api/v1` 为前缀、使用 JSON、需要 Bearer token；写请求携带 `Idempotency-Key`。
+- 此刻：四功能卡、真实候选/确认回忆、站内通知。
+- 陪伴：文字/SSE、转写回填、图片、语音朗读、实时通话与根部三点菜单。
+- 回忆：候选确认、已确认关系资产/事件、来源、修订与删除。
+- 我的：四步角色档案、独立人格版本、主动消息/静默、权益、数据、帮助与计划。
+- 角色档案各步骤/形象选择只保留当前编辑会话草稿，刷新不保证恢复未提交内容。人格恢复从服务端历史快照创建新版本；不在本地伪造成功。
+- 通知返回实际入口；数据与隐私位于我的。二级页统一标题、卡片、返回图标，详见 DESIGN.md。
 
-- `GET /api/v1/dev/session` 仅用于开发账户状态诊断；`GET /required-notices`、`POST /required-notices/{id}/displayed`
-- `GET /age/status`、`POST /age/declarations`（字段为 `date_of_birth` 与 `confirmed_18_plus`）
-- `POST /characters`（当前合同只接受 `name`）；`POST /conversations`；`POST /conversations/{id}/messages`（载荷为 `{content:{text}}`）
-- `GET /memory-candidates`；`POST /memory-candidates/{id}/confirm`、`confirm-edited`、`reject`
-- `GET /relationship-assets`；`DELETE /relationship-assets/{id}`；`GET /deletion-jobs/{id}`
-- `POST /conversations/{id}/asr-jobs`（`mime_type` 与 `audio_base64`）；`GET /asr-jobs/{id}`；`POST /asr-jobs/{id}/confirm`；`DELETE /media-assets/{id}`
+## 代码与缓存
 
-响应中的 `notices`、年龄状态、`character`、`conversation`、`user_message`、`assistant_message`、`candidates`、`assets`、`deletion_job` 才会驱动页面。当前合同没有角色、会话或消息的 GET 路由：重载浏览器不会伪造这些历史，消息只呈现本次 POST 返回的服务端对象。对于 `428`、`401`、`403`、`409` 和网络失败，页面保持失败/阻断状态。
+`index.html` 加载基础样式、兼容样式，最后加载 `apricot.css`。当前缓存键 `20261021-chat-menu-v32`；`apricot-ui.js` 复用页面和组件，`app.js` 负责 API/导航/状态，`character-appearance.js` 管理形象。`realtime-call-client.js` 与 `call-client.js` 分别承担原生实时和播放管线。
 
-## 事实边界
+Service Worker 只缓存静态壳，排除 API/internal/媒体。更新需核对入口、模块依赖和缓存键，不能仅改 index 或仅看本地截图。
 
-- 浏览器从不本地判定 `AGE_PASS`、候选记忆确认、资产删除或删除完成。
-- 删除后会重新读取资产列表，且只展示 API 返回的删除任务；除 API 返回 `COMPLETED` 外绝不写“完成”。
-- 不使用 `localStorage`，也没有客户端 Mock 成功路径。封测会话令牌以 AES-GCM 密文保存在 `sessionStorage`，不可导出的密钥保存在 IndexedDB；安全存储不可用时不回退明文。主题仅为当前渲染会话的表现层状态。
-- PWA Service Worker 只缓存静态应用壳，明确排除 `/api`、`/internal` 与媒体请求；锁屏 Push 只显示通用文案，不携带关系内容、账号或事件类型。当前尚未接入真实 Push 订阅与投递供应商。
-- ASR 只接受腾讯一句话识别可用的短音频 MIME；浏览器端在服务端接受任务后立即释放其内存中的原始文件。转写确认只回填输入框，用户仍须手动发送；确认后原始音频删除状态来自 API。
-- 视觉变量通过相对引用复用 `designs/qiyu-v1-handoff/tokens/tokens.css`，移动主基线为 393px，控件最小触控尺寸为 44px。
+## 认证、存储与事实边界
+
+- 本地合成 Token 仅用于明确的本机开发；邀请模式必须使用登录/刷新得到的会话，不能回退开发 Token。
+- 令牌实际持久化在 `localStorage`，不是 sessionStorage：安全上下文 AES-GCM，非导出密钥在 IndexedDB；非安全上下文存在 Base64 兼容路径，Base64 不是加密。使用 HTTPS，不能宣称“存储不可用绝不降级”。清除存储/主动退出或刷新失败会清除会话。
+- 角色形象也保存在本机 localStorage；主题是当前渲染状态。角色、会话和消息有 GET 接口，重载后从服务端恢复，不再是“仅显示本次 POST”。
+- API 决定年龄/告知、权益、回忆确认、版本、删除状态。浏览器不自行写 AGE_PASS、删除完成、虚构天数或语音时长。
+- 转写确认回填输入框，用户自行发送；原音频删除结果以 API 为准。媒体经当前账户鉴权接口读取。
+- 首页实时入口取决于 `trial-access.realtime_call.enabled`、邀请会话和角色状态；不能只把灰色改亮当成功能开通。
+- 请求失败和 401/403/409/428 必须真实呈现。供应商错误不能用客户端假回复掩盖。
+- 锁屏 Push 只有隐私载荷基础能力，没有真实订阅/送达证明。
+
+## 验证
+
+在 apps/api 执行 `npm test`、`npm run test:e2e-browser`，以及菜单、首页、聊天头部、通知、主动消息布局脚本。截图使用隔离 Edge/合成账号，不调用真实媒体。
+
+用户反馈 Android Chrome 基础中文输入、多行/键盘开合和语音正常；未覆盖的权限拒绝、弱网、后台恢复、全部机型及量化音质仍需真机验收。不能宣称全状态 100% 一致。

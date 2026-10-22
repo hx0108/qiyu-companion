@@ -1,0 +1,23 @@
+const fs=require('node:fs');
+module.exports=function fidelity(html){
+ const css=fs.readFileSync(__dirname+'/fidelity.css','utf8').replace('@media(max-width:699px)','@media(max-width:401px)')+'\n'+fs.readFileSync(__dirname+'/canvas-402.css','utf8');
+ html=html.replace('</style>',css+'</style>');
+ const qiyuIcons={...require('./nav-icons.cjs'),...require('./home-icons.cjs')};
+ html=html.replace(/(<span class="(?:nav-icon|tile-icon)" aria-hidden="true" data-qiyu-icon="(\w+)">)<\/span>/g,(_,open,key)=>open+qiyuIcons[key]+'</span>');
+ html=html.replace('<main id="app">','<main id="app"><div class="statusbar" aria-hidden="true"><span>9:41</span><span class="system-icons"><i data-icon="signal"></i><i data-icon="wifi"></i><i data-icon="battery"></i></span></div><div class="home-indicator" aria-hidden="true"></div>');
+ html=html.replaceAll(/<img class="avatar" src="portrait.png" alt="([^"]*)">/g,'<span class="avatar reference-avatar" role="img" aria-label="$1"></span>');
+ html=html.replace('AI 伙伴 · 演示对话','AI 伙伴');
+ html=html.replace('<button class="memory-photo" data-action="photo">','<button class="memory-photo" data-action="photo" aria-label="查看那个有阳光的午后">');
+ html=html.replace('<div class="polaroids">','<div class="reference-collage" role="img" aria-label="样图原始照片：阳光阳台与林默"></div><div class="polaroids">');
+ html=html.replace('<div class="history-row">你说，忙完后想安静待一会儿。</div>','<div class="history-row">你说，忙完后想安静待一会儿。<time>今天 14:26</time></div>');
+ html=html.replace('<article class="candidate" id="candidate">','<article class="candidate" id="candidate"><i class="candidate-mark" data-icon="bookmark" aria-hidden="true"></i>');
+ html=html.replace("route=name;$('welcome')","route=name;$('app').dataset.route=name;$('welcome')");
+ const start=html.indexOf('function icons(){');const end=html.indexOf('icons();',start);
+ const map={home:'house',chat:'message-circle-more',wave:'audio-lines',image:'image',calendar:'calendar-check',bell:'bell',book:'notebook-text',back:'chevron-left',down:'chevron-down',phone:'phone',more:'ellipsis-vertical',plus:'plus',mic:'mic',send:'send-horizontal',play:'play',pause:'pause',user:'circle-user-round',moon:'moon',clock:'history',spark:'sparkles',shield:'shield-check',close:'x',bookmark:'bookmark',signal:'signal',wifi:'wifi',battery:'battery-full'};
+ html=html.slice(0,start)+`function icons(){const names=${JSON.stringify(map)};document.querySelectorAll('[data-icon]').forEach(e=>{e.innerHTML='<i data-lucide="'+(names[e.dataset.icon]||'sparkles')+'"></i>'});lucide.createIcons({attrs:{'aria-hidden':'true','stroke-width':1.8}})}\n`+html.slice(end);
+ html=html.replace('<script>', ()=>'<script>'+fs.readFileSync(__dirname+'/lucide.min.js','utf8')+'</script><script>'+fs.readFileSync(__dirname+'/spoken-replies.js','utf8')+'</script><script>');
+ const ref='data:image/png;base64,'+fs.readFileSync(__dirname+'/approved-reference.png').toString('base64');
+ const art='data:image/png;base64,'+fs.readFileSync(__dirname+'/welcome-art.png').toString('base64');
+ html=html.replace('</head>',`<style>.reference-avatar,.memory-photo,.reference-collage{background-image:url("${ref}")}#welcome{background-image:url("${art}");background-size:100% 100%;background-position:center;background-repeat:no-repeat}.reference-collage{position:absolute;left:2.5%;top:28.1%;width:96%;height:43%;background-size:363.64% 267.37%;background-position:7.194% 55.28%;mask-image:linear-gradient(transparent,#000 3%,#000 97%,transparent);pointer-events:none}</style></head>`);
+ return html;
+};

@@ -1,0 +1,9 @@
+// Dedicated Qiyu navigation contours traced from the user-approved combined mock.
+// Keep these separate from the general-purpose content icon library.
+const svg = (paths) => `<svg class="qiyu-nav-glyph" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${paths}</svg>`;
+module.exports = {
+  navHome: svg('<path d="M8 29H24C27.2 29 29 27.1 29 24V14.3C29 12.6 28.4 11.5 27 10.3L18.5 3.4C16.8 2 15.2 2 13.5 3.4L5 10.3C3.6 11.5 3 12.6 3 14.3V24C3 27.1 4.8 29 8 29Z"/><path d="M23 18.1V24.5"/>'),
+  navCompanion: svg('<path d="M3.3 15.2C3.7 7.8 9.1 2.3 16.2 2.3C23.7 2.3 29.5 8.2 29.5 15.8C29.5 16.9 29.4 18 29.2 19"/><path d="M12.8 15.2C15.1 14.7 15.9 16.5 15.3 18.9L14.1 23.8C13.4 27.3 11.2 28.5 8.5 28.1C5.5 27.7 3.4 25.1 4.1 22.3C4.5 20.9 5.5 19.9 7 18.9L10.4 16.5C11.3 15.8 12.1 15.4 12.8 15.2Z"/><path d="M20.2 19.2C21.5 18.8 22.6 19.4 24.1 20.8L27.6 24C29.9 26.2 29.4 29.3 26.9 30.4C24.5 31.5 21.4 30.7 20.5 28.3C20.1 27.2 20.1 25.5 19.9 24L19.5 21.8C19.2 20.4 19.3 19.6 20.2 19.2Z"/>'),
+  navMemory: svg('<rect x="2.2" y="4.5" width="27.6" height="23" rx="3.2"/><path class="qiyu-memory-light" d="M22.2 9.2C22.6 9.2 22.8 9.7 23.1 10.8L23.4 11.7C23.6 12.4 24 12.8 24.7 13L25.6 13.3C26.7 13.6 27.2 13.8 27.2 14.2C27.2 14.6 26.7 14.8 25.6 15.1L24.7 15.4C24 15.6 23.6 16 23.4 16.7L23.1 17.6C22.8 18.7 22.6 19.2 22.2 19.2C21.8 19.2 21.6 18.7 21.3 17.6L21 16.7C20.8 16 20.4 15.6 19.7 15.4L18.8 15.1C17.7 14.8 17.2 14.6 17.2 14.2C17.2 13.8 17.7 13.6 18.8 13.3L19.7 13C20.4 12.8 20.8 12.4 21 11.7L21.3 10.8C21.6 9.7 21.8 9.2 22.2 9.2Z" fill="currentColor" stroke="none"/><path d="M7.2 21.7H18.5"/>'),
+  navProfile: svg('<circle cx="16" cy="8.9" r="6.5"/><path d="M2.5 29C2.5 23.2 8.5 20.3 16 20.3C23.5 20.3 29.5 23.2 29.5 29"/>')
+};

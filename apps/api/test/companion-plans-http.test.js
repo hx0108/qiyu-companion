@@ -14,6 +14,9 @@ const { confirmLifeEventFromCandidate } = require('../src/domain/life-event-serv
 const FLAGS = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH,COMPANION_PLANS,ARTIFACT_CARDS,ACTION_EXECUTION' });
 
 async function startServer(flags = FLAGS) {
+  const eventTime = new Date();
+  eventTime.setUTCDate(eventTime.getUTCDate() + 2);
+  eventTime.setUTCHours(6, 30, 0, 0);
   const store = new DevelopmentStore();
   const app = createApp({ store, devFlags: flags, replyGenerator: generateReply });
   await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
@@ -29,7 +32,7 @@ async function startServer(flags = FLAGS) {
     store, account: store.account('acct_dev_alice'),
     candidate: {
       candidate_id: 'memc_p1', account_id: 'acct_dev_alice', character_id: character.character_id, state: 'CANDIDATE', version: 1, type: 'life_event',
-      normalized_value: { life_event: { title: '周五的产品经理面试', domain: 'REAL_LIFE', event_kind: 'INTERVIEW', scheduled_at: '2026-10-02T06:30:00Z', timezone: 'Asia/Shanghai' } },
+      normalized_value: { life_event: { title: '周五的产品经理面试', domain: 'REAL_LIFE', event_kind: 'INTERVIEW', scheduled_at: eventTime.toISOString(), timezone: 'Asia/Shanghai' } },
       display_text: '', provider: 't', expires_at: '2099-01-01', source_message_id: 'msg_p1', conflicts_with: []
     }
   }).event;

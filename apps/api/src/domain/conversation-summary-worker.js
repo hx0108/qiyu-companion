@@ -2,7 +2,7 @@
 
 const { createSummary, supersedeActiveSummaries, validSummary } = require('./conversation-summary');
 
-const SUMMARY_PROMPT_VERSION = 'conversation-summary.v1';
+const SUMMARY_PROMPT_VERSION = 'conversation-summary.v2';
 const COMPLETED_TURN_MESSAGE_THRESHOLD = 60;
 const MAX_SUMMARY_JOB_ATTEMPTS = 8;
 
@@ -111,6 +111,7 @@ async function createSummaryForJob({ store, job, summaryGenerator, now }) {
   const previous = validSummary([...store.conversationSummaries.values()], allMessages, job.conversation_id, account.revocation_epoch, now.toISOString());
   const pending = previous ? messagesAfter(source, previous.source_to_id) : source;
   if (pending.length !== COMPLETED_TURN_MESSAGE_THRESHOLD) return null;
+  const sourceSnapshot = JSON.stringify(source.map(({ message_id, actor, text }) => ({ message_id, actor, text })));
   const result = await summaryGenerator({
     conversationId: job.conversation_id,
     previousSummary: previous ? previous.text : null,
@@ -123,6 +124,7 @@ async function createSummaryForJob({ store, job, summaryGenerator, now }) {
   if (account.account_status !== 'OPEN' || account.revocation_epoch !== job.captured_revocation_epoch || conversation.status === 'DELETED' || current.findIndex((message) => message.message_id === job.source_to_id) < 0) return null;
   const createdAt = now.toISOString();
   const currentSource = current.slice(0, current.findIndex((message) => message.message_id === job.source_to_id) + 1);
+  if (sourceSnapshot !== JSON.stringify(currentSource.map(({ message_id, actor, text }) => ({ message_id, actor, text })))) return null;
   const retentionExpiresAt = earliestRetentionExpiry(currentSource, account.raw_interaction_retention_days, now);
   const summary = createSummary({
     summaryId: store.next('sum'), accountId: account.account_id, conversationId: job.conversation_id,

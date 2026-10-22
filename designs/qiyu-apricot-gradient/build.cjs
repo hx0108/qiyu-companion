@@ -1,0 +1,6 @@
+const fs=require('node:fs');const path=require('node:path');let html=fs.readFileSync(path.join(__dirname,'source.html'),'utf8');
+html=html.replace('<label class="check"><input type="checkbox" id="adult">','<label>封闭试用邀请码（演示）<input id="invite" value="QIYU-DEMO" autocomplete="off"></label><small>此处仅接受 QIYU-DEMO，不验证真实邀请凭据。</small><label class="check" style="margin-top:18px"><input type="checkbox" id="adult">');
+html=html.replace("admit:()=>{if(!", "admit:()=>{if($('invite').value.trim()!=='QIYU-DEMO'){$('onboardError').textContent='请输入示例邀请码 QIYU-DEMO。';return}if(!");
+html=html.replace('</style>','#welcome{position:absolute;inset:0}.polaroids{flex:1 0 260px}.welcome-bottom{position:relative;z-index:2}@media(max-height:650px){.polaroids{flex-basis:240px}} </style>');
+html=require('./fidelity.cjs')(html);
+for(const name of ['balcony.png','portrait.png'])html=html.replaceAll(name,'data:image/png;base64,'+fs.readFileSync(path.join(__dirname,name)).toString('base64'));fs.writeFileSync(path.join(__dirname,'栖语_杏桃微光渐变_完整交互原型.html'),html);const scripts=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];for(const s of scripts)new Function(s[1]);console.log('Built standalone HTML; JavaScript syntax valid; reference fidelity layer embedded');

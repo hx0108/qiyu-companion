@@ -1,0 +1,57 @@
+/* 402 pt × 874 pt design = 402 × 874 CSS logical pixels; CSS pt would scale by 4/3. */
+html{scrollbar-gutter:stable}
+body{min-height:max(100dvh,906px);display:grid;place-items:center;margin:0}
+#app{width:402px;height:874px;max-width:100vw;border:0;border-radius:42px;outline:1px solid #edd8ca;container-type:inline-size}
+#nav{--nav-ink:#756b66;--nav-active:#b66549;--nav-selection:#f2ddd2;position:absolute;bottom:28px;left:0;right:0;height:82px;padding:3px 12px 5px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;align-items:center;background:var(--paper);border:0;border-radius:0;box-shadow:none}
+#nav button,#nav button.active{display:grid;grid-template-rows:43px 18px;justify-items:center;align-content:center;justify-content:normal;width:100%;height:74px;min-width:0;padding:0;gap:5px;background:transparent!important;box-shadow:none;border-radius:20px;color:var(--nav-ink);transform:none;font-weight:400}
+#nav button .nav-icon{position:relative;display:grid;place-items:center;width:64px;height:40px;margin:auto;padding:0;border-radius:23px;background:transparent;box-shadow:none;color:inherit;line-height:0}
+#nav button .qiyu-nav-glyph{display:block;width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.8;overflow:visible;flex:none}
+#nav button[data-go="chat"] .qiyu-nav-glyph{width:31px;height:31px;stroke-width:1.72}
+#nav button[data-go="memories"] .qiyu-nav-glyph{width:31.5px;height:31.5px;stroke-width:1.6}
+#nav button[data-go="profile"] .qiyu-nav-glyph{width:29.5px;height:29.5px}
+#nav button .qiyu-memory-light{fill:currentColor;stroke:none}
+#nav button>span:last-child{display:block;height:18px;font-size:11px;font-weight:400;line-height:18px;letter-spacing:0;color:inherit;text-align:center}
+#nav button.active{color:var(--nav-active)}
+#nav button.active .nav-icon{background:var(--nav-selection);color:inherit;box-shadow:none}
+#nav button.active>span:last-child{font-size:11px;font-weight:400;line-height:18px;color:inherit}
+#nav::after{content:"";position:absolute;top:100%;left:0;right:0;height:28px;background:var(--paper);pointer-events:none}
+#nav button:active .nav-icon{filter:brightness(.96)}
+#nav button:focus-visible{outline:2px solid var(--nav-active);outline-offset:-2px}
+.night #nav{--nav-ink:#ddcec4;--nav-active:#ffe0cb;--nav-selection:#80513d;background:var(--paper)}
+.night #nav button{color:var(--nav-ink)}
+.night #nav button.active,.night #nav button.active span{color:var(--nav-active)}
+.night #nav button.active .nav-icon{background:var(--nav-selection);box-shadow:none}
+.bar{height:122px;min-height:122px;padding-top:42px}
+#profile>.bar,#memories>.bar{height:102px;min-height:102px;padding-bottom:0}
+#profile>.profile-head{padding-top:12px}
+#profile>.profile-head h1{margin:0}
+#memories>.filter{margin-top:12px}
+.intro h1{font-size:25px;letter-spacing:0}
+.tile{padding-left:21px;padding-right:13px}.tile small{font-size:13px}
+.tile .tile-icon{display:grid;place-items:center;width:36px;height:36px;margin-bottom:6px;color:var(--brand)}
+.tile .tile-icon .qiyu-home-glyph{display:block;width:32px;height:32px;margin:0;fill:none;stroke:currentColor;stroke-width:1.5}
+.tile .tile-icon .qiyu-memory-light{fill:currentColor;stroke:none}
+.notice b{font-size:14px}.notice small{font-size:13px}
+.history-row{font-size:13px;gap:13px}
+.chatpage .bar{height:122px;padding-top:42px}.chatbody{height:calc(100% - 122px)}
+.chatpage .bar>.iconbtn[data-action="chatmenu"]{width:44px;height:44px;min-width:44px;flex:0 0 44px;padding:0;border-radius:50%;display:inline-grid;place-items:center}
+.candidate{padding-left:55px}.candidate b{font-size:15px}.candidate p{font-size:13px;white-space:normal}
+.candidate .row{gap:9px}.msg .bubble{font-size:16px;padding-left:18px;padding-right:18px}
+.msg .bubble.spoken-reply{display:block;max-width:96%;padding:15px 18px;border-radius:23px 23px 23px 5px;background:#f7f2ee;line-height:1.7;overflow-wrap:anywhere}
+.spoken-reply .spoken-toggle{position:relative;display:inline-grid;place-items:center;width:16px;height:24px;padding:0;margin:0 9px 0 0;vertical-align:-4px;background:transparent;color:#b66549;border:0;border-radius:4px;line-height:0;touch-action:manipulation}
+.spoken-reply .spoken-toggle::before{content:"";position:absolute;width:44px;height:44px;left:50%;top:50%;transform:translate(-50%,-50%)}
+.spoken-reply .spoken-control-mark{display:block;line-height:0}
+.spoken-reply .spoken-control-mark svg{display:block;width:16px;height:16px;fill:currentColor;stroke:currentColor;stroke-width:1}
+.spoken-reply .spoken-toggle[aria-pressed="true"] svg{stroke:none}
+.spoken-reply .spoken-phrase{color:inherit;border-radius:4px;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.spoken-reply .spoken-phrase.is-current{color:#b66549;box-shadow:inset 0 -.29em #f2dfd2}
+.spoken-reply .spoken-duration{display:inline-block;margin-left:8px;font-size:12px;line-height:inherit;color:#998b81;white-space:nowrap;vertical-align:baseline}
+.night .msg .bubble.spoken-reply{background:#352923;color:#fff4eb}
+.night .spoken-reply .spoken-toggle{color:#f2af88}
+.night .spoken-reply .spoken-phrase.is-current{color:#ffcaab;box-shadow:inset 0 -.29em #694630}
+.night .spoken-reply .spoken-duration{color:#d6bdae}
+.composer textarea{font-size:14px}#app[data-route="chat"] .composer{bottom:124px}
+#welcome .wordmark{font-size:36px;left:34px}#welcome h1{font-size:36px;left:34px}
+.welcome-bottom p{font-size:16px}.welcome-bottom button.primary{font-size:18px}
+@media(max-width:402px){body{min-height:874px;display:block}#app{width:100vw;height:874px;border-radius:0;outline:0;box-shadow:none}#nav .nav-icon{width:min(64px,17vw)}}
+@media(prefers-reduced-motion:reduce){#nav *{transition:none!important}}

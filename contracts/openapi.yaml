@@ -182,6 +182,7 @@ paths:
   /api/v1/subscriptions/current:
     get:
       summary: 查询当前订阅与续费状态
+      description: 邀请码封闭试用返回 access_policy=CLOSED_TRIAL_FULL_ACCESS、trial.state=CLOSED_TRIAL、period_end=null；无需领取体验或购买。
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }
   /api/v1/subscriptions/{subscriptionId}/cancel-renewal:
@@ -196,7 +197,7 @@ paths:
   /api/v1/entitlements:
     get:
       summary: 查询文字/图片/语音权益余额与重置时间
-      description: 图片单位为张，TTS/ASR 单位为秒（订阅目录的分钟×60 入账）；text_fair_use 为每日公平使用。
+      description: 图片单位为张，TTS/ASR 单位为秒（订阅目录的分钟×60 入账）；有效 7 天试用期内 TTS/ASR 返回 quota_policy=UNLIMITED_DURING_TRIAL 且不扣减语音账本；text_fair_use 为每日公平使用。
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }
   /api/v1/usage/daily:
@@ -393,6 +394,32 @@ paths:
                   additionalProperties: false
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/characters/{characterId}/persona-versions/{personaVersion}/restore:
+    post:
+      summary: 将本人角色的已生效历史人格恢复为新版本
+      description: 只允许恢复 RETIRED 历史快照；不接收客户端人格内容。通过 expected_version 乐观锁、幂等键、明确确认和原因执行，追加新版本，不删除历史。角色响应包含 persona_restore_supported；旧服务未返回此字段时客户端不开放回退提交。
+      parameters:
+        - $ref: '#/components/parameters/CharacterId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - { name: personaVersion, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expected_version, confirm, reason]
+              additionalProperties: false
+              properties:
+                expected_version: { type: integer, minimum: 1 }
+                confirm: { type: boolean, enum: [true] }
+                reason: { type: string, minLength: 1, maxLength: 120 }
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
@@ -656,10 +683,67 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v1/conversations/{conversationId}/realtime-calls:
+    post:
+      summary: 创建原生实时语音独立验证会话
+      description: 显式 QIYU_REALTIME_CALL_ENABLED=1、邀请封测完整访问、真实语音适配器及文本审核均可用时开放；正式订阅尚无原生语音计费契约，返回503，不套用ASR/TTS扣额。受年龄、告知、账户、安全和会话权限约束，每账户并发1，单连接最多15分钟、不设验证轮数上限（仍受日对话预算约束），不自动无限重连。接通前预留第一轮日对话预算，后续各轮先预留再放行；日文字Token预算采用保守上下文估计，不是原生音频Token供应商账单。音频会先发送给原生模型，供应商可能在输入文本审核前内部生成；本模式输入审核保证阻断字幕/音频展示和持久化，不保证阻止供应商内部生成。旧回合制调用顺序不变。返回session_id、stream_url、max_duration_ms、max_responses（null表示无单连接轮数上限）。原始输入PCM不落对象存储；已过审完整对话落普通消息与来源引用。人格/记忆上下文按4000字符完整条目预算加载，超预算条目不注入；不能保证无限历史召回。
+      parameters: [ { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '201': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/realtime-calls/{sessionId}/stream:
+    get:
+      summary: 消费一次原生语音双向会话的持续SSE下行
+      description: 必须带账户Bearer认证，进程内单实例会话归属绑定，不能重复消费。事件realtime.ready、realtime.speech-start、realtime.interrupt、realtime.transcript、realtime.text、realtime.audio、realtime.response-completed、realtime.response-rejected、realtime.response-skipped、realtime.input-skipped、realtime.closed。识别无法确认最终文本时，取消当前问题并发送input-skipped（question_id及固定code ASR_UNCONFIRMED），不播放或持久化该问题回复，客户端提示重说，连接可继续。原生历史仅携带最近完整QA对，总文本最多4000字符；角色背景与speaking_style合计最多4000字符。日用量仅按实际发送上下文和已知输入的保守Token估算结算，未用预留释放，不等同供应商音频账单。关系冲突时response-rejected携带question_id、reply_id及固定code OOC_RELATIONSHIP_CONFLICT，停止该回复后续播放且不关闭通话；错误句段不下发文字或音频、不写入记忆，已播放的合规片段按现有打断规则结算，未播放轮次释放预留；该回复严格完成后response-skipped携带同样标识，下一轮可继续。其他安全与身份失败仍按原规则关闭。audio为24kHz单声道PCM16LE base64，必须与已过审text共享question_id/reply_id/segment_id才可播放；字幕、人格及输出审核之前的音频不下发。每帧轻量复核账户撤销代际/年龄/控制/告知/会话/角色；句段/终态全来源版本复核。断开即中止供应商并结算，失败显式closed reason，不能静默降级。
+      parameters: [ { name: sessionId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '200': { description: text/event-stream }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/realtime-calls/{sessionId}/audio:
+    post:
+      summary: 持续上传原生语音PCM分块
+      description: Bearer账户归属与撤销检查；sequence从0严格递增，不重试不明结果。100毫秒建议块、最大6400字节，16kHz单声道PCM16LE，无WAV头；会话输入累计最多1920000字节。音频仅在进程与供应商之间传输。
+      parameters: [ { name: sessionId, in: path, required: true, schema: { type: string } } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sequence, audio_base64]
+              properties:
+                sequence: { type: integer, minimum: 0 }
+                audio_base64: { type: string, maxLength: 8536 }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /api/v1/realtime-calls/{sessionId}/audio-socket:
+    get:
+      summary: 同源一次性票据WebSocket实时PCM上行
+      description: 创建响应返回audio_socket_url、audio_socket_ticket及audio_socket_protocol。浏览器Upgrade提供Origin，与Host同源；Sec-WebSocket-Protocol携带qiyu-realtime-v1及ticket.加票据。票据只使用一次、30秒有效、绑定账户会话，不放URL/日志且不使用长期Bearer。二进制消息前4字节uint32BE序号，后续最多6400字节16kHz PCM16LE；最大待处理10帧/64000字节。每帧复用轻量权限检查，明确ack next_sequence，队列超限失败断开。无需等待每个HTTP往返才发送下一帧。持续SSE下行仍须账户认证；上行断开终止原生会话。供应商使用500毫秒server_vad静默断句，本版本未实现语义断句。
+      parameters: [ { name: sessionId, in: path, required: true, schema: { type: string } } ]
+      responses:
+        '101': { description: WebSocket upgraded }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /api/v1/realtime-calls/{sessionId}/end:
+    post:
+      summary: 挂断原生实时语音验证会话
+      description: 立即关闭供应商连接、阻止晚到音频，异步短事务结算当前轮；已输出轮按预留文字Token预算保守计量，未输出轮释放。结算失败以realtime.closed明确报告，不冒充成功。
+      parameters: [ { name: sessionId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '404': { $ref: '#/components/responses/Error' }
   /api/v1/conversations/{conversationId}/calls:
     post:
       summary: 发起 1:1 实时语音通话（灰度开关 QIYU_VOICE_CALL_ENABLED）
-      description: 回合制可打断通话：受理即同步返回开场问候（模板+世界情绪，不调 LLM）与其一次性 SSE 令牌。受理前校验 VOICE_CALL 权限、ASR 服务可用性与语音额度余量（ASR/TTS 各不足 1 秒即 409）；同账户已有 ACTIVE 通话返回 409。计费复用现有额度池（asr_minutes/tts_minutes/日对话额度），不新建 SKU。用户音频只进服务进程内存、不建 ASR_INPUT_AUDIO 资产、永不落对象存储，转写后即弃。
+      description: 回合制可打断通话：受理即同步返回开场问候（模板+世界情绪，不调 LLM）与其一次性 SSE 令牌。受理前校验 VOICE_CALL 权限、ASR 服务可用性与语音额度余量（有效 7 天试用期为不限量例外；其余账户 ASR/TTS 各不足 1 秒即 409）；同账户已有 ACTIVE 通话返回 409。计费复用现有额度池（asr_minutes/tts_minutes/日对话额度），不新建 SKU。用户音频只进服务进程内存、不建 ASR_INPUT_AUDIO 资产、永不落对象存储，转写后即弃。
       parameters: [ { $ref: '#/components/parameters/ConversationId' }, { $ref: '#/components/parameters/IdempotencyKey' } ]
       responses:
         '201': { $ref: '#/components/responses/JsonResponse' }
@@ -723,7 +807,7 @@ paths:
   /api/v1/call-turn-streams/{streamToken}:
     get:
       summary: 一次性 SSE 通话回合流（字幕+逐段音频）
-      description: 事件序列 call.turn.accepted → call.turn.transcript（转写字幕）→ call.turn.text×N（逐句过审文本）→ call.turn.audio×N（{turn_id, sequence, segment_index, format:'mp3', audio_base64, last}；回合首段含 ID3v2.3 AIGC 标识）→ call.turn.completed / call.turn.interrupted / call.turn.failed（code+中文 message）。响应头 x-accel-buffering:no 禁用反代缓冲。打断=客户端 abort 本连接：已过审已播出片段拼接落库为终稿，三本账按实际用量结算。逐句审核口径：片段过审即合成，同回合内同文本不重复 TTS_OUTPUT 复审（与异步 TTS 的滞后合成复审不同）。复用令牌 409，过期 410。
+      description: 事件序列 call.turn.accepted → call.turn.transcript（转写字幕）→ call.turn.text×N（逐句过审文本）→ call.turn.audio×N（{turn_id, sequence, segment_index, format:'mp3', audio_base64, last}；回合首段含 ID3v2.3 AIGC 标识）→ call.turn.completed（正常模型回合含 timings_ms：asr/input_moderation/context 为各阶段耗时，first_text/first_audio 为服务端回合开始至首次字幕/音频 SSE 发出耗时，total 为回合总耗时；单位毫秒，未发生阶段省略，first_audio 不代表设备实际起播） / call.turn.interrupted / call.turn.failed（code+中文 message）。响应头 x-accel-buffering:no 禁用反代缓冲。打断=客户端 abort 本连接：已过审已播出片段拼接落库为终稿，三本账按实际用量结算。逐句审核口径：片段过审即合成，同回合内同文本不重复 TTS_OUTPUT 复审（与异步 TTS 的滞后合成复审不同）。复用令牌 409，过期 410。
       parameters: [ { name: streamToken, in: path, required: true, schema: { type: string } } ]
       responses:
         '200':
@@ -752,6 +836,22 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '202': { $ref: '#/components/responses/JsonResponse' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '503': { $ref: '#/components/responses/Error' }
+  /api/v1/messages/{messageId}/tts-stream:
+    post:
+      summary: 鉴权后边合成边播放当前账户助手消息语音
+      description: 点击播放时发起，采用 SSE 的 tts.audio 音频分片和 tts.completed 任务终局事件。音色授权、消息归属、输出审核及额度预留通过后才输出音频；合成成功保存完整私有资产并提交额度，失败释放额度。已生成资源直接返回终局供私有下载重播，不重复合成计费。客户端断开中止供应商流。Postgres 推进使用账户延迟事务。聚合型供应商兼容为单音频事件，不承诺首段实时性。
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: SSE；音频事件的 audio_base64 为 MP3 分片，终局含 tts_job，终局后连接关闭。
+          content:
+            text/event-stream:
+              schema: { type: string }
         '403': { $ref: '#/components/responses/Error' }
         '404': { $ref: '#/components/responses/Error' }
         '503': { $ref: '#/components/responses/Error' }

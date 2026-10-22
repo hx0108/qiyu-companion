@@ -5,6 +5,24 @@ const assert = require('node:assert/strict');
 const { DevelopmentStore } = require('../src/domain/store');
 const { COMPLETED_TURN_MESSAGE_THRESHOLD, MAX_SUMMARY_JOB_ATTEMPTS, enqueueConversationSummary, replayConversationSummaryDeadLetter, runNextConversationSummaryJob } = require('../src/domain/conversation-summary-worker');
 
+test('生成摘要期间源正文被纠正或删除，晚到模型摘要不可绑定新正文', async () => {
+  for (const operation of ['correct', 'delete']) {
+    const store = new DevelopmentStore({ accountIds: ['acct_test'] });
+    const account = store.account('acct_test');
+    const conversation = { conversation_id: 'c1', account_id: account.account_id, status: 'OPEN' };
+    store.conversations.set('c1', conversation);
+    for (let i = 0; i < 60; i++) store.messages.set(`m${i}`, { message_id: `m${i}`, conversation_id: 'c1', actor: 'USER', text: `事实${i}`, created_at: new Date(Date.UTC(2026, 8, 1, 0, i)).toISOString() });
+    enqueueConversationSummary({ store, account, conversation, now: new Date('2026-09-02T00:00:00Z') });
+    const result = await runNextConversationSummaryJob({ store, now: new Date('2026-09-02T00:00:00Z'), summaryGenerator: async () => {
+      if (operation === 'correct') store.messages.get('m0').text = '已纠正';
+      else store.messages.get('m0').deleted_at = '2026-09-02T00:00:00Z';
+      return { text: '旧事实摘要', provider: 'spy', modelVersion: 'spy' };
+    } });
+    assert.equal(result.state, 'CANCELLED');
+    assert.equal(store.conversationSummaries.size, 0);
+  }
+});
+
 test('摘要 worker 仅在 30 个完整回合边界创建，并捕获撤销与源范围', async () => {
   const store = new DevelopmentStore({ accountIds: ['acct_test'] });
   const account = store.account('acct_test');

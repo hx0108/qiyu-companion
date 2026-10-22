@@ -15,6 +15,10 @@ const { runNextFollowupJob } = require('../src/domain/followup-worker');
 const FLAGS = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH' });
 
 async function startServer() {
+  // Keep the event in the future on every run; worker time is advanced explicitly.
+  const eventTime = new Date();
+  eventTime.setUTCDate(eventTime.getUTCDate() + 2);
+  eventTime.setUTCHours(6, 30, 0, 0);
   const store = new DevelopmentStore();
   const app = createApp({ store, devFlags: FLAGS, replyGenerator: generateReply });
   await new Promise((resolve) => app.listen(0, '127.0.0.1', resolve));
@@ -33,7 +37,7 @@ async function startServer() {
     store, account: store.account('acct_dev_alice'),
     candidate: {
       candidate_id: 'memc_f1', account_id: 'acct_dev_alice', character_id: character.character_id, state: 'CANDIDATE', version: 1, type: 'life_event',
-      normalized_value: { life_event: { title: '周五的产品经理面试', domain: 'REAL_LIFE', event_kind: 'INTERVIEW', scheduled_at: '2026-10-02T06:30:00Z', timezone: 'Asia/Shanghai' } },
+      normalized_value: { life_event: { title: '周五的产品经理面试', domain: 'REAL_LIFE', event_kind: 'INTERVIEW', scheduled_at: eventTime.toISOString(), timezone: 'Asia/Shanghai' } },
       display_text: '', provider: 't', expires_at: '2099-01-01', source_message_id: 'msg_f1', conflicts_with: []
     }
   }).event;
@@ -59,8 +63,8 @@ test('A2 HTTP：PUT 旅程——确认≠允许、默认派生、409 带当前�
   const granted = await (await fetch(`${base}/api/v1/life-events/${event.event_id}/followup`, options)).json();
   assert.equal(granted.grant.state, 'ACTIVE');
   assert.equal(granted.grant.followup_kind, 'BEFORE_EVENT');
-  assert.equal(granted.job.due_at, '2026-10-02T06:30:00.000Z'); // 默认=事件准点
-  assert.equal(granted.job.local_date, '2026-10-02');
+  assert.equal(granted.job.due_at, event.scheduled_at); // 默认=事件准点
+  assert.equal(granted.job.local_date, event.scheduled_at.slice(0, 10));
   assert.equal(granted.channel, 'IN_APP');
   assert.match(granted.note, /未配置 Push/);
 
@@ -95,7 +99,7 @@ test('A2 HTTP：PUT 旅程——确认≠允许、默认派生、409 带当前�
   }).event;
   const rejected = await fetch(`${base}/api/v1/life-events/${vague.event_id}/followup`, {
     method: 'PUT', headers: { ...headers, 'idempotency-key': `f3-${Math.random()}` },
-    body: JSON.stringify({ expected_version: 1, followup_kind: 'BEFORE_EVENT', due_at: '2026-10-05T02:00:00Z' })
+    body: JSON.stringify({ expected_version: 1, followup_kind: 'BEFORE_EVENT', due_at: new Date(Date.now() + 3 * 86400000).toISOString() })
   });
   assert.equal(rejected.status, 400);
   const rejectedBody = await rejected.json();
@@ -109,11 +113,11 @@ test('A2 HTTP：Worker 到期投递进聊天流（provider=proactive-followup+�
   const { base, headers, event, store } = server;
   await (await fetch(`${base}/api/v1/life-events/${event.event_id}/followup`, {
     method: 'PUT', headers: { ...headers, 'idempotency-key': `g1-${Math.random()}` },
-    body: JSON.stringify({ expected_version: 1, followup_kind: 'BEFORE_EVENT', allowed_from: '2026-10-01T00:00:00Z' })
+    body: JSON.stringify({ expected_version: 1, followup_kind: 'BEFORE_EVENT' })
   })).json();
 
   // 推进时钟到到期后，drain 内存 Worker（无模型→模板措辞）
-  const outcome = await runNextFollowupJob({ store, composer: null, workerId: 'test-worker', now: new Date('2026-10-02T06:31:00.000Z') });
+  const outcome = await runNextFollowupJob({ store, composer: null, workerId: 'test-worker', now: new Date(Date.parse(event.scheduled_at) + 60000) });
   assert.equal(outcome.state, 'PUBLISHED');
   const followupMessage = [...store.messages.values()].find((message) => message.provider === 'proactive-followup');
   assert.ok(followupMessage, '聊天流应出现主动消息');
@@ -128,7 +132,7 @@ test('A2 HTTP：Worker 到期投递进聊天流（provider=proactive-followup+�
   assert.ok(audit, '应写主动消息审计（频控统计源）');
   assert.equal(audit.template_slot, 'CONFIRMED_APPOINTMENT');
   // 当日槽位被占用
-  assert.ok(store.proactiveDailySlots.has(`acct_dev_alice:2026-10-02`));
+  assert.ok(store.proactiveDailySlots.has(`acct_dev_alice:${event.scheduled_at.slice(0, 10)}`));
 
   // 同日第二个任务（另一事件）到期 → 每日一条 → EXPIRED 不补发
   const { grantFollowup } = require('../src/domain/followup-service');
@@ -136,23 +140,23 @@ test('A2 HTTP：Worker 到期投递进聊天流（provider=proactive-followup+�
     store, account: store.account('acct_dev_alice'),
     candidate: {
       candidate_id: 'memc_f3', account_id: 'acct_dev_alice', character_id: server.character.character_id, state: 'CANDIDATE', version: 1, type: 'life_event',
-      normalized_value: { life_event: { title: '读书会', domain: 'REAL_LIFE', event_kind: 'READING', scheduled_at: '2026-10-02T08:00:00Z', timezone: 'Asia/Shanghai' } },
+      normalized_value: { life_event: { title: '读书会', domain: 'REAL_LIFE', event_kind: 'READING', scheduled_at: new Date(Date.parse(event.scheduled_at) + 90 * 60000).toISOString(), timezone: 'Asia/Shanghai' } },
       display_text: '', provider: 't', expires_at: '2099-01-01', source_message_id: 'msg_f3', conflicts_with: []
     }
   }).event;
   grantFollowup({
     store, account: store.account('acct_dev_alice'), event: second,
-    validated: { followup_kind: 'BEFORE_EVENT', due_at: '2026-10-02T08:00:00.000Z', allowed_from: '2026-10-01T00:00:00.000Z', expires_at: '2026-10-03T08:00:00.000Z' },
-    now: new Date('2026-10-01T00:00:00Z')
+    validated: { followup_kind: 'BEFORE_EVENT', due_at: second.scheduled_at, allowed_from: new Date().toISOString(), expires_at: new Date(Date.parse(second.scheduled_at) + 86400000).toISOString() },
+    now: new Date()
   });
-  const throttled = await runNextFollowupJob({ store, composer: null, workerId: 'test-worker', now: new Date('2026-10-02T08:01:00.000Z') });
+  const throttled = await runNextFollowupJob({ store, composer: null, workerId: 'test-worker', now: new Date(Date.parse(second.scheduled_at) + 60000) });
   assert.equal(throttled.state, 'EXPIRED');
   assert.equal(throttled.reason, 'DAILY_LIMIT_REACHED');
 
   // 改期联动：PATCH 修订 → followup_invalidated 计数 + 旧许可撤销
   const revised = await (await fetch(`${base}/api/v1/life-events/${event.event_id}`, {
     method: 'PATCH', headers: { ...headers, 'idempotency-key': `r1-${Math.random()}` },
-    body: JSON.stringify({ expected_version: 1, scheduled_at: '2026-10-05T06:30:00Z' })
+    body: JSON.stringify({ expected_version: 1, scheduled_at: new Date(Date.parse(event.scheduled_at) + 3 * 86400000).toISOString() })
   })).json();
   assert.deepEqual(revised.followup_invalidated, { grants_revoked: 1, jobs_cancelled: 0 }); // 已 PUBLISHED 的不算在途
 

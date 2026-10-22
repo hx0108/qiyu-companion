@@ -1,5 +1,7 @@
 # 栖语 V1 开发进度差距分析
 
+> 历史差距分析，保留当时评测与决策，不是当前状态台账。文中旧原型/旧状态文件已于 2026-10-22 经确认清理，原始版本可从 Git 历史查阅；当前统一见 [CURRENT_PRODUCT_STATUS.md](CURRENT_PRODUCT_STATUS.md)。
+
 更新时间：2026-09-05（第五批：审查 GPT 第四批后补齐资产 Embedding 生命周期，测试 215/215，真库 42 个迁移全部实测）。本文对照 `栖语PRD_v1.3.md`（V1功能范围 3.1、验收 9.1–9.4）、`栖语技术设计文档_v1.md`（第 8 节 API 合同、第 6 节状态机）与 `designs/qiyu-v1-handoff`（42 屏原型），盘点 `apps/api`、`apps/web`、`infra/postgres`、`contracts/openapi.yaml` 的实际实现状态。验证方式：`node --test test/*.test.js` 实测；源码逐文件核对。
 
 ## 第五批开发记录（2026-09-05，审查 GPT 第四批后补齐，测试 215/215）

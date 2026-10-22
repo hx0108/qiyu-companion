@@ -253,7 +253,7 @@ async function main() {
     for (const accountId of notificationAccounts) {
       const scheduled = await store.withAccountTransaction(accountId, async (scoped) => {
         const account = [...scoped.accounts.values()][0];
-        return account ? scheduleAccountNotifications(scoped, account, new Date()).length : 0;
+        return account ? scheduleAccountNotifications(scoped, account, new Date(), { closedTrial: process.env.QIYU_TRIAL_AUTH === 'invite' }).length : 0;
       }).catch((error) => {
         console.error(`[worker] 账户 ${accountId} 通知调度失败：`, error.message);
         return 0;

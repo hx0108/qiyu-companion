@@ -62,7 +62,32 @@ function truncateForTts(text, maxLength = TTS_TEXT_MAX_LENGTH) {
   return value.slice(0, maxLength);
 }
 
+// 腾讯 MP3 分片可能落在帧中间；合并已下发字节后仅计完整 Layer III 帧。
+function mp3DurationSeconds(bytes) {
+  const rates = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+  const v1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+  const v2 = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+  let seconds = 0;
+  for (let offset = 0; offset + 4 <= bytes.length;) {
+    if (offset + 10 <= bytes.length && bytes.toString('ascii', offset, offset + 3) === 'ID3') {
+      const size = ((bytes[offset + 6] & 127) << 21) | ((bytes[offset + 7] & 127) << 14) | ((bytes[offset + 8] & 127) << 7) | (bytes[offset + 9] & 127);
+      offset += 10 + size + ((bytes[offset + 5] & 16) ? 10 : 0);
+      continue;
+    }
+    const version = (bytes[offset + 1] >> 3) & 3;
+    const rate = rates[version]?.[(bytes[offset + 2] >> 2) & 3];
+    const bitrate = (version === 3 ? v1 : v2)[bytes[offset + 2] >> 4] * 1000;
+    if (bytes[offset] !== 255 || (bytes[offset + 1] & 224) !== 224 || ((bytes[offset + 1] >> 1) & 3) !== 1 || !rate || !bitrate) { offset += 1; continue; }
+    const size = Math.floor((version === 3 ? 144 : 72) * bitrate / rate) + ((bytes[offset + 2] >> 1) & 1);
+    if (offset + size > bytes.length) break;
+    seconds += (version === 3 ? 1152 : 576) / rate;
+    offset += size;
+  }
+  return seconds;
+}
+
 module.exports = {
+  mp3DurationSeconds,
   SUPPORTED_EMOTION_CATEGORIES,
   MOOD_TO_EMOTION,
   EMOTION_SPEED_HINT,

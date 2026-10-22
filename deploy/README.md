@@ -1,9 +1,19 @@
 # 栖语封测环境部署（阿里云）
 
+更新：2026-10-22。[当前状态](../development/CURRENT_PRODUCT_STATUS.md) · [运维](../development/OPERATIONS_RUNBOOK.md)。当前线上入口为 [HTTPS 邀请封测](https://qiyu.qualisense.top/)，前端 v32；数据库目标迁移 001–069。下面命令是运维示例，不代表本轮执行了发布、备份或恢复。本轮仅更新文档、截图并同步 GitHub，不重启线上服务。
+
+## 当前升级要求
+
+- 先核对 Git commit/本地差异、运行镜像、主机资源和同机其他服务，保留旧镜像与私有源码/数据库备份，再应用追加迁移、构建并更新 API/Worker。
+- 069 为人格恢复持久化，前端不能代替该迁移；先检查迁移账本，再验证恢复后新进程读取、幂等与并发，不改历史快照。
+- 邀请模式开放全部已实现能力，无需 7 天体验或媒体额度领取；邀请码有效期/撤销、每日文字限制、安全审核与技术限流仍存在。
+- 外部访问走 HTTPS 反向代理；实时语音需 WebSocket Upgrade、合适的 SSE/代理超时和关闭响应缓冲。不要将数据库或 `/internal/*` 直接暴露到公网。
+- 分别检查健康、匿名鉴权、公开能力、静态依赖/缓存键与受控账号业务链路；真实媒体探针另获授权并限制预算。回滚优先恢复旧兼容应用，不自动覆盖发布后的数据库内容。
+- 会话实际持久化于 localStorage：安全上下文 AES-GCM + IndexedDB，非安全上下文 Base64 兼容不是加密，不能推荐公开 HTTP 作为正式入口。
+
 三运行容器编排：API + 独立 Worker + PostgreSQL(pgvector)，另含一次性 `migrate`
 服务。它会在 API/Worker 启动前补齐未执行的 SQL 迁移；已执行的迁移仅按文件名跳过。
-已在本地 Docker 验证 compose 语法、全新卷自动应用全部 56 个迁移、已有卷的迁移账本
-可被安全读取，以及容器命名与同机其他项目共存。
+历史已验证 compose 语法、全新卷迁移和已有账本读取；当前迁移共 69 项，应以目标环境账本核对，不沿用旧报告的 54/56 数量。本次本机 Docker daemon 未运行，未重新运行容器级验证。
 
 ## ⚠️ 诚实边界（先读）
 
@@ -59,10 +69,10 @@ cd deploy && docker compose up -d --build
 # 4) 验证
 docker compose ps                                  # postgres/api healthy、worker running、migrate Exited (0)
 curl http://127.0.0.1:3000/health                  # {"status":"ok",...}
-docker exec qiyu-beta-postgres psql -U postgres -d qiyu -Atc "SELECT count(*) FROM schema_migrations;"  # 54
+docker exec qiyu-beta-postgres psql -U postgres -d qiyu -Atc "SELECT count(*) FROM schema_migrations;"  # 源码目标 69，逐项核对文件名
 docker compose logs -f api worker                  # 观察日志（Ctrl+C 退出）
 
-# 5) 对外：阿里云安全组放行 API_PORT（建议仅白名单 IP），浏览器访问 http://<服务器IP>:3000/
+# 5) 对外：HTTPS 反向代理与受限访问，不直接公开数据库、internal 或开发端口
 ```
 
 **国内镜像加速**（构建拉 node:22-alpine 慢/超时时）：编辑 `/etc/docker/daemon.json`
@@ -82,7 +92,7 @@ docker compose restart api worker              # 重启应用
 docker compose pull && docker compose up -d --build --force-recreate migrate
 docker compose up -d --build
 docker compose down                            # 停止（保留数据）
-docker compose down -v                         # 停止并清空数据库（不可逆！）
+# 不使用 down -v 更新版本；删除数据库卷需另有明确销毁授权和已验证备份
 # 数据库备份
 docker exec qiyu-beta-postgres pg_dump -U postgres qiyu | gzip > qiyu-$(date +%F).sql.gz
 ```
@@ -99,7 +109,7 @@ QWEN_API_KEY=你的密钥
 ```
 
 重建后，用 API 容器生成一个单人邀请码。命令会先打印数据库连接进度；成功后以
-`INVITE_CODE=...`、`INITIAL_SECRET=...` 的 ASCII 形式**只显示一次**凭据（不要粘贴进工单、
+`INVITE_CODE=...`、`EXPIRES_IN_DAYS=...` 的 ASCII 形式**只显示一次**邀请码（不再输出初始口令；不要粘贴进工单、
 聊天记录或 Git）：
 
 ```bash
@@ -108,7 +118,7 @@ docker compose exec -T api node scripts/create-trial-invite.js --label "alpha-00
 ```
 
 将“邀请码”通过单独、可信渠道发送给该试用者（2026-09-11 起凭邀请码即可登录，无初始口令）。浏览器会在首屏显示邀请码登录、
-AI 告知和年龄声明；会话令牌仅保留在浏览器会话中。试用者可在数据中心提交结构化反馈，
+AI 告知和年龄声明；会话令牌按上述 HTTPS 加密本机存储与刷新机制保留。试用者可在数据中心提交结构化反馈，
 也可针对具体助手回复提交 OOC/记忆/安全反馈。
 
 若邀请码遗失，无法找回：数据库只保存其哈希。先只读列出邀请元数据（不输出邀请码、
@@ -222,5 +232,4 @@ journalctl -u qiyu-api -f                      # 日志
 
 ## 六、升级路径（真实用户接入前的硬门槛）
 
-短信鉴权接入 → 用户注册/登录 → ICP 备案 + 生成式 AI/算法备案 → 年龄第三方断言 →
-支付商户 → 届时移除启动门禁中的本地合成限制并启用 production 模式。
+公开运营前逐项确认适用法律义务、身份/年龄保障、供应商合同与删除、安全运营、数据恢复、容量及收费条件；具体适用性由正式法律意见确定，本手册不作新的法律结论。只有 production 组合与门禁真正接线并验收后才可启用，不能简单移除启动保护。

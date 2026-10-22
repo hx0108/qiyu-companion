@@ -71,6 +71,13 @@ services:
       QIYU_EVAL_PRICE_OUT_PER_1M: ${QIYU_EVAL_PRICE_OUT_PER_1M:-}
       # 封闭试用登录由 API 进程执行；Worker 不参与认证。
       QIYU_TRIAL_AUTH: ${QIYU_TRIAL_AUTH:-}
+      # 原生实时语音验证版：显式开关+邀请封测+审核+凭据同时具备才可接通。
+      QIYU_REALTIME_CALL_ENABLED: ${QIYU_REALTIME_CALL_ENABLED:-0}
+      VOLCENGINE_REALTIME_API_KEY: ${VOLCENGINE_REALTIME_API_KEY:-}
+      VOLCENGINE_REALTIME_APP_ID: ${VOLCENGINE_REALTIME_APP_ID:-}
+      VOLCENGINE_REALTIME_ACCESS_KEY: ${VOLCENGINE_REALTIME_ACCESS_KEY:-}
+      VOLCENGINE_REALTIME_MODEL: ${VOLCENGINE_REALTIME_MODEL:-}
+      VOLCENGINE_REALTIME_SPEAKER: ${VOLCENGINE_REALTIME_SPEAKER:-}
       QIYU_SMS_PROVIDER: ${QIYU_SMS_PROVIDER:-}
       QIYU_SMS_SDK_APP_ID: ${QIYU_SMS_SDK_APP_ID:-}
       QIYU_SMS_SIGN_NAME: ${QIYU_SMS_SIGN_NAME:-}
@@ -143,6 +150,7 @@ services:
         condition: service_completed_successfully
     command: ["node", "scripts/run-workers.js", "--interval-ms=5000"]
     environment:
+      QIYU_TRIAL_AUTH: ${QIYU_TRIAL_AUTH:-}
       QIYU_PERSISTENCE: postgres
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-qiyu}
       # Worker 的摘要任务需要模型；未配置时仅消费 Embedding 队列（确定性，无外呼）。

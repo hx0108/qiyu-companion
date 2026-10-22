@@ -1,5 +1,9 @@
 # 评测基线与 Bad Case 闭环（AI-02）
 
+更新入口（2026-10-22）：[当前状态](../CURRENT_PRODUCT_STATUS.md)、[本轮回归与 GitHub 同步](github-sync-2026-10-22.md)。下方命令定义仍保留，真实供应商探针需单独授权与预算；Mock/规则结果不是人工盲评、真实用户效果或线上质量证明。旧 42 状态原型属于历史 UI 验证，不代替当前杏桃页面。
+
+当前补充套件：人格恢复（内存/PG）、实时 PCM 授权与背压、消息流式点播、记忆质量与人格输出守卫；UI 使用 `verify-chat-menu-layout.js`、`verify-home-spacing.js`、`verify-chat-header-layout.js`、`verify-notification-layout.js`、`verify-proactive-layout.js`，截图使用 `capture-product-screenshots.js`。数据库跳过必须单列，浏览器模拟和真机反馈分开记录。
+
 固定事实源：`apps/api/eval/`。所有判定为确定性规则，报告落盘 `development/eval/`，退出码非 0 即有门禁未过。
 
 ## 评测套件

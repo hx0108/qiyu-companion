@@ -1,5 +1,7 @@
 # 栖语 PostgreSQL 基础设施
 
+更新：2026-10-22。[当前状态](../../development/CURRENT_PRODUCT_STATUS.md)。当前迁移 001–069；069 为人格历史恢复持久化、来源约束与历史状态兼容修复。不得用旧迁移数量判断已具备最新恢复能力。
+
 这是生产持久化的本地、合成数据基础：PostgreSQL 16 + pgvector、版本化/软删除实体、RLS 第二道租户隔离，以及幂等、删除、Outbox 和追加式审计表。`age_decisions` 只保存最小判定、理由码、方法、交易引用、策略版本与时间边界；禁止保存证件图、人脸模板、生物样本、出生日期或供应商原始载荷。它不连接模型、年龄核验、支付或媒体供应商，也不包含任何真实密钥。
 
 ## 本地启动
@@ -12,7 +14,7 @@ docker compose up -d
 docker compose ps
 ```
 
-首次创建 Docker 卷时，`init/00-extensions-and-roles.sql` 会创建 `pgcrypto`、`pgvector`、`app.uuid_v7()` 和非 owner 应用角色 `qiyu_app`；`init/01-run-migrations.sh` 随后按文件名顺序运行 `migrations/001_core_schema.sql` 与 `migrations/002_row_level_security.sql`。已有卷不会重新执行初始化脚本，新增迁移请运行：
+首次创建 Docker 卷时，`init/00-extensions-and-roles.sql` 会创建 `pgcrypto`、`pgvector`、`app.uuid_v7()` 和非 owner 应用角色 `qiyu_app`；`init/01-run-migrations.sh` 随后按文件名顺序运行全部 `migrations/*.sql`（当前 69 项），不是只运行 001/002。已有卷不会重新执行初始化脚本，新增迁移请运行：
 
 ```powershell
 .\scripts\migrate.ps1
@@ -42,6 +44,10 @@ SELECT set_config('app.character_id', $2, true); -- 角色范围操作必填
 `relationship_assets` 的线上召回应固定使用账户、角色、`state='ACTIVE'`、`deleted_at IS NULL` 和有效时间过滤；候选记忆不会进入召回。`memory_candidates` 只有 `last_transition_actor='USER'` 时才可确认，确认资产只有 `activation_actor='USER'` 才可处于 `ACTIVE`。
 
 ## 运维边界
+
+- 数据库集成测试只允许隔离测试库；`pg-persona-self-restore.test.js` 等要求显式 `QIYU_PG_TEST_DATABASE_URL`，并校验本机 `*_test` 目标。不把线上用户库用于回归。
+- 人格恢复涉及角色行锁、乐观版本、持久化幂等、历史快照和来源，升级前先备份、补迁移并检查账本，再发布 API；不能只更新前端按钮。
+- 2026-10-22 本机 Docker daemon 未运行，普通测试中的 23 项 PG 检查跳过；历史隔离 PG 通过记录不能冒充本次重跑。
 
 - Docker named volume 是本机开发便利，不等同于生产备份、HA、密钥管理或区域部署。
 - 生产密码、TLS、备份/KMS、连接池、细粒度 worker 角色、监控和灾备策略必须由部署环境提供，禁止放入本目录。

@@ -36,6 +36,17 @@ function imageDeps(overrides = {}) {
   };
 }
 
+test('封闭试用免计量图片由 Worker 交付，不提交不存在的额度预留', async () => {
+  const store = new DevelopmentStore();
+  const account = store.account('acct_dev_alice');
+  const job = pendingJob(store, account.account_id, 'chr_1');
+  job.entitlement_id = null;
+  const deps = imageDeps({ imageEntitlementService: { commitImage() { assert.fail('免计量任务不应提交额度'); } } });
+  await advanceImageJob(store, account, job, deps);
+  assert.equal(job.state, 'COMPLETED');
+  assert.equal(store.mediaAssets.get(job.result_asset_id).state, 'AVAILABLE');
+});
+
 test('Worker 可独立把 PENDING 图片任务推进到 COMPLETED：落私有桶、过审核、扣权益', async () => {
   const store = new DevelopmentStore();
   const account = store.account('acct_dev_alice');

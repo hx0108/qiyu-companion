@@ -7,6 +7,7 @@ const { PostgresTrialInviteAuthRepository } = require('./postgres-trial-invite-a
 const { PostgresReviewerIdentityRepository } = require('./postgres-reviewer-identity-repository');
 const { MediaEntitlementService } = require('../domain/media-entitlement-service');
 const { usageDate, usageKey } = require('../domain/daily-chat-usage');
+const { evaluateAccess } = require('../domain/access-policy');
 
 const DEVELOPMENT_DATABASE_ACCOUNT_IDS = Object.freeze({
   acct_dev_alice: '00000000-0000-7000-8000-0000000000a1',
@@ -29,13 +30,48 @@ class PostgresStore {
   resolveTrialAccessToken(token) { return this.trialAuth.resolveAccessToken(token); }
   refreshTrialSession(input) { return this.trialAuth.refreshSession(input); }
 
-  async withAccountTransaction(accountId, operation, { lockDailyUsage = false } = {}) {
+  // PCM frames arrive every 100ms: check only revocation/authorization rows rather
+  // than materializing and flushing every account table or locking daily usage.
+  async checkRealtimeAccess({ accountId, conversationId, characterId, revocationEpoch, characterVersion }) {
+    const client = await this.pool.connect(); const repository = new PostgresRepository(client);
+    try {
+      await repository.beginAccountScope(accountId);
+      const result = await client.query(`SELECT a.account_id, a.account_status, a.age_status, a.revocation_epoch,
+        controls.user_pause_state, controls.safety_mode, controls.service_mode,
+        ch.version AS character_version, c.status AS conversation_status,
+        c.retention_expires_at > CURRENT_TIMESTAMP AS retention_valid,
+        (SELECT displayed_at FROM required_notices n WHERE n.account_id = a.account_id
+          AND n.deleted_at IS NULL ORDER BY n.due_at ASC LIMIT 1) AS notice_displayed_at
+        FROM accounts a JOIN account_interaction_controls controls USING (account_id)
+        JOIN conversations c ON c.account_id = a.account_id AND c.conversation_id = $2
+        JOIN characters ch ON ch.account_id = a.account_id AND ch.character_id = c.character_id AND ch.character_id = $3
+        WHERE a.account_id = $1 AND a.deleted_at IS NULL AND controls.deleted_at IS NULL
+          AND c.deleted_at IS NULL AND ch.deleted_at IS NULL AND ch.status = 'ACTIVE'`, [accountId, conversationId, characterId]);
+      const row = result.rows[0];
+      const error = (status, code, message) => Object.assign(new Error(message), { status, code });
+      if (!row) throw error(404, 'RESOURCE_NOT_FOUND', '实时通话来源已不可用');
+      const decision = evaluateAccess(row, 'VOICE_CALL', { noticeDisplayed: Boolean(row.notice_displayed_at) });
+      if (!decision.allowed) throw error(decision.status, decision.code, decision.message);
+      if (row.conversation_status !== 'ACTIVE' || !row.retention_valid) throw error(409, 'REALTIME_CONTEXT_CHANGED', '会话已暂停或过期');
+      if (Number(row.revocation_epoch) !== Number(revocationEpoch) || Number(row.character_version) !== Number(characterVersion)) throw error(409, 'REALTIME_CONTEXT_CHANGED', '角色或记忆已更新，请重新接通');
+      await repository.commit(); return true;
+    } catch (error) { try { await repository.rollback(); } catch {} throw error; }
+    finally { client.release(); }
+  }
+
+  async withAccountTransaction(accountId, operation, { lockDailyUsage = false, lockCharacterId = null } = {}) {
     const client = await this.pool.connect();
     const repository = new PostgresRepository(client);
     try {
       await repository.beginAccountScope(accountId);
       if (Object.values(DEVELOPMENT_DATABASE_ACCOUNT_IDS).includes(accountId)) {
         await repository.seedDevelopmentAccount(accountId, noticeIdFor(accountId));
+      }
+      if (lockCharacterId) {
+        // Serialize persona edits/restores before loading snapshots/idempotency.
+        // RLS remains active; text comparison makes malformed UUIDs a 404 rather
+        // than a PostgreSQL cast error. No provider call occurs while locked.
+        await client.query('SELECT character_id FROM characters WHERE account_id = $1 AND character_id::text = $2 AND deleted_at IS NULL FOR UPDATE', [accountId, lockCharacterId]);
       }
       const scopedStore = await PostgresRequestStore.load(client, accountId, { lockDailyUsage });
       // 媒体权益按请求作用域绑定：账本与订阅都在本请求加载的 store 内。
@@ -90,7 +126,7 @@ class PostgresRequestStore extends DevelopmentStore {
         FROM required_notices WHERE account_id = $1 AND deleted_at IS NULL ORDER BY due_at ASC LIMIT 1`, [accountId]],
       [`SELECT character_id, account_id, display_name, status, version, active_persona_version, persona_json
         FROM characters WHERE account_id = $1 AND deleted_at IS NULL`, [accountId]],
-      [`SELECT character_id, version, persona_json, changed_fields, note, state, parent_version, evaluation_json, canary_json, rollback_json, created_at, updated_at
+      [`SELECT character_id, version, persona_json, changed_fields, note, state, parent_version, evaluation_json, canary_json, rollback_json, restored_from_version, created_at, updated_at
         FROM persona_versions WHERE account_id = $1 ORDER BY version ASC`, [accountId]],
       [`SELECT world_state_id, account_id, character_id, mood_code, location_code, wardrobe_asset_id, active_event_refs,
         source, state_version, expires_at, reset_at, updated_at FROM character_world_states WHERE account_id = $1`, [accountId]],
@@ -247,7 +283,7 @@ class PostgresRequestStore extends DevelopmentStore {
     for (const row of characterRows) store.characters.set(row.character_id, { character_id: row.character_id, account_id: row.account_id, name: row.display_name, status: row.status, version: Number(row.version), active_persona_version: Number(row.active_persona_version ?? row.version), persona: parseJson(row.persona_json) ?? {}, persona_history: [] });
     for (const row of personaVersionRows) {
       const character = store.characters.get(row.character_id);
-      if (character) character.persona_history.push({ version: Number(row.version), persona: parseJson(row.persona_json) ?? {}, changed_fields: row.changed_fields ?? [], note: row.note ?? '', state: row.state || 'STABLE', parent_version: row.parent_version === null || row.parent_version === undefined ? null : Number(row.parent_version), evaluation: parseJson(row.evaluation_json), canary: parseJson(row.canary_json), rollback: parseJson(row.rollback_json), created_at: dateTimeValue(row.created_at), updated_at: dateTimeValue(row.updated_at ?? row.created_at) });
+      if (character) character.persona_history.push({ version: Number(row.version), persona: parseJson(row.persona_json) ?? {}, changed_fields: row.changed_fields ?? [], note: row.note ?? '', state: row.state || 'STABLE', parent_version: row.parent_version === null || row.parent_version === undefined ? null : Number(row.parent_version), evaluation: parseJson(row.evaluation_json), canary: parseJson(row.canary_json), rollback: parseJson(row.rollback_json), ...(row.restored_from_version == null ? {} : { restored_from_version: Number(row.restored_from_version) }), created_at: dateTimeValue(row.created_at), updated_at: dateTimeValue(row.updated_at ?? row.created_at) });
     }
     for (const character of store.characters.values()) character.persona_history.sort((a, b) => a.version - b.version);
     for (const row of worldStateRows) store.worldStates.set(row.character_id, { world_state_id: row.world_state_id, account_id: row.account_id, character_id: row.character_id, mood_code: row.mood_code, location_code: row.location_code, wardrobe_asset_id: row.wardrobe_asset_id, active_event_refs: parseJson(row.active_event_refs) ?? [], source: row.source, state_version: Number(row.state_version), expires_at: row.expires_at ? dateTimeValue(row.expires_at) : null, reset_at: dateTimeValue(row.reset_at), updated_at: dateTimeValue(row.updated_at) });
@@ -389,7 +425,7 @@ class PostgresRequestStore extends DevelopmentStore {
     assertAppendOnly(before.operationMetrics, this.operationMetrics);
     await syncRows(this.client, this.operationMetrics, before.operationMetrics, persistOperationMetric);
     const retentionDays = account.raw_interaction_retention_days === 90 ? 90 : 30;
-    await syncRows(this.client, this.characters, before.characters, persistCharacter);
+    await syncRows(this.client, this.characters, before.characters, (client, item, exists) => persistCharacter(client, item, exists, before.characters.get(item.character_id)));
     await syncRows(this.client, this.worldStates, before.worldStates, persistWorldState);
     await syncRows(this.client, this.userPreferences, before.userPreferences, persistUserPreferences);
     assertAppendOnly(before.worldStateEvents, this.worldStateEvents);
@@ -507,16 +543,25 @@ function assertAppendOnly(previous, current) {
     if (!entry || changed(oldEntry, entry)) throw new Error('Entitlement ledger entries are append-only');
   }
 }
-async function persistCharacter(client, item, exists) {
+async function persistCharacter(client, item, exists, previous) {
   const personaJson = JSON.stringify(item.persona ?? {});
-  const result = exists
-    ? await client.query('UPDATE characters SET display_name = $3, status = $4, persona_json = $5::jsonb, active_persona_version = $6 WHERE character_id = $1 AND account_id = $2', [item.character_id, item.account_id, item.name, item.status, personaJson, item.active_persona_version ?? item.version])
-    : await client.query("INSERT INTO characters (character_id, account_id, display_name, status, persona_json, active_persona_version) VALUES ($1, $2, $3, 'ACTIVE', $4::jsonb, $5)", [item.character_id, item.account_id, item.name, personaJson, item.active_persona_version ?? item.version]);
+  const coreChanged = !exists || ['name', 'status', 'persona', 'active_persona_version'].some(key => changed(previous?.[key], item[key]));
+  let result = { rowCount: 0 };
+  if (!exists) result = await client.query("INSERT INTO characters (character_id, account_id, display_name, status, persona_json, active_persona_version) VALUES ($1, $2, $3, 'ACTIVE', $4::jsonb, $5)", [item.character_id, item.account_id, item.name, personaJson, item.active_persona_version ?? item.version]);
+  else if (coreChanged) {
+    result = await client.query('UPDATE characters SET display_name = $3, status = $4, persona_json = $5::jsonb, active_persona_version = $6 WHERE character_id = $1 AND account_id = $2 AND version = $7', [item.character_id, item.account_id, item.name, item.status, personaJson, item.active_persona_version ?? item.version, previous.version]);
+    if (result.rowCount === 0) throw Object.assign(new Error('角色版本已变化，请刷新后重试'), { status: 409, code: 'VERSION_CONFLICT' });
+  }
   for (const entry of item.persona_history ?? []) {
-    await client.query(`INSERT INTO persona_versions (character_id, account_id, version, persona_json, changed_fields, note, state, parent_version, evaluation_json, canary_json, rollback_json, created_at, updated_at)
-      VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, COALESCE($12::timestamptz, CURRENT_TIMESTAMP), COALESCE($13::timestamptz, CURRENT_TIMESTAMP))
-      ON CONFLICT (character_id, version) DO NOTHING`,
-      [item.character_id, item.account_id, entry.version, JSON.stringify(entry.persona ?? {}), entry.changed_fields ?? [], entry.note ?? '', entry.state || 'STABLE', entry.parent_version ?? null, entry.evaluation ? JSON.stringify(entry.evaluation) : null, entry.canary ? JSON.stringify(entry.canary) : null, entry.rollback ? JSON.stringify(entry.rollback) : null, entry.created_at || null, entry.updated_at || null]);
+    await client.query(`INSERT INTO persona_versions (character_id, account_id, version, persona_json, changed_fields, note, state, parent_version, evaluation_json, canary_json, rollback_json, created_at, updated_at, restored_from_version)
+      VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, COALESCE($12::timestamptz, CURRENT_TIMESTAMP), COALESCE($13::timestamptz, CURRENT_TIMESTAMP), $14)
+      ON CONFLICT (character_id, version) DO UPDATE SET state = EXCLUDED.state,
+        evaluation_json = EXCLUDED.evaluation_json, canary_json = EXCLUDED.canary_json,
+        rollback_json = EXCLUDED.rollback_json, updated_at = EXCLUDED.updated_at
+      WHERE persona_versions.account_id = EXCLUDED.account_id
+        AND (persona_versions.state, persona_versions.evaluation_json, persona_versions.canary_json, persona_versions.rollback_json)
+          IS DISTINCT FROM (EXCLUDED.state, EXCLUDED.evaluation_json, EXCLUDED.canary_json, EXCLUDED.rollback_json)`,
+      [item.character_id, item.account_id, entry.version, JSON.stringify(entry.persona ?? {}), entry.changed_fields ?? [], entry.note ?? '', entry.state || 'STABLE', entry.parent_version ?? null, entry.evaluation ? JSON.stringify(entry.evaluation) : null, entry.canary ? JSON.stringify(entry.canary) : null, entry.rollback ? JSON.stringify(entry.rollback) : null, entry.created_at || null, entry.updated_at || null, entry.restored_from_version ?? null]);
   }
   return result;
 }
@@ -671,7 +716,10 @@ async function persistEntitlementLedger(client, item, exists) {
 }
 async function persistSubscription(client, item, exists) {
   const values = [item.subscription_id, item.account_id, item.sku, item.channel, item.state, Boolean(item.auto_renew), item.disclosure_version, item.period_start || null, item.period_end || null, item.grace_period_end || null, item.refund_status, item.transaction_ref_hash || null, item.created_at || null, item.updated_at || null];
-  if (exists) return client.query('UPDATE subscriptions SET state = $5, auto_renew = $6, period_start = $8, period_end = $9, grace_period_end = $10, refund_status = $11, transaction_ref_hash = $12, updated_at = COALESCE($14::timestamptz, CURRENT_TIMESTAMP) WHERE subscription_id = $1 AND account_id = $2', values);
+  // Updates bind only the mutable fields. Reusing INSERT's sparse parameter
+  // list leaves unused parameters untyped and PostgreSQL rejects it (42P18).
+  if (exists) return client.query('UPDATE subscriptions SET state = $3, auto_renew = $4, period_start = $5::timestamptz, period_end = $6::timestamptz, grace_period_end = $7::timestamptz, refund_status = $8, transaction_ref_hash = $9, updated_at = COALESCE($10::timestamptz, CURRENT_TIMESTAMP) WHERE subscription_id = $1 AND account_id = $2',
+    [item.subscription_id, item.account_id, item.state, Boolean(item.auto_renew), item.period_start || null, item.period_end || null, item.grace_period_end || null, item.refund_status, item.transaction_ref_hash || null, item.updated_at || null]);
   return client.query('INSERT INTO subscriptions (subscription_id, account_id, sku, channel, state, auto_renew, disclosure_version, period_start, period_end, grace_period_end, refund_status, transaction_ref_hash, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9::timestamptz, $10::timestamptz, $11, $12, COALESCE($13::timestamptz, CURRENT_TIMESTAMP), COALESCE($14::timestamptz, CURRENT_TIMESTAMP))', values);
 }
 async function persistSubscriptionOrder(client, item, exists) {

@@ -2,10 +2,11 @@
 
 const DAY_MS = 86_400_000;
 
-function scheduleAccountNotifications(store, account, now = new Date()) {
+function scheduleAccountNotifications(store, account, now = new Date(), { closedTrial = false } = {}) {
   const created = [];
   for (const subscription of store.subscriptions?.values() ?? []) {
     if (subscription.account_id !== account.account_id) continue;
+    if (closedTrial && subscription.channel === 'DEVELOPMENT_TRIAL') continue;
     const end = timestamp(subscription.period_end);
     if (subscription.channel === 'DEVELOPMENT_TRIAL' && subscription.state === 'TRIAL' && end && end > now && end - now <= DAY_MS) {
       created.push(recordOnce(store, account.account_id, {

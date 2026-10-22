@@ -1,78 +1,82 @@
-# 栖语项目目录
+# 栖语 · AI 陪伴
 
-本目录只保留当前产品事实源、外部验证材料、设计交付件和可复现工具。历史原型、旧截图、浏览器缓存与调试目录已清理。
+一段由用户掌控、可以查看、修正和延续的角色关系。
 
-## 产品截图
+栖语面向成年用户，围绕单角色陪伴，提供文字交流、语音陪伴、确认式关系记忆、人格版本与数据控制。界面采用已定版的「杏桃微光」：温暖、安静、克制，四个入口为「此刻、陪伴、回忆、我的」。
 
-来自本地开发壳（`apps/web`，内存合成数据、注入拟真角色回复）的真实渲染；截图脚本按 告知 → 年龄 → 建角色 → 对话 → 记忆确认 → 时间线 → 档案 → 数据中心 的完整用户旅程截取。
+[访问邀请封测](https://qiyu.qualisense.top/) · [当前状态](development/CURRENT_PRODUCT_STATUS.md) · [文档导航](docs/README.md) · [设计规范](DESIGN.md)
 
-| 对话 · 日间 | 对话 · 夜间 |
-|---|---|
-| ![对话·日间](docs/screenshots/04-chat-day.png) | ![对话·夜间](docs/screenshots/05-chat-night.png) |
+> 当前是邀请制封闭测试，不是正式公开运营。需要独立签发的邀请码；本仓库不提供可用凭据。不接真实支付或第三方增强年龄核验，不以工程测试代替法律意见、长期用户效果或全设备验收。
 
-对话页：AI 深色气泡带括号动作斜体，用户琥珀气泡；语音胶囊挂在气泡左上角，按世界状态情绪与逐条台词情绪判断投放 `EmotionCategory` 情感合成（腾讯实时语音合成接口）。
+## 产品界面
 
-| 准入：必要告知 | 准入：年龄声明 |
-|---|---|
-| ![必要告知](docs/screenshots/01-notices.png) | ![年龄声明](docs/screenshots/02-age.png) |
+2026-10-22 从当前 v32 真实前端重拍，使用本地一次性合成账号和确定性回复；不是原型截图或真实用户聊天。语音入口展示不代表本轮已调用语音供应商。来源和复现方法见[截图说明](docs/screenshots/README.md)。
 
-| 角色创建 | 关系时间线 |
-|---|---|
-| ![角色创建](docs/screenshots/03-character.png) | ![关系时间线](docs/screenshots/06-timeline.png) |
+| 此刻 | 陪伴 · 日间 | 陪伴 · 夜间 |
+| --- | --- | --- |
+| <img src="docs/screenshots/09-home.png" alt="此刻首页" width="250"> | <img src="docs/screenshots/04-chat-day.png" alt="日间陪伴" width="250"> | <img src="docs/screenshots/05-chat-night.png" alt="夜间陪伴" width="250"> |
 
-| 角色档案 | 数据中心 |
-|---|---|
-| ![角色档案](docs/screenshots/07-character-profile.png) | ![数据中心](docs/screenshots/08-data-center.png) |
+| 我的 | 角色档案 | 人格版本 |
+| --- | --- | --- |
+| <img src="docs/screenshots/10-profile.png" alt="我的陪伴空间" width="250"> | <img src="docs/screenshots/07-character-profile.png" alt="四步角色档案" width="250"> | <img src="docs/screenshots/11-persona-versions.png" alt="人格变化与反馈" width="250"> |
 
-## 产品与技术事实源
+| 回忆 | 语音通话（本地 Mock） | 站内通知 |
+| --- | --- | --- |
+| <img src="docs/screenshots/06-timeline.png" alt="回忆空状态" width="250"> | <img src="docs/screenshots/15-voice-call.png" alt="实际通话组件的本机合成演示" width="250"> | <img src="docs/screenshots/13-notifications.png" alt="站内通知" width="250"> |
 
-- `development/CURRENT_PRODUCT_STATUS_2026-09-17.md`：当前代码、实跑验证、在线健康检查、外部阻断与下一优先级的唯一状态入口；历史状态台账不得替代它。
-- `栖语PRD_v1.3.md`：当前产品需求、范围、指标与验收口径。
-- `栖语技术设计文档_v1.md`：架构、接口、状态机、安全与数据设计。
-- `栖语可行性分析_v1.md`：产品与技术可行性分析。
-- `栖语订阅定价分析.ipynb`：订阅定价测算结果。
-- `build_pricing_notebook.py`：定价 Notebook 的可复现生成脚本。
+| 陪伴选项 | 主动消息与静默时间 | 数据与隐私 |
+| --- | --- | --- |
+| <img src="docs/screenshots/12-chat-menu.png" alt="修复后的三点菜单" width="250"> | <img src="docs/screenshots/14-proactive.png" alt="主动消息设置" width="250"> | <img src="docs/screenshots/08-data-center.png" alt="账户与数据" width="250"> |
 
-## 外部验证
+## 当前能力
 
-- `外部验证包/`：法律意见、供应商询价、真实用户验证模板与状态台账。
+- 角色与人格：单选模板、角色形象、四步档案、偏好、变化记录、反馈；历史回退从服务端快照创建新生效版本，保留历史与乐观锁。
+- 陪伴：文字/SSE、语音转写回填、消息朗读、受控实时语音、情境图片链路；可用性由服务端配置和账户权限决定。
+- 关系连续性：候选记忆由用户确认后才生效；可查看来源、纠正、撤销；生活事件、许可内跟进、共同计划和成果卡片受确定性权限控制。
+- 用户控制：站内通知、静默时间、暂停、数据导出、保留周期、删除与注销；数据权利不依附订阅权益。
 
-## 设计与交付
+默认本地运行使用内存与 Mock。显式配置可接 PostgreSQL、Qwen、腾讯云媒体/审核与火山实时语音适配器；有代码不等于供应商、效果、运营或合规门禁已经通过。详细范围见[当前状态](development/CURRENT_PRODUCT_STATUS.md)。
 
-- `designs/qiyu-v1-prototype/栖语_V1_高保真原型_v1.2.html`：当前可点击原型源文件。
-- `designs/qiyu-v1-handoff/prototype/栖语_V1_高保真原型_v1.2_交付版.html`：面向评审的可点击交付版。
-- `designs/qiyu-v1-handoff/static/栖语_V1.2_Figma导入_42Frames_393x852.html`：手工导入 Figma 的42状态静态HTML。
-- `designs/qiyu-v1-handoff/static/栖语_V1.2_全页面静态展开版.html`：UI总览与分组评审版。
-- `designs/qiyu-v1-handoff/specs/`：组件规范、移动端边界、状态—接口—埋点映射和联合验收清单。
-- `designs/qiyu-v1-handoff/tokens/`：UI与开发共享的设计变量。
-- `designs/qiyu-visual-directions/`：已评审的三套视觉方向及原始设计材料。
+## 本地运行
 
-## 可复现工具
-
-- `designs/qiyu-v1-handoff/scripts/`：V1.2交互版、静态版构建和结构验证脚本。
-- `skills/figma-ui-dev-handoff/`：本项目沉淀的Figma静态HTML与UI/开发交付 Skill。
-
-## M1 本地开发切片
-
-- `development/M1_IMPLEMENTATION_BASELINE.md`：M1本地、合成数据基线；不构成外部封测或公开上线批准。当前能力状态以 `development/CURRENT_PRODUCT_STATUS_2026-09-17.md` 为准。
-- `contracts/openapi.yaml`：供本地前端接入的 M1 API 合同。
-- `apps/api/`：Node 22 原生 HTTP API 与 `node:test`。默认使用内存合成数据，也可显式接入本地 Docker PostgreSQL；默认回复为确定性 `provider=mock`，并可在本地开发中显式接入 Qwen3.8-Flash 与腾讯云文本审核、TTS、ASR、COS/IMS、混元图片适配器。上述均是本地受控开发接线，不构成真实支付、第三方增强年龄核验或已批准的生产服务。
-- `infra/postgres/`：本地 PostgreSQL 16 + pgvector、迁移、RLS 与 M1 开发持久化验证工具；它是生产持久化的工程基础，不是已批准的生产部署。
-- `development/eval/EVAL_BASELINE.md`：可重复评测体系（记忆召回/人格回归/模型级拒答/时延成本/浏览器全链路 E2E）与 Bad Case 闭环的固定入口；报告落盘 `development/eval/`。
-- `deploy/monitoring/` 与 `development/OPERATIONS_RUNBOOK.md`：Prometheus 指标导出（`/internal/metrics`）、告警规则与处置流程。
-
-启动和测试：
+需要 Node.js 22+；首次安装依赖：
 
 ```powershell
-cd C:\Users\ASUS\Desktop\AI社交\apps\api
-node src\server.js
-node --test test\*.test.js
+cd apps/api
+npm ci
+npm start
 ```
 
-在浏览器打开 `http://127.0.0.1:3000/`：API 仅在 localhost 同源托管 M1 Web 壳和白名单静态资源，避免跨端口 CORS。完整端点、开发 Bearer token、幂等与删除状态见 `apps/api/README.md` 和 `contracts/openapi.yaml`。
+打开 `http://127.0.0.1:3000/`，按告知、年龄声明、角色创建进入产品。默认没有真实模型、语音外呼或支付。
 
-## 维护规则
+直接查看已创建合成角色的杏桃界面：
 
-- 新版本只保留当前源文件与当前交付件；旧版本进入版本控制或外部归档，不继续堆在工作目录。
-- `output/`、浏览器用户目录、缓存、临时截图和调试产物不作为项目资产。
-- 删除或改名交付文件时，同步更新 `designs/qiyu-v1-handoff/README.md`、构建脚本和 `_d_meta.json`。
+```powershell
+node apps/api/scripts/start-apricot-preview.js
+```
+
+打开 `http://127.0.0.1:4314/`。它需要进程持续运行；内存数据在退出后重置。`127.0.0.1` 只指访问设备本机，不是可对外分享的线上地址。
+
+## 开发、验证与部署
+
+```powershell
+cd apps/api
+npm test
+npm run test:e2e-browser
+node scripts/verify-chat-menu-layout.js
+node scripts/capture-product-screenshots.js
+```
+
+浏览器脚本使用隔离的 Microsoft Edge 和本地合成服务。PostgreSQL 回归需专属测试库；缺少环境会明确跳过，不算通过。截图默认输出到 Git 忽略的 `output/playwright/`；检查后加 `--publish` 更新仓库截图。
+
+| 入口 | 内容 |
+| --- | --- |
+| [PRD](栖语PRD_v1.3.md) / [技术设计](栖语技术设计文档_v1.md) | 产品目标、当前封测增量、公开 V1 门禁与系统约束 |
+| [API](apps/api/README.md) / [Web](apps/web/README.md) / [OpenAPI](contracts/openapi.yaml) | 运行、同源接口、真实状态边界 |
+| [数据库](infra/postgres/README.md) / [部署](deploy/README.md) / [运维](development/OPERATIONS_RUNBOOK.md) | 迁移、RLS、备份与回滚、故障排查 |
+| [评测](development/eval/EVAL_BASELINE.md) / [本轮验证](development/eval/github-sync-2026-10-22.md) | 命令、实跑结果、跳过项与未验证项 |
+| [设计规范](DESIGN.md) / [视觉 QA](design-qa.md) | 当前设计规则、页面归属与全状态检查 |
+
+## 贡献与发布边界
+
+不提交 `.env`、邀请码、会话令牌、供应商密钥、真实用户数据、数据库备份或原始调试输出。历史原型和按日期命名的报告保留其原始证据范围，不作为当前视觉或运行状态。正式生产启动保护仍保留，不能通过关闭审核或修改环境名来冒充验收完成。

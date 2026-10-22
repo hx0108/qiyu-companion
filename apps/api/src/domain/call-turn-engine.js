@@ -16,6 +16,7 @@
 
 const { assessSafety, responseForExistingSafetyMode } = require('./safety-policy');
 const { assessModelOutputAuthority } = require('./model-output-policy');
+const { guardPersonaReply, createPersonaStreamGuard, oocFallback } = require('./persona-output-guard');
 const { commitDailyChatUsage, estimateInputTokens, inputTokensFromProviderUsage, releaseDailyChatUsage, reserveDailyChatUsage } = require('./daily-chat-usage');
 const { resolveEmotion, sanitizeTtsText, truncateForTts } = require('./tts-delivery');
 const { moderateTextWithMetric, providerModelVersion, providerName, recordOperationMetric } = require('./operation-metrics');
@@ -77,7 +78,7 @@ async function executeCallTurn(deps, { store, account, call, turn, emit, signal 
   const ctx = {
     conversation: null, asrJob: null, asrReservedSeconds: 0, asrSeconds: 0,
     speech: null, emittedTexts: [], assistantMessageId: null, partialPersisted: false,
-    usageReservation: null, usageSettled: false
+    usageReservation: null, usageSettled: false, startedAt: Date.now(), timings: {}
   };
   const usageRelease = () => { if (ctx.usageReservation && !ctx.usageSettled) { ctx.usageSettled = true; try { releaseDailyChatUsage(store, ctx.usageReservation); } catch { /* 事务已回滚则忽略 */ } } };
   const usageCommit = (modelReply) => {
@@ -92,7 +93,10 @@ async function executeCallTurn(deps, { store, account, call, turn, emit, signal 
     await runCallTurn(deps, { store, account, call, turn, emit, signal }, ctx, { usageRelease, usageCommit });
   } catch (error) {
     const aborted = signal?.aborted || error?.code === 'TENCENT_TTS_STREAM_ABORTED';
-    usageRelease();
+    if (!aborted && ctx.emittedTexts.length > 0) {
+      usageCommit(null);
+      persistPartialReply(deps, store, account, call, turn, ctx);
+    } else usageRelease();
     await closeAsrJob(deps, store, ctx, aborted ? 'CALL_TURN_ABORTED' : (error?.code || 'ASR_TRANSCRIPTION_FAILED'));
     // 通话审计只计实际扣费口径：ASR job 未完成时预留已全额返还（closeAsrJob），
     // call_sessions 的 asr_seconds_used 不得再计入（否则审计虚高、与账本不符）。
@@ -114,6 +118,7 @@ async function executeCallTurn(deps, { store, account, call, turn, emit, signal 
     });
     emit('call.turn.failed', {
       turn_id: turn.turn_id, code: aborted ? 'CALL_TURN_ABORTED' : (error?.code || 'CALL_TURN_FAILED'),
+      assistant_message_id: turn.assistant_message_id,
       message: CALL_TURN_FAILURE_MESSAGES[error?.code] || error?.message || '本回合处理失败，请再试一次。'
     });
   }
@@ -169,6 +174,7 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   if (typeof asrResult?.text !== 'string' || !asrResult.text.trim()) {
     throw Object.assign(new Error(CALL_TURN_FAILURE_MESSAGES.ASR_TRANSCRIPTION_FAILED), { code: 'ASR_TRANSCRIPTION_FAILED' });
   }
+  ctx.timings.asr = Date.now() - asrStartedAt;
   asrJob.provider_request_id = asrResult.providerRequestId ?? null;
   asrJob.transcript_text = asrResult.text;
   // 通话没有“转写确认”步骤：识别即确认（说错靠下一轮自然纠正）。
@@ -206,7 +212,9 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   //    与非流式同口径：仅 Block 拦截（固定审核回复 200），Review 放行留痕。
   deps.authorize(account, 'SEND_MESSAGE', store);
   if (typeof deps.textModerator === 'function') {
+    const inputStartedAt = Date.now();
     const moderation = await moderateTextWithMetric(store, account, deps.textModerator, { text: asrResult.text, conversationId: call.conversation_id, direction: 'INPUT' });
+    ctx.timings.input_moderation = Date.now() - inputStartedAt;
     if (!moderation || !['PASS', 'REVIEW', 'BLOCK'].includes(moderation.decision)) {
       throw Object.assign(new Error('内容审核未返回有效决策'), { code: 'TEXT_MODERATION_RESPONSE_INVALID' });
     }
@@ -225,10 +233,12 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   }
   ctx.assistantMessageId = store.next('msg');
   transitionTurn(store, turn, 'THINKING', {}, now());
+  const contextStartedAt = Date.now();
   const contextPack = await deps.buildContextPack(store, account, conversation, asrResult.text, deps.embeddingProvider);
+  ctx.timings.context = Date.now() - contextStartedAt;
   transitionTurn(store, turn, 'SPEAKING', { assistant_message_id: ctx.assistantMessageId }, now());
   const moodRecord = store.worldStates.get(call.character_id);
-  ctx.speech = createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId: ctx.assistantMessageId, turnId: turn.turn_id, moodRecord });
+  ctx.speech = createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId: ctx.assistantMessageId, turnId: turn.turn_id, moodRecord, onFirstAudio: () => { ctx.timings.first_audio = Date.now() - ctx.startedAt; } });
   let textSequence = 0;
   const onFragment = async (fragment) => {
     const visibleFragment = deps.normalizeUnpromptedSelfIntro({ reply_text: fragment }, asrResult.text, contextPack.character?.name, true).reply_text;
@@ -238,8 +248,9 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
       const moderation = await moderateTextWithMetric(store, account, deps.textModerator, { text: visibleFragment, conversationId: call.conversation_id, direction: 'OUTPUT' });
       if (moderation?.policyVersion) ctx.speech.notePolicyVersion(moderation.policyVersion);
       // 与 live 同口径：仅 Block 拦截流式片段；Review 灰区放行。
-      if (!moderation || moderation.decision === 'BLOCK') return false;
+      if (!moderation || !['PASS', 'REVIEW'].includes(moderation.decision)) return false;
     }
+    if (ctx.timings.first_text === undefined) ctx.timings.first_text = Date.now() - ctx.startedAt;
     textSequence += 1;
     ctx.emittedTexts.push(visibleFragment);
     emit('call.turn.text', { turn_id: turn.turn_id, sequence: textSequence, text: visibleFragment });
@@ -248,25 +259,39 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
     return true;
   };
   let modelReply;
+  const personaStream = createPersonaStreamGuard(contextPack.character, onFragment, { userText: asrResult.text });
   try {
     modelReply = deps.normalizeUnpromptedSelfIntro(
-      await deps.streamingReplyGenerator.generateStream(asrResult.text, contextPack, onFragment, signal),
+      await deps.streamingReplyGenerator.generateStream(asrResult.text, contextPack, personaStream.push, signal),
       asrResult.text,
       contextPack.character?.name
     );
+    await personaStream.finish(modelReply.reply_text);
   } catch (error) {
     if (signal?.aborted || error?.code === 'QWEN_STREAM_INTERCEPTED') throw error;
-    // 流式协议/网络失败：同轮降级非流式请求（不重复落用户消息），逐句朗读。
-    if (typeof deps.replyGenerator === 'function') {
-      const fallbackReply = deps.normalizeUnpromptedSelfIntro(
-        await deps.replyGenerator(asrResult.text, contextPack),
-        asrResult.text,
-        contextPack.character?.name
-      );
-      if (assessModelOutputAuthority(fallbackReply.reply_text)) {
-        throw Object.assign(new Error('降级终稿未通过输出门禁'), { code: 'MODEL_CLAIMED_AUTHORITY' });
+    const personaViolation = error?.code === 'OOC_STREAM_REPAIR_REQUIRED';
+    // Already spoken prefixes cannot be retracted: do not regenerate the whole
+    // answer after partial playback. Identity violations get a safe continuation.
+    if (ctx.emittedTexts.length > 0) {
+      if (personaViolation) {
+        const fallback = oocFallback({}, error.oocCode);
+        if (await onFragment(fallback.reply_text) === false) throw Object.assign(new Error('兜底续句未通过输出审核'), { code: 'QWEN_STREAM_INTERCEPTED' });
+        modelReply = { ...fallback, reply_text: ctx.emittedTexts.join('') };
+      } else {
+        throw error;
       }
-      for (const sentence of splitSentences(fallbackReply.reply_text)) await onFragment(sentence);
+    } else if (personaViolation || typeof deps.replyGenerator === 'function') {
+      let fallbackReply = personaViolation ? { reply_text: '', ai_generated: true }
+        : deps.normalizeUnpromptedSelfIntro(await deps.replyGenerator(asrResult.text, contextPack), asrResult.text, contextPack.character?.name);
+      fallbackReply = await guardPersonaReply(fallbackReply, {
+        text: asrResult.text, contextPack, replyGenerator: deps.replyGenerator,
+        violationCode: personaViolation ? error.oocCode : null,
+        normalize: (reply) => deps.normalizeUnpromptedSelfIntro(reply, asrResult.text, contextPack.character?.name)
+      });
+      if (assessModelOutputAuthority(fallbackReply.reply_text)) throw Object.assign(new Error('降级终稿未通过输出门禁'), { code: 'MODEL_CLAIMED_AUTHORITY' });
+      for (const sentence of splitSentences(fallbackReply.reply_text)) {
+        if (await onFragment(sentence) === false) throw Object.assign(new Error('降级回复未通过审核'), { code: 'QWEN_STREAM_INTERCEPTED' });
+      }
       modelReply = fallbackReply;
     } else {
       throw error;
@@ -308,7 +333,8 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   settleTurnSafely(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: now() });
   emit('call.turn.completed', {
     turn_id: turn.turn_id, user_message_id: turn.user_message_id, assistant_message_id: assistantMessage.message_id,
-    tts_job_id: settled.job?.job_id ?? null, usage: usage ?? null, tts_degraded: Boolean(settled.job?.failure_code)
+    tts_job_id: settled.job?.job_id ?? null, usage: usage ?? null, tts_degraded: Boolean(settled.job?.failure_code),
+    timings_ms: { ...ctx.timings, total: Date.now() - ctx.startedAt }
   });
 }
 
@@ -365,7 +391,7 @@ async function closeAsrJob(deps, store, ctx, failureCode) {
 // 与 signal 检查向上传播，队列自身不抛）。speakSentence 只入队立即返回：第 N+1
 // 句的合成与第 N 句的播放/LLM 流水线重叠，消除句间空拍（卡顿根因）。
 // settle 幂等：会先等合成队列排空再落资产与结算。
-function createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId, turnId, moodRecord }) {
+function createSpeechChannel(deps, { store, account, call, emit, signal, assistantMessageId, turnId, moodRecord, onFirstAudio = null }) {
   if (typeof deps.ttsGenerator !== 'function') {
     return { notePolicyVersion() {}, speakSentence() {}, async settle() { return { job: null, committedSeconds: 0 }; } };
   }
@@ -415,6 +441,7 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
     const startedAt = Date.now();
     // 微批：供应商按小 WS 帧回调（每秒几十次），逐帧 emit 会在弱客户端上造成
     // 高频 SSE 事件压力。攒到 ≥2KB 或 120ms 合成一个音频段下发。
+    let sentenceAudioBytes = 0;
     let batch = [];
     let batchBytes = 0;
     let batchTimer = null;
@@ -428,6 +455,7 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
       // AIGC 标识（ID3v2.3）只写回合首段；后续段是裸 MP3 帧，拼接可播。
       const data = segmentCount === 1 ? tagWithAigcMetadata(payload) : payload;
       byteLength += data.length;
+      if (segmentCount === 1) onFirstAudio?.();
       emit('call.turn.audio', {
         turn_id: turnId, sequence: segmentCount, segment_index: segmentCount - 1,
         format: 'mp3', audio_base64: data.toString('base64'), last: false
@@ -438,6 +466,7 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
         text: ttsText, sessionId, gender: voiceGender,
         emotion: baseEmotion.category, intensity: baseEmotion.intensity, speed: baseEmotion.speed,
         onAudioSegment: (segment) => {
+          sentenceAudioBytes += segment.length;
           batch.push(segment);
           batchBytes += segment.length;
           if (batchBytes >= 2048) flushBatch();
@@ -445,8 +474,13 @@ function createSpeechChannel(deps, { store, account, call, emit, signal, assista
         },
         signal
       });
+      // Basic adapters return an aggregate only; publish it through the same
+      // audio channel so successful synthesis cannot leave the call silent.
+      if (sentenceAudioBytes === 0 && aggregate.asset?.bytes?.length) {
+        batch.push(aggregate.asset.bytes); batchBytes = aggregate.asset.bytes.length;
+      }
       flushBatch();
-      recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS', provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'COMPLETED' });
+      recordOperationMetric(store, { accountId: account.account_id, capability: 'TTS' , provider: providerName(deps.ttsGenerator, currentJob.provider), modelVersion: providerModelVersion(deps.ttsGenerator, voiceProfile.voice_version), inputTokens: 0, outputTokens: 0, latencyMs: Date.now() - startedAt, outcome: 'COMPLETED' });
       spokenTexts.push(ttsText);
       aggregateChunks.push(aggregate.asset.bytes);
       seconds += deps.estimateTtsSeconds(ttsText);
@@ -515,7 +549,8 @@ function synthesizeSpeech(deps, input) {
 function reserveMediaSeconds(service, { accountId, jobId, capability, wantedSeconds }, onReserved) {
   if (!service) return 0;
   const balance = service.entitlementBalances(accountId).find((item) => item.capability === capability);
-  const seconds = Math.min(wantedSeconds, balance?.available_quantity ?? 0);
+  const unlimited = ['UNLIMITED_DURING_TRIAL', 'CLOSED_TRIAL_FULL_ACCESS'].includes(balance?.quota_policy);
+  const seconds = unlimited ? wantedSeconds : Math.min(wantedSeconds, balance?.available_quantity ?? 0);
   if (seconds < 1) {
     throw Object.assign(new Error(CALL_TURN_FAILURE_MESSAGES.ENTITLEMENT_QUOTA_EXCEEDED), { code: 'ENTITLEMENT_QUOTA_EXCEEDED' });
   }

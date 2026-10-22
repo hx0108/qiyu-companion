@@ -154,15 +154,18 @@ export class AudioOutPipeline {
     this.prebuffering = false;
     this.stopped = false;
     this.decoding = false;
+    this.decodeChain = Promise.resolve();
+    this.generation = 0;
     this.gapCount = 0;
     this.gapMs = 0;
     this.decodeFailures = 0;
     this.onAudibleChange = onAudibleChange;
+    this.outputPaused = false;
   }
 
   ensureContext() {
     if (!this.context) this.context = new (globalThis.AudioContext || globalThis.webkitAudioContext)();
-    if (this.context.state === 'suspended') this.context.resume().catch(() => {});
+    if (this.context.state === 'suspended' && !this.outputPaused) this.context.resume().catch(() => {});
     return this.context;
   }
 
@@ -170,6 +173,7 @@ export class AudioOutPipeline {
   beginTurn() {
     this.stopped = false;
     this.prebuffering = true;
+    this.holdDuration = 0;
   }
 
   // 回合音频流结束（或 completed/failed 终局事件）：放行剩余预缓冲。
@@ -182,7 +186,14 @@ export class AudioOutPipeline {
   // 打断判定不应开启）。
   get audible() { return this.sources.length > 0; }
 
-  async enqueueMp3(bytes) {
+  enqueueMp3(bytes) {
+    const generation = this.generation;
+    this.decodeChain = this.decodeChain.catch(() => {}).then(() => this.decodeMp3(bytes, generation));
+    return this.decodeChain;
+  }
+
+  async decodeMp3(bytes, generation) {
+    if (generation !== this.generation) return;
     if (this.stopped) return;
     this.pendingBytes.push(bytes);
     if (this.pendingBytes.reduce((sum, item) => sum + item.length, 0) > 262_144) {
@@ -198,8 +209,10 @@ export class AudioOutPipeline {
         if (!batch) break;
         try {
           const buffer = await this.ensureContext().decodeAudioData(batch.slice().buffer);
+          if (generation !== this.generation || this.stopped) return;
           this.holdDuration += buffer.duration;
           this.pending.push(buffer);
+          if (this.holdDuration >= CALL_PREBUFFER_MS / 1000) this.prebuffering = false;
           if (!this.prebuffering || this.holdDuration >= CALL_PREBUFFER_MS / 1000) this.pump();
         } catch {
           this.decodeFailures += 1; // 整批完整帧仍失败：坏帧丢弃，通话继续
@@ -239,6 +252,7 @@ export class AudioOutPipeline {
   }
 
   stopAll() {
+    this.generation += 1;
     this.stopped = true;
     this.prebuffering = false;
     this.pending = [];
@@ -256,11 +270,37 @@ export class AudioOutPipeline {
 // → 线性降采样 16k → 能量/VAD 判定交给 onEnergy 回调（返回指令）。
 // 缓冲桶始终累积（封顶 12 秒预录，丢最旧）：免提模式下打断后的语音开头
 // 不会因回合尚未建立而丢失；uploading 开启后按 2 秒自封 WAV 顺序上传。
+// Native realtime PCM requires no MP3 decoder and schedules on one audio clock.
+// This player is independent of the default call client until the trial gate is enabled.
+export class RealtimePcmPlayer {
+  constructor(context) { this.context = context; this.sources = new Set(); this.nextStart = 0; this.closed = false; }
+  enqueue(bytes, sampleRate = 24000) {
+    if (this.closed) return;
+    if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length % 2 || sampleRate !== 24000) throw new Error('实时音频格式无效');
+    const buffer = this.context.createBuffer(1, bytes.length / 2, sampleRate);
+    const data = buffer.getChannelData(0);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    for (let index = 0; index < data.length; index += 1) data[index] = view.getInt16(index * 2, true) / 32768;
+    const source = this.context.createBufferSource(); source.buffer = buffer; source.connect(this.context.destination);
+    const when = Math.max(this.context.currentTime + 0.015, this.nextStart);
+    source.onended = () => this.sources.delete(source); this.sources.add(source); source.start(when);
+    this.nextStart = when + buffer.duration;
+    return when;
+  }
+  stop() {
+    this.closed = true;
+    for (const source of this.sources) { try { source.stop(); source.disconnect(); } catch { /* already ended */ } }
+    this.sources.clear(); this.nextStart = 0;
+  }
+}
+
 export class MicPipeline {
-  constructor({ context, onChunk, onEnergy }) {
+  constructor({ context, onChunk, onEnergy, chunkMs = CALL_CHUNK_MS, rawPcm = false }) {
     this.context = context;
     this.onChunk = onChunk;
     this.onEnergy = onEnergy;
+    this.chunkSamples = Math.max(320, Math.round(CALL_SAMPLE_RATE * chunkMs / 1000));
+    this.rawPcm = rawPcm;
     this.stream = null;
     this.source = null;
     this.processor = null;
@@ -305,12 +345,20 @@ export class MicPipeline {
       this.bucket.shift();
     }
     if (!this.uploading) return;
-    while (bucketLength >= CALL_CHUNK_SAMPLES) {
-      const [chunk, rest] = this.takeBucket(CALL_CHUNK_SAMPLES);
-      this.onChunk(encodePcm16Wav(chunk, CALL_SAMPLE_RATE));
+    while (bucketLength >= this.chunkSamples) {
+      const [chunk, rest] = this.takeBucket(this.chunkSamples);
+      this.emitChunk(chunk);
       this.bucket = rest;
       bucketLength -= chunk.length;
     }
+  }
+
+  emitChunk(chunk) {
+    if (!this.rawPcm) { this.onChunk(encodePcm16Wav(chunk, CALL_SAMPLE_RATE)); return; }
+    const bytes = new ArrayBuffer(chunk.length * 2);
+    const view = new DataView(bytes);
+    chunk.forEach((sample, index) => { const value = Math.max(-1, Math.min(1, sample)); view.setInt16(index * 2, Math.round(value * (value < 0 ? 32768 : 32767)), true); });
+    this.onChunk(bytes);
   }
 
   takeBucket(samplesWanted) {
@@ -336,7 +384,7 @@ export class MicPipeline {
     if (!this.bucket.length) return;
     const length = this.bucket.reduce((sum, item) => sum + item.length, 0);
     const [chunk] = this.takeBucket(length);
-    this.onChunk(encodePcm16Wav(chunk, CALL_SAMPLE_RATE));
+    this.emitChunk(chunk);
     this.bucket = [];
   }
 
@@ -375,6 +423,8 @@ export class CallSessionClient {
     this.finishingTurn = false;
     this.reconciling = false;
     this.micStartTime = null;
+    this.lastSpeechAt = null;
+    this.lastTurnTiming = null;
   }
 
   emit(payload) { this.onEvent(payload); }
@@ -396,7 +446,13 @@ export class CallSessionClient {
   async start() {
     this.setPhase('ringing');
     // AudioContext 必须在手势调用链内创建/恢复（iOS Safari 口径）。
-    this.audioOut = new AudioOutPipeline({ onAudibleChange: (audible) => this.emit({ type: 'audible', audible }) });
+    this.audioOut = new AudioOutPipeline({ onAudibleChange: (audible) => {
+      this.emit({ type: 'audible', audible });
+      if (audible && this.lastTurnTiming && this.lastTurnTiming.firstScheduledMs === null) {
+        this.lastTurnTiming.firstScheduledMs = Math.round(performance.now() - this.lastTurnTiming.speechEndedAt);
+        this.emitTurnTiming();
+      }
+    } });
     this.context = this.audioOut.ensureContext();
     const payload = await this.request(`/conversations/${encodeURIComponent(this.conversationId)}/calls`, { method: 'POST', body: JSON.stringify({}) });
     this.call = payload.call;
@@ -422,6 +478,7 @@ export class CallSessionClient {
   handleEnergy(rms, now) {
     if (this.muted || this.phase === 'ended') return;
     const audible = this.audioOut?.audible;
+    if (this.phase === 'recording' && rms >= CALL_VAD_SPEAK_THRESHOLD) this.lastSpeechAt = performance.now();
 
     // AI 播报中：持续高能量 = 打断（冷却期内忽略，防 AEC 残留循环）。
     if ((this.phase === 'responding' || this.phase === 'greeting') && audible) {
@@ -471,6 +528,8 @@ export class CallSessionClient {
       if (!this.turn) throw Object.assign(new Error('回合创建响应缺少 turn'), { code: 'CALL_TURN_RESPONSE_INVALID' });
       this.chunkIndex = 0;
       this.micStartTime = performance.now();
+      this.lastSpeechAt = this.micStartTime;
+      this.lastTurnTiming = null;
       this.speaking = false;
       this.setPhase('recording');
       this.emit({ type: 'turn', turn: this.turn });
@@ -499,6 +558,7 @@ export class CallSessionClient {
     this.finishingTurn = true;
     try {
       const turnId = this.turn.turn_id;
+      this.lastTurnTiming = { turnId, speechEndedAt: this.lastSpeechAt ?? performance.now(), finalizeStartedAt: performance.now(), firstAudioMs: null, firstScheduledMs: null, completedMs: null, serverTimingsMs: null };
       this.mic?.setUploading(false);
       this.mic?.flushRemainder();
       await this.uploadChain.catch(() => {});
@@ -569,14 +629,30 @@ export class CallSessionClient {
 
   handleTurnEvent(event, data, { greeting }) {
     if (event === 'call.turn.audio' && data.audio_base64) {
+      if (!greeting && this.lastTurnTiming && this.lastTurnTiming.firstAudioMs === null) {
+        this.lastTurnTiming.firstAudioMs = Math.round(performance.now() - this.lastTurnTiming.speechEndedAt);
+        this.emitTurnTiming();
+      }
       this.audioOut?.enqueueMp3(base64ToBytes(data.audio_base64)).catch(() => {});
     }
     if (event === 'call.turn.completed') {
-      this.emit({ type: 'turn-done', greeting, usage: data.usage ?? null });
+      if (!greeting && this.lastTurnTiming) {
+        this.lastTurnTiming.completedMs = Math.round(performance.now() - this.lastTurnTiming.speechEndedAt);
+        this.lastTurnTiming.serverTimingsMs = data.timings_ms ?? null;
+        this.emitTurnTiming();
+      }
+      this.emit({ type: 'turn-done', greeting, usage: data.usage ?? null, timings_ms: data.timings_ms ?? null });
       if (greeting) this.markReady();
     }
     if (event === 'call.turn.interrupted') this.emit({ type: 'interrupted' });
     if (event === 'call.turn.failed') this.emit({ type: 'turn-failed', code: data.code, message: data.message });
+  }
+
+  // 这是 source.start 排程耗时，不是扬声器声学测量；speechEndedAt 含 VAD 等待。
+  emitTurnTiming() {
+    const timing = { ...this.lastTurnTiming };
+    this.emit({ type: 'turn-timing', timing });
+    if (typeof window !== 'undefined') window.__qiyuCallTurnTiming = timing;
   }
 
   markReady() {

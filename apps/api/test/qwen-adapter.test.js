@@ -50,7 +50,7 @@ test('QwenAdapter exposes safe upstream failures and the factory keeps Qwen opt-
   const reply = await generator('用户输入');
   assert.equal(reply.provider, 'qwen');
   assert.equal(reply.reply_text, '真实模型回复');
-  assert.equal(reply.memory_candidate.normalized_value.text, '用户输入');
+  assert.equal(reply.memory_candidate, null, '普通输入不产生永久记忆候选');
 });
 
 test('QwenAdapter retries one transient upstream failure and does not retry non-retryable failures', async () => {
@@ -192,11 +192,11 @@ test('QwenAdapter 将已校验会话摘要作为不可信历史数据，并为�
       const request = JSON.parse(options.body);
       assert.match(request.messages.at(-1).content, /不超过 1200 个中文字符/);
       assert.match(request.messages.at(-1).content, /<conversation-data>/);
-      return { ok: true, json: async () => ({ id: 'summary_1', model: 'qwen3.8-flash', choices: [{ message: { content: '用户喜欢雨天。' } }], usage: { prompt_tokens: 9, completion_tokens: 5 } }) };
+      return { ok: true, json: async () => ({ id: 'summary_1', model: 'qwen3.8-flash', choices: [{ message: { content: '{"excerpts":[{"message_id":"msg_1","quote":"我喜欢雨天"}]}' } }], usage: { prompt_tokens: 9, completion_tokens: 5 } }) };
     }
   });
   const result = await generator({ previousSummary: null, messages: [{ message_id: 'msg_1', actor: 'USER', text: '我喜欢雨天' }] });
-  assert.deepEqual(result, { text: '用户喜欢雨天。', provider: 'qwen', modelVersion: 'qwen3.8-flash', promptVersion: 'conversation-summary.v1', usage: { prompt_tokens: 9, completion_tokens: 5 } });
+  assert.deepEqual(result, { text: '[msg_1/用户] 我喜欢雨天', provider: 'qwen', modelVersion: 'qwen3.8-flash', promptVersion: 'conversation-summary.v2', usage: { prompt_tokens: 9, completion_tokens: 5 } });
 });
 
 test('QwenAdapter 将人格和关系资产标为不可信数据，不能伪装成系统提示', async () => {
@@ -335,4 +335,22 @@ test('生活事件提取器：坏 JSON 抛错（交给 Worker 重试）、空文
   const empty = await broken({ text: '   ' });
   assert.deepEqual(empty.candidates, []);
   assert.equal(typeof lifeEventExtractionPrompt({ text: 'x' }), 'string');
+});
+
+
+test('stream emits a complete sentence at delta end, all sentences in one delta, and preserves split UTF-8', async () => {
+  const fragments = [];
+  const wire = (text) => Buffer.from(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`);
+  const first = wire('你好。再见！');
+  const second = wire('明天见。');
+  const split = second.indexOf(Buffer.from('明')) + 1;
+  const adapter = new QwenAdapter({ apiKey: 'test-key', fetchImpl: async () => ({ ok: true, body: (async function* () {
+    yield first;
+    assert.deepEqual(fragments, ['你好。', '再见！']);
+    yield second.subarray(0, split);
+    yield second.subarray(split);
+    assert.deepEqual(fragments, ['你好。', '再见！', '明天见。']);
+  })() }) });
+  const result = await adapter.generateStream({ text: '你好', context: {}, onFragment: async (text) => fragments.push(text) });
+  assert.equal(result.text, '你好。再见！明天见。');
 });

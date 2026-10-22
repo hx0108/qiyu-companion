@@ -61,7 +61,7 @@ async function persistGeneratedImage(store, account, job, status, imageModerator
       job.failure_code = moderation.decision === 'BLOCK' ? 'IMAGE_OUTPUT_BLOCKED' : 'IMAGE_OUTPUT_REVIEW_REQUIRED';
       return;
     }
-    if (imageEntitlementService) imageEntitlementService.commitImage({ accountId: account.account_id, jobId: job.job_id });
+    if (imageEntitlementService && job.entitlement_id) imageEntitlementService.commitImage({ accountId: account.account_id, jobId: job.job_id });
     asset.state = 'AVAILABLE';
     job.result_asset_id = asset.asset_id;
     job.state = 'COMPLETED';

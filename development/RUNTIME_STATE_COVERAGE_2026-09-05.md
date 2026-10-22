@@ -1,5 +1,7 @@
 # 栖语 V1.2 原型状态运行覆盖清单（2026-09-05）
 
+> 历史验收证据，以下“当前/本次”只指 2026-09-05。旧演示原型已清理，状态合同见 `docs/archive/v1.2-state-contracts.md`；新真实前端门禁见 [当前覆盖](../docs/qa-state-coverage.md)，本表不覆盖今天的 UI。
+
 > 事实源：`designs/qiyu-v1-handoff/static/screen-manifest.json`、当前 `apps/web/app.js`、API 契约和本次回归。`已实现`指当前开发环境有可重复进入的页面/条件状态；不等于生产验收、供应商验收或视觉像素一致。
 
 | 原型状态 | 当前运行覆盖 | 判定与边界 |

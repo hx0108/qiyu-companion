@@ -24,6 +24,9 @@ function safeDevFlags() {
 // QIYU_DEV_FLAGS="LIFE_EVENTS,MEMORY_REFERENCES"：逗号/中文逗号/空白分隔，未知名称忽略。
 // QIYU_DEV_FLAG_ACCOUNTS="acct_dev_alice acct_dev_bob"：非空时仅白名单账户生效；空=开关全局。
 function parseDevFlags(environment = process.env) {
+  if (environment?.QIYU_TRIAL_AUTH === 'invite') {
+    return { enabled: Object.fromEntries(DEV_FLAG_NAMES.map((name) => [name, true])), accounts: null };
+  }
   const enabled = {};
   for (const name of DEV_FLAG_NAMES) enabled[name] = false;
   const rawFlags = String((environment && environment.QIYU_DEV_FLAGS) || '').trim();

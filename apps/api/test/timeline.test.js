@@ -123,3 +123,37 @@ test('相似候选标记与确认资产的冲突，由用户决定有效版本�
   const unrelated = candidates.body.candidates.find((item) => item.display_text.includes('爬山'));
   assert.equal(unrelated.conflicts_with.length, 0);
 });
+
+test('同槽互斥住址标记冲突、确认不覆盖，修订后上下文只读当前事实', async (t) => {
+  const observed = [];
+  const base = await start(t, { replyGenerator: async (text, context) => { observed.push(context); return replyFor(text); } });
+  const { conversation } = await setup(base, 'fact');
+  const { asset: first } = await confirmFirstCandidate(base, 'fact1', conversation.conversation_id, '我住在北京');
+  const sent = await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'fact2-m', body: { content: { text: '我住在上海' } } });
+  const candidate = sent.body.memory_candidate;
+  assert.equal(candidate.conflicts_with[0].asset_id, first.asset_id);
+  await request(base, `/api/v1/memory-candidates/${candidate.candidate_id}/confirm`, { method: 'POST', key: 'fact2-confirm', body: { expected_version: candidate.version } });
+  await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'fact3', body: { content: { text: '住在哪' } } });
+  assert.equal(observed.at(-1).confirmed_assets.length, 0);
+  assert.equal(observed.at(-1).unresolved_fact_conflicts.length, 2);
+  const updated = await request(base, `/api/v1/relationship-assets/${first.asset_id}`, { method: 'PATCH', key: 'fact-fix', body: { expected_version: 1, display_text: '你提到：“我住在上海”' } });
+  assert.equal(updated.body.asset.state, 'SUPERSEDED');
+  await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: 'fact4', body: { content: { text: '住在哪' } } });
+  assert.ok(observed.at(-1).confirmed_assets.every((asset) => asset.display_text.includes('上海')));
+  assert.equal(observed.at(-1).unresolved_fact_conflicts.length, 0);
+});
+
+test('30条消息尚未触发摘要时，最早的偏好仍从桥接上下文可见，重复候选不刷屏', async (t) => {
+  const observed = [];
+  const base = await start(t, { replyGenerator: async (text, context) => { observed.push(context); return replyFor(text); } });
+  const { conversation } = await setup(base, 'bridge');
+  for (let index = 0; index < 15; index++) {
+    const text = index === 0 ? '我喜欢咖啡' : '继续聊';
+    await request(base, `/api/v1/conversations/${conversation.conversation_id}/messages`, { method: 'POST', key: `bridge-${index}`, body: { content: { text } } });
+  }
+  assert.equal(observed.at(-1).conversation_summary, null);
+  assert.ok(observed.at(-1).unsummarized_context.some((message) => message.text.includes('我喜欢咖啡')));
+  assert.equal(observed.at(-1).recent_context.length, 20);
+  const candidates = await request(base, '/api/v1/memory-candidates');
+  assert.equal(candidates.body.candidates.filter((item) => item.display_text.includes('继续聊')).length, 1);
+});

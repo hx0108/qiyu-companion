@@ -87,6 +87,9 @@ test('仅白名单开发壳资源由同源 API 服务托管，API 路由仍要�
   assert.match(script.text, /toggle-message-audio/);
   assert.match(script.text, /情境图额度不足/);
   assert.match(script.text, /额度与返还以服务端权益账本为准/);
+  assert.match(script.text, /权益与订阅/);
+  assert.match(script.text, /查看试用状态、语音权益和到期时间/);
+  assert.match(script.text, /实时语音通话 · 使用每日对话额度/);
 
   const favicon = await rawRequest(base, '/favicon.svg');
   assert.equal(favicon.status, 200);

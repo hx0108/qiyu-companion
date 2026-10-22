@@ -32,7 +32,9 @@ test('TOTP：启用 MFA 的账号无码/错码拒绝、正确动态码通过；�
   const store = new DevelopmentStore();
   const secret = identity.generateTotpSecret();
   identity.createReviewerAccount(store, { reviewer_id: 'rev_m', username: 'mfa-user', password: 'mfa-password-123', roles: ['REVIEWER'], mfa_required: true, mfa_secret: secret });
-  const now = Date.now();
+  // 固定在 TOTP 时间片第 5 秒：31 秒后恰好相差一步，不随真实时钟
+  // 落在第 29 秒而偶发跨越两步；生产验证窗口保持 ±1 步不变。
+  const now = Date.UTC(2026, 0, 1, 0, 0, 5);
   assert.throws(() => identity.loginReviewer(store, { username: 'mfa-user', password: 'mfa-password-123' }, { now }), (error) => error.code === 'REVIEWER_LOGIN_FAILED');
   assert.throws(() => identity.loginReviewer(store, { username: 'mfa-user', password: 'mfa-password-123', totp_code: '000000' }, { now }), (error) => error.code === 'REVIEWER_LOGIN_FAILED');
   const good = identity.totpAt(secret, Math.floor(now / 1000));

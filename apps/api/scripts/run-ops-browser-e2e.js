@@ -17,7 +17,7 @@ const reviewerIdentity = require('../src/domain/reviewer-identity');
 const MFA_SECRET = 'JBSWY3DPEHPK3PXP'; // 固定测试密钥（RFC 6238 向量常用值），仅 E2E 使用
 
 async function main() {
-  const { chromium } = require('playwright-core');
+  const { launchIsolatedBrowser } = require('./isolated-browser');
   const store = new DevelopmentStore();
   // MFA 测试账号（域层创建：scrypt + TOTP 密钥固定以便脚本算码）。
   reviewerIdentity.createReviewerAccount(store, { reviewer_id: 'rev_ops_e2e_mfa', username: 'dev-mfa', password: 'dev-mfa-local-only1', roles: ['REVIEWER'], mfa_required: true, mfa_secret: MFA_SECRET });
@@ -38,7 +38,7 @@ async function main() {
     env: { ...process.env, QIYU_OPS_PORT: String(opsPort), QIYU_OPS_API_BASE_URL: base },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
   });
-  const browser = await chromium.launch({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true });
+  const { browser, close: closeBrowser } = await launchIsolatedBrowser({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true });
   const page = await browser.newPage();
   const consoleErrors = [];
   const negativeResponses = [];
@@ -134,7 +134,7 @@ async function main() {
     console.error('E2E 失败于状态：', await page.locator('#status').textContent().catch(() => 'n/a'), '| 控制台错误：', JSON.stringify(consoleErrors));
     throw error;
   } finally {
-    await browser.close().catch(() => {});
+    await closeBrowser();
     ops.kill();
     await new Promise((resolve) => api.close(resolve));
   }
@@ -157,7 +157,7 @@ async function seedCanaryPersona(base, store) {
   const characterId = character.character.character_id;
   const internal = (pathName, body, key) => fetch(`${base}/internal${pathName}`, { method: 'POST', headers: { authorization: 'Bearer reviewer-dev-token', 'content-type': 'application/json', 'idempotency-key': key }, body: JSON.stringify(body) }).then((response) => response.json());
   // 草稿走用户接口（版本 2：与建站 persona 有一处字段差异即可）。
-  const created = await fetch(`${base}/api/v1/characters/${characterId}/persona-versions`, { method: 'POST', headers: { ...userHeaders, 'idempotency-key': 'seed-d' }, body: JSON.stringify({ expected_version: 1, note: 'E2E 草稿', persona: { worldview: '测试世界观改', age_setting: '27', relationship_to_user: '朋友', personality: '安静', expression_style: '短句', hard_boundaries: ['不复刻真人'], example_behaviors: [] } }) }).then((response) => response.json());
+  const created = await fetch(`${base}/api/v1/characters/${characterId}/persona-versions`, { method: 'POST', headers: { ...userHeaders, 'idempotency-key': 'seed-d' }, body: JSON.stringify({ expected_version: 1, release_mode: 'draft', note: 'E2E 草稿', persona: { worldview: '测试世界观改', age_setting: '27', relationship_to_user: '朋友', personality: '安静', expression_style: '短句', hard_boundaries: ['不复刻真人'], example_behaviors: [] } }) }).then((response) => response.json());
   if (!created.persona_version) throw new Error(`草稿创建失败：${JSON.stringify(created)}`);
   await internal(`/persona-versions/${characterId}/2/evaluate`, { suite_version: 'persona-regression-v1', critical_pass_rate: 1, overall_pass_rate: 0.9, report_ref: 'seed-eval' }, 'seed-e');
   await internal(`/persona-versions/${characterId}/2/shadow`, {}, 'seed-s');
@@ -169,4 +169,4 @@ async function seedCanaryPersona(base, store) {
 
 function freePort() { return new Promise((resolve, reject) => { const server = net.createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); }); }
 async function waitForHttp(url) { for (let i = 0; i < 40; i += 1) { try { const response = await fetch(url); if (response.ok) return; } catch {} await new Promise((resolve) => setTimeout(resolve, 100)); } throw new Error('ops server did not start'); }
-main().catch((error) => { console.error(error); process.exit(1); });
+main().then(() => process.exit(process.exitCode || 0)).catch((error) => { console.error(error); process.exit(1); });

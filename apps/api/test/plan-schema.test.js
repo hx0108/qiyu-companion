@@ -58,7 +58,7 @@ test('accept 请求：expected_version 必填；followup 子对象复用 A2 裁�
   assert.ok(noTz.errors.some((item) => item.field === 'followup.timezone'), '时区缺失透传 A2 拒绝');
   const past = validateAcceptRequest({ expected_version: 1, followup: { followup_kind: 'BEFORE_EVENT', due_at: '2020-01-01T00:00:00Z' } }, { event: EVENT });
   assert.equal(past.ok, false, '过时 due_at 不补发');
-  const defaulted = validateAcceptRequest({ expected_version: 1, followup: { followup_kind: 'BEFORE_EVENT' } }, { event: EVENT });
+  const defaulted = validateAcceptRequest({ expected_version: 1, followup: { followup_kind: 'BEFORE_EVENT' } }, { event: EVENT, now: new Date('2026-10-01T00:00:00Z') });
   assert.equal(defaulted.ok, true);
   assert.equal(defaulted.value.followup.due_at, '2026-10-10T02:00:00.000Z', '缺省派生=事件准点');
 });

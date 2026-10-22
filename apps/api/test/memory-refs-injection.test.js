@@ -45,6 +45,23 @@ async function extractAndConfirm(server) {
   return confirmed.event;
 }
 
+test('完成经历仍可被来源追溯：改写查询词缺少重叠时最近完成事件兜底，删除立即移除', async (t) => {
+  const server = await setup();
+  t.after(() => new Promise((resolve) => { server.app.closeAllConnections(); server.app.close(resolve); }));
+  const event = await extractAndConfirm(server);
+  server.store.lifeEvents.get(event.event_id).status = 'COMPLETED';
+  const send = async (key) => (await (await fetch(`${server.base}/api/v1/conversations/${server.conversation.conversation_id}/messages`, {
+    method: 'POST', headers: { ...server.headers, 'idempotency-key': key }, body: JSON.stringify({ content: { text: '上次找工作经历你还记得吗' } })
+  })).json());
+  const reply = await send('completed-recall');
+  const refs = await (await fetch(`${server.base}/api/v1/messages/${reply.assistant_message.message_id}/memory-references`, { headers: server.headers })).json();
+  assert.ok(refs.references.some((ref) => ref.kind === 'LIFE_EVENT' && ref.id === event.event_id && ref.available === true));
+  server.store.lifeEvents.get(event.event_id).deleted_at = new Date().toISOString();
+  const deletedReply = await send('completed-deleted');
+  const deletedRefs = await (await fetch(`${server.base}/api/v1/messages/${deletedReply.assistant_message.message_id}/memory-references`, { headers: server.headers })).json();
+  assert.ok(!deletedRefs.references.some((ref) => ref.kind === 'LIFE_EVENT'));
+});
+
 test('注入与快照：确认事件后发消息，助手消息带 LIFE_EVENT 引用且可用', async (t) => {
   const server = await setup();
   t.after(() => new Promise((resolve) => { server.app.closeAllConnections(); server.app.close(resolve); }));

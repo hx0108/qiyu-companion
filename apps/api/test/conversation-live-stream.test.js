@@ -250,3 +250,27 @@ test('流式期间准入状态变化：R2 安全模式在 SSE 消费时重新拦
   assert.ok(events.find((item) => item.event === 'safety.response'), 'SSE 消费时应重检安全模式');
   assert.ok(!events.find((item) => item.event === 'message.chunk'), '危机模式下不得下发任何角色片段');
 });
+
+
+test('SSE 身份跨片段漂移：不暴露错误身份，一次修复后安全终稿落库', async (t) => {
+  let repairs = 0;
+  const base = await start(t, {
+    streamingReplyGenerator: fakeStreamingGenerator(['我是栖语的', 'AI助手。']),
+    replyGenerator: async (text, context) => {
+      assert.equal(context.ooc_repair.code, 'OOC_GENERIC_ASSISTANT_IDENTITY');
+      repairs += 1;
+      return { reply_text: '我在呢，想听你说说。', provider: 'test', model_version: 'test', ai_generated: true };
+    }
+  });
+  const conversationId = await readyConversation(base, 'ooc');
+  const accepted = await request(base, `/api/v1/conversations/${conversationId}/messages`, {
+    method: 'POST', key: 'ooc-stream-1', body: { content: { text: '陪我聊聊' }, stream: true }
+  });
+  const events = await readSse(base, accepted.body.stream.stream_url);
+  assert.equal(repairs, 1);
+  assert.equal(events.some((e) => e.event === 'message.chunk' && /AI助手|我是栖语的/.test(e.data.text)), false);
+  assert.equal(events.some((e) => e.event === 'message.replaced' && e.data.reason === 'OOC_REPAIR'), true);
+  const completed = events.find((e) => e.event === 'message.completed');
+  const final = await request(base, `/api/v1/messages/${completed.data.message_id}`);
+  assert.equal(final.body.message.text, '我在呢，想听你说说。');
+});
