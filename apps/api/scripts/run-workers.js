@@ -21,6 +21,8 @@ const { createPersistenceFromEnvironment } = require('../src/persistence/composi
 const { createQwenConversationSummaryGenerator, createQwenEmbeddingProvider, createQwenFollowupComposer, createQwenLifeEventExtractor } = require('../src/providers/qwen-adapter');
 const { runNextConversationSummaryJob } = require('../src/domain/conversation-summary-worker');
 const { runNextLifeEventExtractionJob } = require('../src/domain/life-event-extraction-worker');
+const { runAutomaticMemoryBatch } = require('../src/domain/automatic-memory-v2');
+const { createQwenAutomaticMemoryExtractor } = require('../src/providers/qwen-adapter');
 const { PostgresFollowupRepository } = require('../src/persistence/postgres-followup-repository');
 const { deterministicEmbedding, DEVELOPMENT_EMBEDDING_MODEL_VERSION } = require('../src/domain/asset-embedding-worker');
 const { advanceImageJob } = require('../src/domain/image-job-advance');
@@ -70,6 +72,11 @@ async function main() {
   // 生活事件提取器（六项能力 A1）：未配置模型时跳过提取段（与摘要同语义，
   // 任务保留在队列等待模型可用或保留期清理取消）。
   const lifeEventExtractor = createQwenLifeEventExtractor(process.env) || null;
+  const automaticMemoryMode = process.env.QIYU_AUTOMATIC_MEMORY_V2;
+  const automaticMemoryExtractor = ['shadow', 'active'].includes(automaticMemoryMode) ? createQwenAutomaticMemoryExtractor() : null;
+  if (['shadow', 'active'].includes(automaticMemoryMode) && !automaticMemoryExtractor) {
+    throw new Error('自动记忆 V2 需要配置现有 Qwen 对话模型');
+  }
   // 语义向量（P1-4）：Qwen 配置时用供应商语义向量建索引；否则确定性开发嵌入。
   const embeddingProvider = createQwenEmbeddingProvider(process.env) || null;
   const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2 });
@@ -144,6 +151,25 @@ async function main() {
       swept += result.accounts.reduce((total, item) => total + item.expired_message_count, 0) + result.expired_asr_input_assets.length;
     });
     return swept;
+  }
+
+  async function automaticMemoryPass() {
+    const accounts = await discoverAccounts(`
+      SELECT account_id FROM (
+        SELECT DISTINCT ON (j.account_id) j.account_id, j.available_at
+        FROM automatic_memory_jobs j JOIN messages m USING (message_id)
+        WHERE j.state IN ('PENDING','PROCESSING')
+        ORDER BY j.account_id, m.created_at, j.message_id
+      ) head WHERE available_at <= NOW() ORDER BY available_at, account_id LIMIT 4`);
+    const outcomes = await Promise.all(accounts.map(async (accountId) => {
+      try {
+        return (await runAutomaticMemoryBatch({ store, accountId, extract: automaticMemoryExtractor, mode: automaticMemoryMode })).length > 0;
+      } catch (error) {
+        console.error('[worker] 自动记忆任务处理失败', error.code || error.name);
+        return false;
+      }
+    }));
+    return outcomes.some(Boolean);
   }
 
   async function tick() {
@@ -299,7 +325,20 @@ async function main() {
   console.log(`[worker] 独立 Worker 已启动（间隔 ${intervalMs}ms；摘要模型：${summaryGenerator ? 'qwen' : '未配置——跳过摘要队列'}；生活事件提取：${lifeEventExtractor ? `qwen（${lifeEventExtractor.promptVersion}）` : '未配置——跳过提取队列'}；资产向量：${embeddingProvider ? `qwen ${embeddingProvider.modelVersion}（${embeddingProvider.dimensions} 维）` : '确定性开发嵌入'}；图片推进：${imageDeps ? '启用' : '未配置——跳过'}；权利清理：${cleanupWorker ? '启用' : '未配置——跳过'}；跟进调度：${followupComposer ? `qwen（${followupComposer.promptVersion}）` : '模板回退（未配置模型）'}）。`);
   let running = true;
   process.on('SIGINT', () => { running = false; });
+  process.on('SIGTERM', () => { running = false; });
 
+  async function runAutomaticMemoryLoop() {
+    if (!automaticMemoryExtractor) return;
+    while (running) {
+      const worked = await automaticMemoryPass().catch((error) => {
+        console.error('[worker] 自动记忆队列发现失败', error.code || error.name);
+        return false;
+      });
+      if (once || !running) break;
+      await new Promise((resolve) => setTimeout(resolve, worked ? 25 : Math.min(intervalMs, 1000)));
+    }
+  }
+  const memoryLoop = runAutomaticMemoryLoop();
   while (running) {
     const pending = await tick().catch((error) => { console.error('[worker] 队列发现失败：', error.message); return 0; });
     if (once) break;
@@ -307,8 +346,8 @@ async function main() {
     if (pending === 0) continue;
   }
 
-  await pool.end();
-  if (cleanupPool) await cleanupPool.end();
+  await memoryLoop;
+  await Promise.all([pool.end(), store.pool.end(), ...(cleanupPool ? [cleanupPool.end()] : [])]);
   console.log('[worker] 已退出。');
 }
 

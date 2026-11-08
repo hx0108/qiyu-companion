@@ -1352,9 +1352,34 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '409': { $ref: '#/components/responses/Error' }
+  /api/v1/privacy/automatic-memory:
+    get:
+      summary: 查询当前账户自动记忆开关
+      description: 新账户默认开启，保留旧账户当前设置。返回 enabled 布尔值和 source（DEFAULT、USER 或 LEGACY）。
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '401': { $ref: '#/components/responses/Error' }
+    post:
+      summary: 开启或关闭当前账户自动记忆
+      description: 关闭立即阻止后台任务写入，不删除已保存记忆。启用 V2 时，新记忆可在回复完成后异步出现。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/JsonResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
   /api/v1/relationship-assets:
     get:
-      summary: 获取当前账户的 ACTIVE 关系资产
+      summary: 获取当前账户有效的自动记忆与用户确认关系资产
+      description: origin 为 AUTOMATIC 或 USER_CONFIRMED（旧内存数据可能省略，视为用户确认）；到期资产不返回。
       responses:
         '200': { $ref: '#/components/responses/JsonResponse' }
   /api/v1/memory-recall:
@@ -1365,7 +1390,7 @@ paths:
   /api/v1/timeline:
     get:
       summary: 查询关系时间线
-      description: 返回仍有效的确认资产（最新在前）；被修订替代（SUPERSEDED）与已删除版本不出现。纪念日/约定类事件随主动事件能力接入。
+      description: 返回仍有效的确认和自动资产（最新在前）；自动资产 entry_type 为 AUTOMATIC_ASSET。被修订替代、已删除和到期版本不出现。
       parameters:
         - name: filter
           in: query

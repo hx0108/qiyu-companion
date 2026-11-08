@@ -33,13 +33,13 @@ export function replyTextMarkup(text) {
   return escapeUi(result).replace(/\n/g, '<br>');
 }
 
-export function apricotNav(active) {
+export function apricotNav(active, pendingCount = 0) {
   const items = [['home','navHome','此刻','open-home'],['chat','navCompanion','陪伴','back-chat'],['assets','navMemory','回忆','open-assets'],['profile','navProfile','我的','open-profile']];
-  return `<nav class="bottom-nav apricot-nav" aria-label="主导航">${items.map(([key,icon,label,action]) => `<button type="button" class="nav-item ${key === active ? 'on' : ''}" data-action="${action}" aria-current="${key === active ? 'page' : 'false'}"><span class="nav-icon-shell">${APRICOT_ICONS[icon]}</span><span>${label}</span></button>`).join('')}</nav>`;
+  return `<nav class="bottom-nav apricot-nav" aria-label="主导航">${items.map(([key,icon,label,action]) => `<button type="button" class="nav-item ${key === active ? 'on' : ''}" data-action="${action}" aria-current="${key === active ? 'page' : 'false'}"${key === 'assets' && pendingCount > 0 ? ` aria-label="回忆，${pendingCount} 条待确认"` : ''}><span class="nav-icon-shell">${APRICOT_ICONS[icon]}${key === 'assets' && pendingCount > 0 ? `<span class="memory-count-badge" aria-hidden="true">${pendingCount > 99 ? '99+' : pendingCount}</span>` : ''}</span><span>${label}</span></button>`).join('')}</nav>`;
 }
 
-export function apricotFrame(content, active, night = false, className = '') {
-  return `<section class="screen qiyu-prototype apricot-screen ${night ? 'night' : 'paper'} ${className}" data-main-page="${active}">${content}${apricotNav(active)}</section>`;
+export function apricotFrame(content, active, night = false, className = '', pendingCount = 0) {
+  return `<section class="screen qiyu-prototype apricot-screen ${night ? 'night' : 'paper'} ${className}" data-main-page="${active}">${content}${apricotNav(active, pendingCount)}</section>`;
 }
 
 export function apricotHeader(title, actions = '', subtitle = '') {
@@ -49,16 +49,16 @@ export function apricotHeader(title, actions = '', subtitle = '') {
 export function apricotHome({ name, portrait, assets = [], candidates = [], canCall, night = false, icon = () => '', busy = false }) {
   const hour = new Date().getHours();
   const greeting = hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
-  const pending = candidates.find(c => ['CANDIDATE','PENDING'].includes(c.state));
+  const pendingCount = pendingMemoryCandidates(candidates).length;
   const tiles = [
     ['homeChat','聊聊今天','无论开心还是烦恼','back-chat'],
     ['homeVoice','语音陪伴','用声音，更靠近你','start-call'],
     ['homeMoment','分享瞬间','生活里的小美好','share-moment'],
     ['homeMemory','我们的回忆','那些特别的时光','open-assets']
   ];
-  const notice = pending ? `<button class="apricot-notice" data-action="open-candidate" data-candidate-id="${escapeUi(pending.candidate_id ?? pending.id)}"><span class="notice-icon">${icon('archive',26)}</span><span><b>这件小事，想替你记住</b><small>由你确认，才会留下。</small></span></button>` : `<div class="apricot-notice"><span class="notice-icon">${icon('archive',26)}</span><span><b>今天的小事，慢慢收藏</b><small>由你确认，才会留下。</small></span></div>`;
-  const memories = assets.slice(0, 3).map(a => `<div class="apricot-history">${escapeUi(a.display_text ?? a.normalized_value ?? '')}</div>`).join('') || '<p class="apricot-empty">还没有确认的回忆，先从今天聊起。</p>';
-  return apricotFrame(`<div class="apricot-scroll home-scroll"><header class="apricot-bar home-bar"><button class="avatar-picker-trigger" data-action="open-portrait-picker" aria-label="更换角色头像">${apricotAvatar(portrait, name)}</button><div class="grow"><b>${greeting}</b><small>${escapeUi(name)}在这里</small></div><button class="icon-btn soft" data-action="open-notifications" aria-label="查看消息">${icon('bell',26)}</button></header><div class="apricot-intro"><h1 id="app-title">今天，想和我分享些什么？</h1></div><div class="apricot-tiles">${tiles.map(([key,label,sub,action]) => `<button class="apricot-tile" data-action="${action}" ${busy ? 'disabled' : action === 'start-call' && !canCall ? 'disabled aria-label="语音陪伴暂不可用"' : ''}><span class="tile-icon">${APRICOT_ICONS[key]}</span><b>${label}</b><small>${sub}</small></button>`).join('')}</div><section class="apricot-lower"><button class="apricot-handle" data-action="focus-home-memories" aria-label="展开回忆区域">${icon('down',20)}</button>${notice}<div class="apricot-section"><h2>留在我们之间</h2><button data-action="open-assets">查看更多</button></div><button class="apricot-memory-photo" data-action="open-assets" aria-label="查看我们的回忆"></button>${memories}</section></div>`, 'home', night);
+  const notice = `<div class="apricot-notice"><span class="notice-icon">${icon('archive',26)}</span><span><b>今天的小事，慢慢收藏</b><small>回忆由你管理。</small></span></div>`;
+  const memories = assets.slice(0, 3).map(a => `<div class="apricot-history">${escapeUi(a.display_text ?? a.normalized_value ?? '')}</div>`).join('') || '<p class="apricot-empty">还没有回忆，先从今天聊起。</p>';
+  return apricotFrame(`<div class="apricot-scroll home-scroll"><header class="apricot-bar home-bar"><button class="avatar-picker-trigger" data-action="open-portrait-picker" aria-label="更换角色头像">${apricotAvatar(portrait, name)}</button><div class="grow"><b>${greeting}</b><small>${escapeUi(name)}在这里</small></div><button class="icon-btn soft" data-action="open-notifications" aria-label="查看消息">${icon('bell',26)}</button></header><div class="apricot-intro"><h1 id="app-title">今天，想和我分享些什么？</h1></div><div class="apricot-tiles">${tiles.map(([key,label,sub,action]) => `<button class="apricot-tile" data-action="${action}" ${busy ? 'disabled' : action === 'start-call' && !canCall ? 'disabled aria-label="语音陪伴暂不可用"' : ''}><span class="tile-icon">${APRICOT_ICONS[key]}</span><b>${label}</b><small>${sub}</small></button>`).join('')}</div><section class="apricot-lower"><button class="apricot-handle" data-action="focus-home-memories" aria-label="展开回忆区域">${icon('down',20)}</button>${notice}<div class="apricot-section"><h2>留在我们之间</h2><button data-action="open-assets">查看更多</button></div><button class="apricot-memory-photo" data-action="open-assets" aria-label="查看我们的回忆"></button>${memories}</section></div>`, 'home', night, '', pendingCount);
 }
 
 export function apricotBackButton(action = 'back-chat', label = '返回') {
@@ -103,18 +103,32 @@ export function apricotPersonaVersions({ character, feedback = [], busy = false,
   return `<section class="screen qiyu-prototype persona-versions ${night ? 'night' : 'paper'}"><header class="editor-header">${apricotBackButton()}<small>版本与反馈</small></header><h1 id="app-title">人格版本</h1>${!character.persona_restore_supported ? '<p class="persona-availability" role="status">当前服务尚未加载新版回退接口；为保留数据暂未重启。版本记录与反馈可正常使用。</p>' : ''}${confirm}<section aria-label="人格变化记录">${items || '<div class="empty-state">暂无版本记录。</div>'}</section><section class="persona-feedback"><h2>版本反馈</h2><form id="persona-version-feedback-form" class="stack"><div class="editor-two-columns"><label class="field"><span>反馈版本</span><select name="feedback_version">${history.map(entry=>`<option value="${entry.version}" ${Number(feedbackDraft.version ?? active) === entry.version ? 'selected' : ''}>v${entry.version}</option>`).join('')}</select></label><label class="field"><span>体验评分</span><select name="feedback_rating">${[5,4,3,2,1].map(rating=>`<option value="${rating}" ${Number(feedbackDraft.rating ?? 4) === rating ? 'selected' : ''}>${rating} 分</option>`).join('')}</select></label></div><label class="field"><span>希望保留或调整什么？</span><textarea name="feedback_note" rows="3" maxlength="1000" required>${escapeUi(feedbackDraft.note ?? '')}</textarea></label><button class="btn btn-primary" ${busy ? 'disabled' : ''}>${busy ? '提交中…' : '提交版本反馈'}</button></form>${related.map(item=>`<article class="persona-feedback-record"><b>${escapeUi(item.rating)} 分</b><p>${escapeUi(item.note)}</p><small>${escapeUi(new Date(item.created_at).toLocaleString())}</small></article>`).join('')}</section></section>`;
 }
 
-export function apricotProfile({ name, portrait, night = false, icon = () => '' }) {
+export function apricotProfile({ name, portrait, night = false, pendingCount = 0, icon = () => '' }) {
   const rows = [['user','角色档案','称呼、陪伴方式与边界','open-character-profile'],['clock','人格版本','查看变化、反馈或回退','open-persona-versions'],['bell','主动消息与静默时间','只在你允许时提醒','open-proactive'],['spark','试用与可用能力','以实际账户授权为准','open-subscription'],['archive','数据与隐私','导出、保留周期、删除和注销','open-data'],['shield','帮助与反馈','问题反馈、申诉与安全帮助','open-safety']];
-  return apricotFrame(`<div class="apricot-scroll profile-scroll">${apricotHeader('我的陪伴空间',`<button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题" aria-pressed="${night}">${icon(night ? 'sun' : 'moon',26)}</button>`)}<div class="apricot-profile-head"><button class="avatar-picker-trigger" data-action="open-portrait-picker" aria-label="更换角色头像">${apricotAvatar(portrait, name)}</button><h1>${escapeUi(name)}</h1></div>${rows.map(([key,title,sub,action])=>`<button class="apricot-setting" data-action="${action}"><span>${icon(key,24)}</span><span><b>${title}</b><small>${sub}</small></span></button>`).join('')}<button class="apricot-setting" data-action="open-plans"><span>${icon('calendar',24)}</span><span><b>陪伴计划</b><small>查看已确认的行动与进展</small></span></button></div>`, 'profile', night);
+  return apricotFrame(`<div class="apricot-scroll profile-scroll">${apricotHeader('我的陪伴空间',`<button class="icon-btn soft" data-action="toggle-theme" aria-label="切换日夜主题" aria-pressed="${night}">${icon(night ? 'sun' : 'moon',26)}</button>`)}<div class="apricot-profile-head"><button class="avatar-picker-trigger" data-action="open-portrait-picker" aria-label="更换角色头像">${apricotAvatar(portrait, name)}</button><h1>${escapeUi(name)}</h1></div>${rows.map(([key,title,sub,action])=>`<button class="apricot-setting" data-action="${action}"><span>${icon(key,24)}</span><span><b>${title}</b><small>${sub}</small></span></button>`).join('')}<button class="apricot-setting" data-action="open-plans"><span>${icon('calendar',24)}</span><span><b>陪伴计划</b><small>查看已确认的行动与进展</small></span></button></div>`, 'profile', night, '', pendingCount);
 }
 
 export function apricotChatMenu(icon = () => '') {
   return `<div class="sheet-layer apricot-chat-menu-layer"><section id="chat-menu-dialog" class="sheet apricot-chat-menu" role="dialog" aria-modal="true" aria-labelledby="chat-menu-title"><header><h2 id="chat-menu-title">陪伴选项</h2><button type="button" class="icon-btn apricot-menu-close" data-action="close-chat-menu" aria-label="关闭面板">${icon('x',22)}</button></header><div class="apricot-chat-menu-items"><button type="button" class="apricot-setting" data-action="open-character-profile">查看角色档案</button><button type="button" class="apricot-setting" data-action="latest-memory-refs">本轮参考的回忆</button><button type="button" class="apricot-setting" data-action="praise-latest-assistant-message">这句回应很好</button><button type="button" class="apricot-setting" data-action="report-latest-assistant-message">反馈本次回复</button><button type="button" class="apricot-setting" data-action="open-world-state">查看当前情境</button><button type="button" class="apricot-setting" data-action="open-proactive">主动关心与提醒</button></div></section></div>`;
 }
 
-export function apricotCandidate(candidate, busy = false, mark = '') {
-  if (!candidate) return '';
-  const id = escapeUi(candidate.candidate_id ?? candidate.id);
-  const text = escapeUi(candidate.display_text ?? candidate.normalized_value ?? '');
-  return `<section class="apricot-candidate" aria-label="待确认的记忆"><span class="candidate-mark">${mark}</span><b>要记住这个小习惯吗？</b><p>${text}</p><div class="candidate-actions"><button class="btn btn-primary" data-action="confirm-inline-candidate" data-candidate-id="${id}" ${busy ? 'disabled' : ''}>记住</button><button class="btn btn-line" data-action="reject-inline-candidate" data-candidate-id="${id}" ${busy ? 'disabled' : ''}>暂时不用</button></div></section>`;
+export function pendingMemoryCandidates(candidates) {
+  return candidates.filter(candidate => ['CANDIDATE', 'PENDING'].includes(candidate.state));
+}
+
+export function apricotMemoryReview(candidates, { expanded = false, editingId, draft = '', busy = false } = {}) {
+  if (!candidates.length) return '';
+  const disabled = busy ? ' disabled' : '';
+  const list = expanded ? candidates.map(candidate => {
+    const id = escapeUi(candidate.candidate_id ?? candidate.id);
+    const text = candidate.display_text ?? (typeof candidate.normalized_value === 'string' ? candidate.normalized_value : '候选内容暂不可用');
+    const label = ({ development_note: '近况', life_event: '生活事件', PREFERENCE: '偏好', SKILL: '行为模式' })[candidate.type];
+    const source = [label, candidate.source_message_id ? '来自对话' : ''].filter(Boolean).join(' · ');
+    const requiresReview = candidate.type === 'life_event' || candidate.conflicts_with?.length > 0;
+    const actions = editingId != null && String(editingId) === (candidate.candidate_id ?? candidate.id)?.toString()
+      ? `<label class="field"><span>编辑这条回忆</span><textarea id="candidate-edit"${disabled}>${escapeUi(draft)}</textarea></label><div class="memory-review-actions"><button class="btn btn-primary" data-action="confirm-edited-candidate"${disabled}>记住</button><button class="btn btn-line" data-action="cancel-memory-edit"${disabled}>取消</button></div>`
+      : `<div class="memory-review-actions"><button class="btn btn-primary" data-action="${requiresReview ? 'open-candidate' : 'confirm-inline-candidate'}" data-candidate-id="${id}"${disabled}>${requiresReview ? '查看并确认' : '记住'}</button>${requiresReview ? '' : `<button class="btn btn-line" data-action="edit-memory-review" data-candidate-id="${id}"${disabled}>修改后记住</button>`}<button class="btn btn-line" data-action="reject-inline-candidate" data-candidate-id="${id}"${disabled}>不记住</button></div>`;
+    return `<article class="memory-review-item">${source ? `<small>${escapeUi(source)}</small>` : ''}<p>${escapeUi(text)}</p>${actions}</article>`;
+  }).join('') : '';
+  return `<section class="memory-review"><button class="memory-review-toggle" data-action="toggle-memory-review" aria-expanded="${expanded}" aria-controls="memory-review-list"${disabled}>${APRICOT_ACTIONS.bookmark}<b>待确认</b><span>${candidates.length} 条</span>${APRICOT_ACTIONS.down}</button><div id="memory-review-list"${expanded ? '' : ' hidden'}>${list}</div></section>`;
 }

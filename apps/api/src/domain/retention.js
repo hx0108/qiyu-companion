@@ -26,6 +26,12 @@ function applyRawInteractionRetention(store, account, now = new Date()) {
     cancelConversationSummaryJobs(store, conversationId, now.toISOString());
   }
   for (const messageId of expiredMessageIds) store.messages.delete(messageId);
+  // The derived memory may outlive the original message, but its raw source
+  // link must not outlive that message (PostgreSQL additionally enforces this
+  // with ON DELETE SET NULL).
+  for (const asset of store.assets.values()) {
+    if (asset.account_id === account.account_id && expiredMessageIds.has(asset.automatic_source_message_id)) asset.automatic_source_message_id = null;
+  }
   for (const candidate of store.candidates.values()) {
     if (candidate.account_id === account.account_id && candidate.state === 'CANDIDATE' && expiredMessageIds.has(candidate.source_message_id)) {
       candidate.state = 'EXPIRED';

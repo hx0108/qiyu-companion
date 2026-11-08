@@ -1,6 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
 const { DevelopmentStore } = require('../domain/store');
 const { PostgresRepository } = require('./postgres-repository');
 const { PostgresTrialInviteAuthRepository } = require('./postgres-trial-invite-auth-repository');
@@ -13,6 +14,7 @@ const DEVELOPMENT_DATABASE_ACCOUNT_IDS = Object.freeze({
   acct_dev_alice: '00000000-0000-7000-8000-0000000000a1',
   acct_dev_bob: '00000000-0000-7000-8000-0000000000b2'
 });
+const automaticMemoryLockBackoffMs = [0, 25, 50, 100, 200];
 
 class PostgresStore {
   constructor({ pool }) {
@@ -59,7 +61,7 @@ class PostgresStore {
     finally { client.release(); }
   }
 
-  async withAccountTransaction(accountId, operation, { lockDailyUsage = false, lockCharacterId = null } = {}) {
+  async withAccountTransaction(accountId, operation, { lockDailyUsage = false, lockCharacterId = null, lockMemory = false } = {}) {
     const client = await this.pool.connect();
     const repository = new PostgresRepository(client);
     try {
@@ -67,6 +69,9 @@ class PostgresStore {
       if (Object.values(DEVELOPMENT_DATABASE_ACCOUNT_IDS).includes(accountId)) {
         await repository.seedDevelopmentAccount(accountId, noticeIdFor(accountId));
       }
+      // Serialize memory writes, revocation and opt-out with chat/voice writes.
+      // The lock is taken before loading the account-scoped snapshot.
+      if (lockDailyUsage || lockMemory) await client.query('SELECT account_id FROM accounts WHERE account_id = $1 FOR UPDATE', [accountId]);
       if (lockCharacterId) {
         // Serialize persona edits/restores before loading snapshots/idempotency.
         // RLS remains active; text comparison makes malformed UUIDs a 404 rather
@@ -91,6 +96,132 @@ class PostgresStore {
       client.release();
     }
   }
+
+  async withAutomaticMemoryTransaction(accountId, operation, { write = false } = {}) {
+    const waits = write ? automaticMemoryLockBackoffMs : [0];
+    for (const [attempt, wait] of waits.entries()) {
+      if (wait) await delay(wait);
+      const client = await this.pool.connect();
+      const repository = new PostgresRepository(client);
+      try {
+        await repository.beginAccountScope(accountId);
+        if (write) {
+          // Avoid joining the foreground lock queue on a busy account. Fall back
+          // to waiting after a short bound so sustained chat cannot starve memory.
+          const yieldToChat = attempt < waits.length - 1;
+          const lock = 'SELECT account_id FROM accounts WHERE account_id = $1 FOR UPDATE';
+          try {
+            await client.query(yieldToChat ? lock + ' NOWAIT' : lock, [accountId]);
+          } catch (error) {
+            if (!yieldToChat || error.code !== '55P03') throw error;
+            await repository.rollback();
+            continue;
+          }
+        }
+        const result = await operation({
+          client,
+          loadSource: async (messageId, evidenceIds) =>
+            (await loadAutomaticMemorySources(client, accountId, [messageId], evidenceIds)).get(messageId),
+          loadSources: (messageIds) => loadAutomaticMemorySources(client, accountId, messageIds),
+          loadMemoryChanges: (characterId, suggestions) => loadAutomaticMemoryChanges(client, accountId, characterId, suggestions)
+        });
+        await repository.commit();
+        return result;
+      } catch (error) {
+        try { await repository.rollback(); } catch { /* Preserve the original failure. */ }
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+  }
+}
+
+async function loadAutomaticMemorySources(client, accountId, messageIds, evidenceIds = []) {
+  const { rows } = await client.query(`
+    SELECT a.account_status, a.revocation_epoch, a.automatic_memory_enabled, a.automatic_memory_preference_version,
+      a.proactive_preferences_json, controls.user_pause_state, c.status, c.character_id, m.message_id, m.conversation_id,
+      m.actor, m.attachments, m.created_at, m.retention_expires_at, convert_from(m.content_ciphertext, 'UTF8') AS text,
+      history.messages AS history
+    FROM messages m
+    JOIN conversations c USING (conversation_id)
+    JOIN accounts a USING (account_id)
+    JOIN account_interaction_controls controls USING (account_id)
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(jsonb_agg(h), '[]'::jsonb) AS messages
+      FROM (
+        SELECT message_id, conversation_id, actor, attachments, created_at, retention_expires_at,
+          convert_from(content_ciphertext, 'UTF8') AS text
+        FROM messages WHERE conversation_id = m.conversation_id AND deleted_at IS NULL AND (
+          message_id = ANY($3::uuid[]) OR message_id IN (
+            SELECT message_id FROM messages WHERE conversation_id = m.conversation_id
+              AND created_at < date_trunc('milliseconds', m.created_at)
+              AND deleted_at IS NULL
+            ORDER BY created_at DESC, (actor = 'ASSISTANT') DESC, message_id DESC LIMIT 4
+          )
+        )
+      ) h
+    ) history
+    WHERE m.message_id = ANY($1::uuid[]) AND a.account_id = $2 AND m.deleted_at IS NULL AND a.deleted_at IS NULL`,
+  [messageIds, accountId, evidenceIds]);
+  return new Map(rows.map(({ history, ...row }) => {
+    const messages = new Map(history.map((item) => [item.message_id, item]));
+    messages.set(row.message_id, row);
+    const conversations = new Map([[row.conversation_id, { account_id: accountId, character_id: row.character_id, status: row.status }]]);
+    return [row.message_id, { messages, conversations, account: () => ({ ...row, proactive_preferences: row.proactive_preferences_json }) }];
+  }));
+}
+
+async function loadAutomaticMemoryChanges(client, accountId, characterId, suggestions) {
+  const keys = [...new Set(suggestions.flatMap(({ key, relatedKeys }) => [key, ...relatedKeys]))];
+  const quotes = suggestions.map(({ quote }) => quote);
+  const { rows: [{ assets: assetRows, candidates: candidateRows, preference }] } = await client.query(`
+    SELECT
+      COALESCE((SELECT jsonb_agg(to_jsonb(a)) FROM (
+        SELECT asset_id, account_id, character_id, state, activation_actor, automatic_policy_version, value_json, display_text, superseded_by, index_state, deleted_at, valid_until
+        FROM relationship_assets WHERE account_id = $1 AND character_id = $2 AND (
+          value_json->>'fact_key' = ANY($3::text[]) OR value_json->>'fact_value' = ANY($4::text[]) OR display_text = ANY($4::text[])
+        )
+      ) a), '[]'::jsonb) AS assets,
+      COALESCE((SELECT jsonb_agg(to_jsonb(c)) FROM (
+        SELECT candidate_id, account_id, character_id, state, decoded.value AS normalized_value, display_text, expires_at
+        FROM memory_candidates
+        CROSS JOIN LATERAL (
+          SELECT CASE WHEN pg_input_is_valid(normalized_value, 'jsonb') THEN normalized_value::jsonb END AS value
+        ) decoded
+        WHERE account_id = $1 AND character_id = $2 AND state IN ('CANDIDATE','REJECTED') AND (
+          decoded.value->>'fact_key' = ANY($3::text[]) OR decoded.value->>'fact_value' = ANY($4::text[]) OR display_text = ANY($4::text[])
+        )
+      ) c), '[]'::jsonb) AS candidates,
+      (SELECT jsonb_build_object('style', style) FROM user_preferences WHERE account_id = $1 AND character_id = $2) AS preference
+    `, [accountId, characterId, keys, quotes]);
+  const state = {
+    assets: new Map(assetRows.map((row) => [row.asset_id, { ...row, value: row.value_json, origin: row.activation_actor === 'SYSTEM' ? 'AUTOMATIC' : 'USER_CONFIRMED' }])),
+    candidates: new Map(candidateRows.map((row) => [row.candidate_id, row])),
+    userPreferences: new Map([[`${accountId}:${characterId}`, preference]]),
+    assetEmbeddingWritesDeferred: true, assetEmbeddingJobs: new Map(), outboxEvents: new Map(), next: () => randomUUID()
+  };
+  return { state, async flush() {
+    for (const row of assetRows) {
+      if (row.state === 'ACTIVE' && state.assets.get(row.asset_id).state === 'SUPERSEDED') {
+        await client.query("UPDATE relationship_assets SET state = 'SUPERSEDED' WHERE asset_id = $1 AND account_id = $2", [row.asset_id, accountId]);
+      }
+    }
+    const previous = new Set(assetRows.map((row) => row.asset_id));
+    for (const asset of state.assets.values()) {
+      if (!previous.has(asset.asset_id)) await persistAsset(client, asset, false);
+    }
+    for (const row of assetRows) {
+      const asset = state.assets.get(row.asset_id);
+      if (asset.state !== row.state) await persistAsset(client, asset, true);
+    }
+    const existing = new Set(candidateRows.map((row) => row.candidate_id));
+    for (const candidate of state.candidates.values()) {
+      if (!existing.has(candidate.candidate_id)) await persistCandidate(client, candidate, false);
+    }
+    for (const item of state.outboxEvents.values()) await persistOutboxEvent(client, item, false);
+    for (const job of state.assetEmbeddingJobs.values()) await persistAssetEmbeddingJob(client, job, false);
+  } };
 }
 
 class PostgresRequestStore extends DevelopmentStore {
@@ -101,6 +232,7 @@ class PostgresRequestStore extends DevelopmentStore {
     this.baseline = null;
     this.recallSource = 'postgres-structured-development-store';
     this.assetEmbeddingWritesDeferred = true;
+    this.automaticMemoryJobs = [];
   }
 
   resolveAccountId(developmentAccountId) { return DEVELOPMENT_DATABASE_ACCOUNT_IDS[developmentAccountId]; }
@@ -118,22 +250,13 @@ class PostgresRequestStore extends DevelopmentStore {
     // A pg Client supports one active query at a time. Keep this sequential so the
     // request's transaction stays scoped and does not rely on driver queueing.
     const queries = [
-      [`SELECT a.account_id, a.account_status, a.age_status, a.retention_policy_id, a.revocation_epoch, a.proactive_preferences_json,
+      [`SELECT a.account_id, a.account_status, a.age_status, a.retention_policy_id, a.revocation_epoch, a.proactive_preferences_json, a.automatic_memory_enabled,
+        a.automatic_memory_preference_source, a.automatic_memory_preference_version,
         c.user_pause_state, c.safety_mode, c.service_mode
         FROM accounts a JOIN account_interaction_controls c USING (account_id)
         WHERE a.account_id = $1 AND a.deleted_at IS NULL`, [accountId]],
-      [`SELECT notice_id, account_id, type, notice_version, state, displayed_at
-        FROM required_notices WHERE account_id = $1 AND deleted_at IS NULL ORDER BY due_at ASC LIMIT 1`, [accountId]],
-      [`SELECT character_id, account_id, display_name, status, version, active_persona_version, persona_json
-        FROM characters WHERE account_id = $1 AND deleted_at IS NULL`, [accountId]],
-      [`SELECT character_id, version, persona_json, changed_fields, note, state, parent_version, evaluation_json, canary_json, rollback_json, restored_from_version, created_at, updated_at
-        FROM persona_versions WHERE account_id = $1 ORDER BY version ASC`, [accountId]],
-      [`SELECT world_state_id, account_id, character_id, mood_code, location_code, wardrobe_asset_id, active_event_refs,
-        source, state_version, expires_at, reset_at, updated_at FROM character_world_states WHERE account_id = $1`, [accountId]],
       [`SELECT event_id, world_state_id, account_id, character_id, patch_json, source_type, previous_version, new_version, occurred_at
         FROM world_state_events WHERE account_id = $1 ORDER BY occurred_at ASC, new_version ASC`, [accountId]],
-      [`SELECT conversation_id, account_id, character_id, status, created_at
-        FROM conversations WHERE account_id = $1 AND deleted_at IS NULL`, [accountId]],
       [`SELECT m.message_id, m.conversation_id, m.actor, convert_from(m.content_ciphertext, 'UTF8') AS text,
         m.provider, m.model_version, m.ai_generated, m.world_state_id, m.world_state_version, m.attachments, m.call_session_id, m.created_at, m.retention_expires_at FROM messages m JOIN conversations c ON c.conversation_id = m.conversation_id
         WHERE c.account_id = $1 AND m.deleted_at IS NULL`, [accountId]],
@@ -147,7 +270,7 @@ class PostgresRequestStore extends DevelopmentStore {
       [`SELECT candidate_id, account_id, character_id, state, version, type, normalized_value, display_text,
         provider, expires_at, source_message_id, rejected_at, rejection_undo_until FROM memory_candidates WHERE account_id = $1 AND deleted_at IS NULL`, [accountId]],
       [`SELECT asset_id, account_id, character_id, type, value_json, display_text, state, index_state, version,
-        source_candidate_id, superseded_by, created_at, deleted_at FROM relationship_assets WHERE account_id = $1`, [accountId]],
+        source_candidate_id, activation_actor, automatic_source_message_id, automatic_policy_version, valid_until, superseded_by, created_at, deleted_at FROM relationship_assets WHERE account_id = $1`, [accountId]],
       [`SELECT job_id, account_id, character_id, conversation_id, source_message_id, input_asset_id, reference_asset_id, entitlement_id, type, state, attempts,
         provider, provider_request_id, provider_job_id, moderation_policy_version, result_asset_id, transcript_text, transcript_state, failure_code, provider_error_code, world_state_id, world_state_version, scene_contract, voice_id, voice_version, voice_gender, authorization_record_id, rights_review_id, rights_review_state, tts_text, emotion_category, emotion_intensity, emotion_source, tts_speed, created_at
         FROM media_jobs WHERE account_id = $1 AND deleted_at IS NULL`, [accountId]],
@@ -204,60 +327,87 @@ class PostgresRequestStore extends DevelopmentStore {
         FROM relationship_asset_embeddings WHERE account_id = $1`, [accountId]]
       , [`SELECT feedback_id, account_id, category, rating, note, created_at FROM trial_feedback
         WHERE account_id = $1 ORDER BY created_at DESC`, [accountId]]
-      , [`SELECT notification_id, account_id, dedupe_key, type, title, body, read_at, created_at FROM notifications
-        WHERE account_id = $1 ORDER BY created_at DESC LIMIT 50`, [accountId]]
-      , [`SELECT account_id, character_id, address_terms, taboos, schedule, style, version, updated_at
-        FROM user_preferences WHERE account_id = $1`, [accountId]]
       , [`SELECT call_id, account_id, conversation_id, character_id, state, end_reason, started_at, ended_at,
         last_activity_at, turn_count, interrupted_turn_count, asr_seconds_used, tts_seconds_used
         FROM call_sessions WHERE account_id = $1`, [accountId]]
       , [`SELECT turn_id, call_session_id, account_id, turn_index, state, user_message_id, assistant_message_id,
         asr_job_id, tts_job_id, audio_bytes, chunk_count, transcript_text, interrupted, failure_code, created_at, ended_at
         FROM call_turns WHERE account_id = $1`, [accountId]]
-      // 六项能力 A1（迁移 063/064）：事件投影全量（账户内量小）；提取任务只载
-      // 在途（终态行仅审计用，不进请求作用域）；引用快照与 messages 同策略。
-      , [`SELECT event_id, account_id, character_id, current_asset_id, asset_version, version, domain, event_kind,
-        title, scheduled_at, timezone, time_precision, status, clarification_required, source_message_id, created_at, updated_at, deleted_at
-        FROM life_events WHERE account_id = $1`, [accountId]]
-      , [`SELECT job_id, account_id, character_id, conversation_id, message_id, captured_revocation_epoch, state,
-        attempt_count, next_attempt_at, exhausted_at, last_error, created_at, completed_at
-        FROM life_event_extraction_jobs WHERE account_id = $1 AND state IN ('PENDING', 'PROCESSING')`, [accountId]]
+      // Keep reference history and the global suppression counter out of the small scoped batch.
       , [`SELECT ref_id, message_id, account_id, character_id, conversation_id, refs_json, context_bundle_version, created_at
         FROM message_memory_refs WHERE account_id = $1`, [accountId]]
-      // 六项能力 A2（迁移 065）：许可全量（账户内量小）；任务只载在途
-      //（终态行留库审计）；槽位仅当日附近行（历史槽位无读取方）。
-      , [`SELECT grant_id, account_id, character_id, event_id, event_version, followup_kind, channel, allowed_from, expires_at,
-        version, state, consented_at, revoked_at, created_at, updated_at FROM followup_grants WHERE account_id = $1`, [accountId]]
-      , [`SELECT job_id, account_id, character_id, event_id, event_version, grant_id, followup_kind, due_at, expires_at, local_date,
-        state, lease_owner, lease_expires_at, attempts, next_attempt_at, last_error, created_at, published_at
-        FROM followup_jobs WHERE account_id = $1 AND state IN ('PENDING', 'LEASED', 'READY')`, [accountId]]
-      , [`SELECT account_id, local_date, claimed_by, created_at FROM proactive_daily_slots WHERE account_id = $1 AND local_date >= CURRENT_DATE - INTERVAL '2 days'`, [accountId]]
-      // 六项能力 A3（迁移 066/067）：计划/步骤/卡片/审批全量（账户内量小；
-      // 终态计划要进时间线与导出，action 终态行是「超时先查原 action」的依据）。
-      // 量大后改为专用 repository 限量加载（方案 §5.3）。
-      , [`SELECT plan_id, account_id, character_id, event_id, template_version, support_mode, title, version, state,
-        linked_followup_grant_id, state_reason, expires_at, accepted_at, paused_at, completed_at, cancelled_at, created_at, updated_at
-        FROM companion_plans WHERE account_id = $1`, [accountId]]
-      , [`SELECT step_id, plan_id, account_id, step_order, title, estimated_minutes, state, version, created_at, updated_at
-        FROM companion_plan_steps WHERE account_id = $1`, [accountId]]
-      , [`SELECT artifact_id, account_id, character_id, type, source_type, source_id, source_version, schema_version, created_at
-        FROM artifact_cards WHERE account_id = $1`, [accountId]]
-      , [`SELECT action_id, account_id, character_id, action_type, target_ref, target_version, parameters_digest, state,
-        expires_at, result_ref, failure_code, idempotency_key, approved_at, executed_at, created_at, updated_at
-        FROM action_requests WHERE account_id = $1`, [accountId]]
-      // A4 抑制原因计数（迁移 068）：全局小表，装载即回填内存 Map（/internal/
-      // metrics 统一读 store 形状；PG 边界同既有口径——此处读的是全局计数，
-      // 不是账户作用域行）。
       , [`SELECT action, reason, count FROM followup_suppression_counters`, []]
+    ];
+    const coreSnapshotQueries = [
+      [`SELECT notice_id, account_id, type, notice_version, state, displayed_at
+        FROM required_notices WHERE account_id = $1 AND deleted_at IS NULL ORDER BY due_at ASC LIMIT 1`, ""],
+      [`SELECT character_id, account_id, display_name, status, version, active_persona_version, persona_json
+        FROM characters WHERE account_id = $1 AND deleted_at IS NULL`, ""],
+      [`SELECT character_id, version, persona_json, changed_fields, note, state, parent_version, evaluation_json, canary_json, rollback_json, restored_from_version, created_at, updated_at
+        FROM persona_versions WHERE account_id = $1 ORDER BY version ASC`, " ORDER BY rows.version ASC"],
+      [`SELECT world_state_id, account_id, character_id, mood_code, location_code, wardrobe_asset_id, active_event_refs,
+        source, state_version, expires_at, reset_at, updated_at FROM character_world_states WHERE account_id = $1`, ""],
+      [`SELECT conversation_id, account_id, character_id, status, created_at
+        FROM conversations WHERE account_id = $1 AND deleted_at IS NULL`, ""],
+      [`SELECT notification_id, account_id, dedupe_key, type, title, body, read_at, created_at FROM notifications
+        WHERE account_id = $1 ORDER BY created_at DESC LIMIT 50`, " ORDER BY rows.created_at DESC"],
+      [`SELECT account_id, character_id, address_terms, taboos, schedule, style, version, updated_at
+        FROM user_preferences WHERE account_id = $1`, ""],
+    ];
+    // Keep the original projections and filters in a single scoped round trip.
+    const companionQueries = [
+      `SELECT event_id, account_id, character_id, current_asset_id, asset_version, version, domain, event_kind,
+        title, scheduled_at, timezone, time_precision, status, clarification_required, source_message_id, created_at, updated_at, deleted_at
+        FROM life_events WHERE account_id = $1`,
+      `SELECT job_id, account_id, character_id, conversation_id, message_id, captured_revocation_epoch, state,
+        attempt_count, next_attempt_at, exhausted_at, last_error, created_at, completed_at
+        FROM life_event_extraction_jobs WHERE account_id = $1 AND state IN ('PENDING', 'PROCESSING')`,
+      `SELECT grant_id, account_id, character_id, event_id, event_version, followup_kind, channel, allowed_from, expires_at,
+        version, state, consented_at, revoked_at, created_at, updated_at FROM followup_grants WHERE account_id = $1`,
+      `SELECT job_id, account_id, character_id, event_id, event_version, grant_id, followup_kind, due_at, expires_at, local_date,
+        state, lease_owner, lease_expires_at, attempts, next_attempt_at, last_error, created_at, published_at
+        FROM followup_jobs WHERE account_id = $1 AND state IN ('PENDING', 'LEASED', 'READY')`,
+      `SELECT account_id, local_date, claimed_by, created_at FROM proactive_daily_slots WHERE account_id = $1 AND local_date >= CURRENT_DATE - INTERVAL '2 days'`,
+      `SELECT plan_id, account_id, character_id, event_id, template_version, support_mode, title, version, state,
+        linked_followup_grant_id, state_reason, expires_at, accepted_at, paused_at, completed_at, cancelled_at, created_at, updated_at
+        FROM companion_plans WHERE account_id = $1`,
+      `SELECT step_id, plan_id, account_id, step_order, title, estimated_minutes, state, version, created_at, updated_at
+        FROM companion_plan_steps WHERE account_id = $1`,
+      `SELECT artifact_id, account_id, character_id, type, source_type, source_id, source_version, schema_version, created_at
+        FROM artifact_cards WHERE account_id = $1`,
+      `SELECT action_id, account_id, character_id, action_type, target_ref, target_version, parameters_digest, state,
+        expires_at, result_ref, failure_code, idempotency_key, approved_at, executed_at, created_at, updated_at
+        FROM action_requests WHERE account_id = $1`,
     ];
     const results = [];
     for (const [sql, values] of queries) results.push(await client.query(sql, values));
-    const [accountRows, noticeRows, characterRows, personaVersionRows, worldStateRows, worldStateEventRows, conversationRows, messageRows, conversationSummaryRows, conversationSummaryJobRows, outboxEventRows, candidateRows, assetRows, mediaJobRows, mediaAssetRows, entitlementLedgerRows, subscriptionRows, subscriptionOrderRows, paymentEventRows, paymentQuarantineRows, deletionRows, deletionTargetRows, contactRows, complaintRows, proactiveEventRows, proactiveMessageRows, dailyUsageRows, operationMetricRows, idempotencyRows, messageFeedbackRows, ocImportRows, contentRightsReviewRows, contentRightsAppealRows, contentRightsDecisionRows, ageReviewDecisionRows, assetEmbeddingJobRows, assetEmbeddingDeadLetterRows, assetEmbeddingRows, trialFeedbackRows, notificationRows, userPreferenceRows, callSessionRows, callTurnRows, lifeEventRows, lifeEventExtractionJobRows, messageMemoryRefRows, followupGrantRows, followupJobRows, proactiveDailySlotRows, companionPlanRows, companionPlanStepRows, artifactCardRows, actionRequestRows, followupSuppressionCounterRows] = results.map((result) => result.rows);
+    const aggregate = (sql, order = '') =>
+      `(SELECT COALESCE(jsonb_agg(rows${order}), '[]'::jsonb) FROM (${sql}) rows)`;
+    const projections = [
+      ...coreSnapshotQueries.map(([sql, order]) => aggregate(sql, order)),
+      ...companionQueries.map((sql) => aggregate(sql))
+    ];
+    const { rows: [{ scoped_snapshot: snapshots }] } = await client.query(
+      `SELECT jsonb_build_array(${projections.join(',\n')}) AS scoped_snapshot`, [accountId]);
+    // pg returns timestamptz as Date; restore that shape before the existing mappers.
+    const snapshotDates = ['displayed_at', 'reset_at', 'read_at', 'scheduled_at', 'created_at', 'updated_at', 'deleted_at', 'next_attempt_at',
+      'exhausted_at', 'completed_at', 'allowed_from', 'expires_at', 'consented_at', 'revoked_at', 'due_at',
+      'lease_expires_at', 'published_at', 'accepted_at', 'paused_at', 'cancelled_at', 'approved_at', 'executed_at'];
+    const scopedRows = snapshots.map((rows) => rows.map((row) => {
+      for (const field of snapshotDates) if (row[field] != null) row[field] = new Date(row[field]);
+      return row;
+    }));
+    const [accountRows, worldStateEventRows, messageRows, conversationSummaryRows, conversationSummaryJobRows, outboxEventRows, candidateRows, assetRows, mediaJobRows, mediaAssetRows, entitlementLedgerRows, subscriptionRows, subscriptionOrderRows, paymentEventRows, paymentQuarantineRows, deletionRows, deletionTargetRows, contactRows, complaintRows, proactiveEventRows, proactiveMessageRows, dailyUsageRows, operationMetricRows, idempotencyRows, messageFeedbackRows, ocImportRows, contentRightsReviewRows, contentRightsAppealRows, contentRightsDecisionRows, ageReviewDecisionRows, assetEmbeddingJobRows, assetEmbeddingDeadLetterRows, assetEmbeddingRows, trialFeedbackRows, callSessionRows, callTurnRows, messageMemoryRefRows, followupSuppressionCounterRows] = results.map((result) => result.rows);
+    const [noticeRows, characterRows, personaVersionRows, worldStateRows, conversationRows, notificationRows, userPreferenceRows,
+      lifeEventRows, lifeEventExtractionJobRows, followupGrantRows, followupJobRows, proactiveDailySlotRows, companionPlanRows, companionPlanStepRows, artifactCardRows, actionRequestRows] = scopedRows;
     const account = accountRows[0];
     if (!account) throw new Error('Scoped development account was not available after seed');
     store.accounts.set(account.account_id, {
       account_id: account.account_id, account_status: account.account_status, age_status: account.age_status,
       raw_interaction_retention_days: account.retention_policy_id === 'RETENTION_90D' ? 90 : 30,
+      automatic_memory_enabled: account.automatic_memory_enabled === true,
+      automatic_memory_preference_source: account.automatic_memory_preference_source,
+      automatic_memory_preference_version: Number(account.automatic_memory_preference_version),
       user_pause_state: account.user_pause_state, safety_mode: account.safety_mode, service_mode: account.service_mode,
       revocation_epoch: Number(account.revocation_epoch), required_notice: mapNotice(noticeRows[0]),
       emergency_contact: contactRows[0] ? { contact_name: contactRows[0].contact_name, relationship: contactRows[0].relationship, phone: contactRows[0].phone, consent_version: contactRows[0].consent_version, updated_at: contactRows[0].updated_at } : null,
@@ -309,7 +459,7 @@ class PostgresRequestStore extends DevelopmentStore {
     for (const row of outboxEventRows) store.outboxEvents.set(row.event_id, { event_id: row.event_id, account_id: row.account_id, character_id: row.character_id, aggregate_type: row.aggregate_type, aggregate_id: row.aggregate_id, event_type: row.event_type, payload: parseJson(row.payload_json) ?? {}, occurred_at: dateTimeValue(row.occurred_at) });
     for (const row of candidateRows) store.candidates.set(row.candidate_id, { candidate_id: row.candidate_id, account_id: row.account_id, character_id: row.character_id, state: row.state, version: Number(row.version), type: row.type, normalized_value: parseJson(row.normalized_value), display_text: row.display_text, provider: row.provider, expires_at: row.expires_at, source_message_id: row.source_message_id, rejected_at: row.rejected_at ? dateTimeValue(row.rejected_at) : null, rejection_undo_until: row.rejection_undo_until ? dateTimeValue(row.rejection_undo_until) : null });
     for (const row of assetRows) {
-      const asset = { asset_id: row.asset_id, account_id: row.account_id, character_id: row.character_id, type: row.type, value: row.value_json, display_text: row.display_text, state: row.state, index_state: row.index_state || 'PENDING', version: Number(row.version), source_candidate_id: row.source_candidate_id, created_at: row.created_at, deleted_at: row.deleted_at };
+      const asset = { asset_id: row.asset_id, account_id: row.account_id, character_id: row.character_id, type: row.type, value: row.value_json, display_text: row.display_text, state: row.state, index_state: row.index_state || 'PENDING', version: Number(row.version), source_candidate_id: row.source_candidate_id, origin: row.activation_actor === 'SYSTEM' ? 'AUTOMATIC' : 'USER_CONFIRMED', automatic_source_message_id: row.automatic_source_message_id, automatic_policy_version: row.automatic_policy_version, valid_until: row.valid_until ? dateTimeValue(row.valid_until) : null, created_at: row.created_at, deleted_at: row.deleted_at };
       if (row.superseded_by) asset.superseded_by = row.superseded_by;
       store.assets.set(row.asset_id, asset);
     }
@@ -413,10 +563,15 @@ class PostgresRequestStore extends DevelopmentStore {
     const before = this.baseline;
     const account = this.account(this.accountId);
     if (changed(before.accounts.get(this.accountId), account)) {
-      await this.client.query('UPDATE accounts SET age_status = $2, retention_policy_id = $3, revocation_epoch = $4, account_status = $5, proactive_preferences_json = $6::jsonb WHERE account_id = $1', [this.accountId, account.age_status, account.raw_interaction_retention_days === 90 ? 'RETENTION_90D' : 'RETENTION_30D', account.revocation_epoch, account.account_status, JSON.stringify(account.proactive_preferences ?? {})]);
+      await this.client.query('UPDATE accounts SET age_status = $2, retention_policy_id = $3, revocation_epoch = GREATEST(revocation_epoch, $4), account_status = $5, proactive_preferences_json = $6::jsonb WHERE account_id = $1', [this.accountId, account.age_status, account.raw_interaction_retention_days === 90 ? 'RETENTION_90D' : 'RETENTION_30D', account.revocation_epoch, account.account_status, JSON.stringify(account.proactive_preferences ?? {})]);
       await this.client.query('UPDATE account_interaction_controls SET safety_mode = $2 WHERE account_id = $1', [this.accountId, account.safety_mode]);
       await this.client.query('UPDATE required_notices SET state = $2, displayed_at = $3 WHERE notice_id = $1 AND account_id = $4', [account.required_notice.notice_id, mapNoticeState(account.required_notice.state), account.required_notice.displayed_at, this.accountId]);
       await syncEmergencyContact(this.client, this.accountId, account);
+    }
+    if (account.automatic_memory_preference_version !== before.accounts.get(this.accountId).automatic_memory_preference_version) {
+      await this.client.query('UPDATE accounts SET automatic_memory_enabled = $2, automatic_memory_preference_source = $3, automatic_memory_preference_version = $4 WHERE account_id = $1', [this.accountId, account.automatic_memory_enabled, account.automatic_memory_preference_source, account.automatic_memory_preference_version]);
+      await this.client.query(`UPDATE automatic_memory_jobs SET state = 'CANCELLED', lease_id = NULL, result_code = 'PREFERENCE_CHANGED'
+        WHERE account_id = $1 AND state IN ('PENDING','PROCESSING')`, [this.accountId]);
     }
     await syncRows(this.client, this.complaints, before.complaints, persistComplaint);
     await syncRows(this.client, this.proactiveEvents, before.proactiveEvents, persistProactiveEvent);
@@ -437,9 +592,27 @@ class PostgresRequestStore extends DevelopmentStore {
     await syncRows(this.client, this.conversationSummaryJobs, before.conversationSummaryJobs, persistConversationSummaryJob);
     assertAppendOnly(before.outboxEvents, this.outboxEvents);
     await syncRows(this.client, this.outboxEvents, before.outboxEvents, persistOutboxEvent);
-    await syncRows(this.client, this.messages, before.messages, (client, item, exists) => persistMessage(client, item, exists, retentionDays), deleteMessage);
+    const newMessageJobs = new Map();
+    for (const job of this.automaticMemoryJobs) {
+      if (!newMessageJobs.has(job.messageId)) newMessageJobs.set(job.messageId, job);
+    }
+    await syncRows(this.client, this.messages, before.messages, (client, item, exists) => {
+      const job = exists ? undefined : newMessageJobs.get(item.message_id);
+      if (job) newMessageJobs.delete(item.message_id);
+      return persistMessage(client, item, exists, retentionDays, job, this.accountId);
+    }, deleteMessage);
+    // A job for an already persisted source still uses the idempotent insert.
+    for (const job of newMessageJobs.values()) {
+      await this.client.query(
+        'INSERT INTO automatic_memory_jobs (message_id, account_id, preference_version, revocation_epoch, mode) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (message_id) DO NOTHING',
+        [job.messageId, this.accountId, job.preferenceVersion, job.revocationEpoch, job.mode]
+      );
+    }
     await syncRows(this.client, this.candidates, before.candidates, persistCandidate);
-    await syncRows(this.client, this.assets, before.assets, persistAsset);
+    // Replacement rows must exist before older rows can reference them through
+    // the immediate superseded_by foreign key. Both writes remain atomic.
+    for (const [id, asset] of this.assets) if (!before.assets.has(id)) await persistAsset(this.client, asset, false);
+    for (const [id, asset] of this.assets) if (before.assets.has(id) && changed(before.assets.get(id), asset)) await persistAsset(this.client, asset, true);
     // OC reviews can reference an import or a reference-image id. Insert the
     // import first, then its review, so reference media can safely carry the
     // rights_review_id foreign key in the same transaction.
@@ -590,9 +763,21 @@ async function persistConversation(client, item, exists, retentionDays) {
   if (exists) return client.query('UPDATE conversations SET status = $2, deleted_at = $3 WHERE conversation_id = $1 AND account_id = $4', [item.conversation_id, mapConversationStatus(item.status), item.deleted_at || null, item.account_id]);
   return client.query("INSERT INTO conversations (conversation_id, account_id, character_id, status, created_at, retention_expires_at) VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, CURRENT_TIMESTAMP), COALESCE($5::timestamptz, CURRENT_TIMESTAMP) + make_interval(days => $6))", [item.conversation_id, item.account_id, item.character_id, mapConversationStatus(item.status), item.created_at || null, retentionDays]);
 }
-async function persistMessage(client, item, exists, retentionDays) {
+async function persistMessage(client, item, exists, retentionDays, job, accountId) {
   if (exists) return;
-  return client.query("INSERT INTO messages (message_id, conversation_id, actor, content_ciphertext, created_at, retention_expires_at, provider, model_version, ai_generated, world_state_id, world_state_version, attachments, call_session_id) VALUES ($1, $2, $3, convert_to($4, 'UTF8'), COALESCE($5::timestamptz, CURRENT_TIMESTAMP), COALESCE($5::timestamptz, CURRENT_TIMESTAMP) + make_interval(days => $6), $7, $8, $9, $10, $11, $12::jsonb, $13)", [item.message_id, item.conversation_id, item.actor, item.text, item.created_at || null, retentionDays, item.provider || null, item.model_version || null, Boolean(item.ai_generated), item.world_state_id || null, item.world_state_version || null, JSON.stringify(item.attachments ?? []), item.call_session_id || null]);
+  const insert = `INSERT INTO messages (
+    message_id, conversation_id, actor, content_ciphertext, created_at, retention_expires_at, provider, model_version,
+    ai_generated, world_state_id, world_state_version, attachments, call_session_id
+  ) VALUES ($1, $2, $3, convert_to($4, 'UTF8'), COALESCE($5::timestamptz, CURRENT_TIMESTAMP),
+    COALESCE($5::timestamptz, CURRENT_TIMESTAMP) + make_interval(days => $6), $7, $8, $9, $10, $11, $12::jsonb, $13)`;
+  const values = [item.message_id, item.conversation_id, item.actor, item.text, item.created_at || null, retentionDays,
+    item.provider || null, item.model_version || null, Boolean(item.ai_generated), item.world_state_id || null,
+    item.world_state_version || null, JSON.stringify(item.attachments ?? []), item.call_session_id || null];
+  if (!job) return client.query(insert, values);
+  return client.query(`WITH source AS (${insert} RETURNING message_id)
+    INSERT INTO automatic_memory_jobs (message_id, account_id, preference_version, revocation_epoch, mode)
+    SELECT message_id, $14, $15, $16, $17 FROM source ON CONFLICT (message_id) DO NOTHING`,
+  [...values, accountId, job.preferenceVersion, job.revocationEpoch, job.mode]);
 }
 async function persistCallSession(client, item, exists) {
   if (exists) {
@@ -668,7 +853,7 @@ async function deleteMessage(client, item) { return client.query('DELETE FROM me
 async function deleteConversationSummary(client, item) { return client.query('DELETE FROM conversation_summaries WHERE summary_id = $1 AND account_id = $2', [item.summary_id, item.account_id]); }
 async function deleteOcImport(client, item) { return client.query('DELETE FROM oc_imports WHERE import_id = $1 AND account_id = $2', [item.import_id, item.account_id]); }
 async function persistCandidate(client, item, exists) { if (exists) return client.query('UPDATE memory_candidates SET state = $2, normalized_value = $3, display_text = $4, last_transition_actor = $5, version = $6, rejected_at = $7::timestamptz, rejection_undo_until = $8::timestamptz, updated_at = CURRENT_TIMESTAMP WHERE candidate_id = $1 AND account_id = $9', [item.candidate_id, item.state, JSON.stringify(item.normalized_value), item.display_text, 'USER', item.version, item.rejected_at || null, item.rejection_undo_until || null, item.account_id]); return client.query(`INSERT INTO memory_candidates (candidate_id, account_id, character_id, state, type, normalized_value, display_text, provider, expires_at, source_message_id, rejected_at, rejection_undo_until) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz, $12::timestamptz)`, [item.candidate_id, item.account_id, item.character_id, item.state, item.type, JSON.stringify(item.normalized_value), item.display_text, item.provider, item.expires_at, item.source_message_id, item.rejected_at || null, item.rejection_undo_until || null]); }
-async function persistAsset(client, item, exists) { if (exists) return client.query('UPDATE relationship_assets SET state = $2, deleted_at = $3, superseded_by = $5, index_state = $6 WHERE asset_id = $1 AND account_id = $4', [item.asset_id, item.state, item.deleted_at || null, item.account_id, item.superseded_by || null, item.index_state || 'PENDING']); return client.query(`INSERT INTO relationship_assets (asset_id, account_id, character_id, type, value_json, display_text, state, index_state, source_candidate_id, activation_actor) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, 'USER')`, [item.asset_id, item.account_id, item.character_id, item.type, JSON.stringify(item.value), item.display_text, item.state, item.index_state || 'PENDING', item.source_candidate_id]); }
+async function persistAsset(client, item, exists) { if (exists) return client.query('UPDATE relationship_assets SET state = $2, deleted_at = $3, superseded_by = $5, index_state = $6 WHERE asset_id = $1 AND account_id = $4', [item.asset_id, item.state, item.deleted_at || null, item.account_id, item.superseded_by || null, item.index_state || 'PENDING']); return client.query(`INSERT INTO relationship_assets (asset_id, account_id, character_id, type, value_json, display_text, state, index_state, source_candidate_id, activation_actor, automatic_source_message_id, automatic_policy_version, valid_until) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13::timestamptz)`, [item.asset_id, item.account_id, item.character_id, item.type, JSON.stringify(item.value), item.display_text, item.state, item.index_state || 'PENDING', item.source_candidate_id || null, item.origin === 'AUTOMATIC' ? 'SYSTEM' : 'USER', item.automatic_source_message_id || null, item.automatic_policy_version || null, item.valid_until || null]); }
 async function persistMediaJob(client, item, exists) {
   const values = [item.job_id, item.account_id, item.character_id, item.conversation_id || null, item.source_message_id || null, item.input_asset_id || null, item.reference_asset_id || null, item.entitlement_id || null, item.type, item.state, item.attempts, item.provider || null, item.provider_request_id || null, item.provider_job_id || null, item.moderation_policy_version || null, item.result_asset_id || null, item.transcript_text || null, item.transcript_state || null, item.failure_code || null, item.provider_error_code || null, item.world_state_id || null, item.world_state_version || null, item.scene_contract ? JSON.stringify(item.scene_contract) : null, item.voice_id || null, item.voice_version || null, item.voice_gender || null, item.authorization_record_id || null, item.rights_review_id || null, item.rights_review_state || null, item.tts_text || null, item.emotion_category || null, item.emotion_intensity ?? null, item.emotion_source || null, item.tts_speed ?? null, item.created_at || null];
   if (exists) {

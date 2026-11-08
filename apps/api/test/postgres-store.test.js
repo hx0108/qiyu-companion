@@ -9,7 +9,7 @@ const { DEVELOPMENT_DATABASE_ACCOUNT_IDS, PostgresStore } = require('../src/pers
 const { createPersistenceFromEnvironment } = require('../src/persistence/composition');
 const { createApp } = require('../src/app');
 
-function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, loadTtsJob = false, loadCallData = false } = {}) {
+function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, loadTtsJob = false, loadCallData = false, busyMemoryLocks = 0 } = {}) {
   const calls = [];
   let queryActive = false;
   const client = {
@@ -19,11 +19,22 @@ function fakePool({ rejectConcurrentQueries = false, loadActiveTrial = false, lo
       calls.push({ sql: String(sql), values });
       try {
         if (rejectConcurrentQueries) await new Promise((resolve) => setImmediate(resolve));
-        if (String(sql).includes('FROM accounts a JOIN account_interaction_controls')) {
-          return { rows: [{ account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice, account_status: 'OPEN', age_status: 'AGE_UNVERIFIED', retention_policy_id: 'RETENTION_30D', revocation_epoch: '0', user_pause_state: 'ACTIVE', safety_mode: 'R0_NORMAL', service_mode: 'FULL' }] };
+        if (String(sql).endsWith('FOR UPDATE NOWAIT') && busyMemoryLocks > 0) {
+          busyMemoryLocks -= 1;
+          throw Object.assign(new Error('account row busy'), { code: '55P03' });
         }
-        if (String(sql).includes('FROM required_notices')) {
-          return { rows: [{ notice_id: '00000000-0000-7000-8000-0000000000a3', account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice, type: 'AI_IDENTITY', notice_version: 'ai_identity_m1.0', state: 'PENDING', displayed_at: null }] };
+        if (String(sql).endsWith('AS scoped_snapshot')) {
+          const notice = { notice_id: '00000000-0000-7000-8000-0000000000a3', account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice,
+            type: 'AI_IDENTITY', notice_version: 'ai_identity_m1.0', state: 'PENDING', displayed_at: null };
+          return { rows: [{ scoped_snapshot: [[notice], ...Array.from({ length: 15 }, () => [])] }] };
+        }
+        if (String(sql).includes('FROM accounts a JOIN account_interaction_controls')) {
+          return { rows: [{
+            account_id: DEVELOPMENT_DATABASE_ACCOUNT_IDS.acct_dev_alice, account_status: 'OPEN',
+            age_status: 'AGE_UNVERIFIED', retention_policy_id: 'RETENTION_30D', revocation_epoch: '0',
+            user_pause_state: 'ACTIVE', safety_mode: 'R0_NORMAL', service_mode: 'FULL',
+            automatic_memory_enabled: false, automatic_memory_preference_source: 'LEGACY', automatic_memory_preference_version: '0'
+          }] };
         }
         if (String(sql).includes('FROM messages m JOIN conversations')) {
           return { rows: [{ message_id: '00000000-0000-7000-8000-0000000000d1', conversation_id: '00000000-0000-7000-8000-0000000000d2', actor: 'USER', text: '已持久化消息', provider: 'qwen', model_version: 'qwen3.8-flash', ai_generated: false, created_at: '2026-08-01T00:00:00.000Z' }] };
@@ -109,6 +120,7 @@ test('PostgresStore scopes every request with a local RLS transaction and persis
   assert.ok(pool.calls.some((call) => call.sql.startsWith('INSERT INTO accounts')));
   const update = pool.calls.find((call) => call.sql.startsWith('UPDATE accounts SET age_status'));
   assert.deepEqual(update.values, [accountId, 'AGE_PASS', 'RETENTION_90D', 0, 'OPEN', '{"enabled":true,"quiet_start_hour":23,"quiet_end_hour":8,"timezone_offset_minutes":0}']);
+  assert.ok(!pool.calls.some((call) => /^UPDATE accounts SET .*automatic_memory_enabled/i.test(call.sql)));
   const controlsUpdate = pool.calls.find((call) => call.sql.startsWith('UPDATE account_interaction_controls SET safety_mode'));
   assert.deepEqual(controlsUpdate.values, [accountId, 'R0_NORMAL']);
   assert.equal(pool.calls.at(-2).sql, 'COMMIT');
@@ -139,6 +151,21 @@ test('PostgresStore rolls back and releases the client when a scoped operation f
   assert.ok(pool.calls.some((call) => call.sql === 'ROLLBACK'));
   assert.ok(!pool.calls.some((call) => call.sql === 'COMMIT'));
   assert.equal(pool.calls.at(-1).sql, 'RELEASE');
+});
+
+test('automatic memory yields to chat on a busy account before taking a bounded blocking lock', async () => {
+  const pool = fakePool({ busyMemoryLocks: 4 });
+  const store = new PostgresStore({ pool });
+  let writes = 0;
+  const result = await store.withAutomaticMemoryTransaction(store.resolveAccountId('acct_dev_alice'), async () => ++writes, { write: true });
+  assert.equal(result, 1);
+  assert.equal(writes, 1);
+  const statements = pool.calls.map(({ sql }) => sql);
+  assert.equal(statements.filter((sql) => sql.endsWith('FOR UPDATE NOWAIT')).length, 4);
+  assert.equal(statements.filter((sql) => sql.endsWith('FOR UPDATE')).length, 1);
+  assert.equal(statements.filter((sql) => sql === 'ROLLBACK').length, 4);
+  assert.equal(statements.filter((sql) => sql === 'RELEASE').length, 5);
+  assert.equal(statements.filter((sql) => sql === 'COMMIT').length, 1);
 });
 
 test('PostgresStore loads one RLS-scoped pg Client sequentially', async () => {

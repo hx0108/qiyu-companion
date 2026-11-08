@@ -8,6 +8,7 @@ const STATUS_LABELS = { PLANNED: "计划中", IN_PROGRESS: "进行中", COMPLETE
 const REF_REASON_LABELS = {
   MISSING: "来源已不存在",
   DELETED: "来源已被删除",
+  EXPIRED: "来源已到期",
   SUPERSEDED: "已有新版本",
   UNSUPPORTED: "类型不受支持"
 };
@@ -51,7 +52,7 @@ function collectLifeEventCandidateFields(root = document) {
 function memoryReferenceSheet(payload) {
   const references = Array.isArray(payload?.references) ? payload.references : [];
   const rows = references.map((ref) => {
-    const badge = ref.kind === "LIFE_EVENT" ? "事件" : "记忆";
+    const badge = ref.kind === "LIFE_EVENT" ? "事件" : ref.origin === "AUTOMATIC" ? "自动记忆" : "记忆";
     const label = ref.kind === "LIFE_EVENT" ? (ref.available ? ref.title : `事件 · ${shortId(ref.id)}`) : (ref.available ? ref.display_text : `记忆 · ${shortId(ref.id)}`);
     const meta = ref.available
       ? (ref.kind === "LIFE_EVENT" ? `${STATUS_LABELS[ref.status] ?? ref.status ?? ""}${ref.scheduled_at ? " · " + escapeHtml(formatWhen(ref)) : ""}` : `v${escapeHtml(ref.version ?? "?")}`)

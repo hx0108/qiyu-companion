@@ -25,7 +25,7 @@ test('telephone starts the native model directly without a mode choice or verifi
 });
 test('updated shell cache refreshes native call behavior', () => {
   const sw = fs.readFileSync(path.resolve(__dirname, '../../web/service-worker.js'), 'utf8');
-  assert.match(sw, /qiyu-shell-v32-apricot/); assert.match(sw, /'\/realtime-call-client.js'/);
+  assert.match(sw, /qiyu-shell-v34-memory-review/); assert.match(sw, /'\/realtime-call-client.js'/);
 });
 
 test('settling an old hangup cannot reset a newly dialled call', async () => {

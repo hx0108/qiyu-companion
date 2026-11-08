@@ -65,6 +65,9 @@ services:
       HOST: "0.0.0.0"
       # 可选能力：留空即关闭。接入时在 deploy/.env 提供真实值。
       QIYU_LLM_PROVIDER: ${QIYU_LLM_PROVIDER:-}
+      QIYU_AUTOMATIC_MEMORY_V2: ${QIYU_AUTOMATIC_MEMORY_V2:-}
+      QIYU_AUTOMATIC_MEMORY_V2_ACCOUNTS: ${QIYU_AUTOMATIC_MEMORY_V2_ACCOUNTS:-}
+      QIYU_AUTOMATIC_MEMORY_V2_PERCENT: ${QIYU_AUTOMATIC_MEMORY_V2_PERCENT:-0}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       # 仅评测脚本的成本口径；按模型地域/计费变更时由 .env 显式更新，运行时不据此扣费。
       QIYU_EVAL_PRICE_IN_PER_1M: ${QIYU_EVAL_PRICE_IN_PER_1M:-}
@@ -155,6 +158,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-qiyu}
       # Worker 的摘要任务需要模型；未配置时仅消费 Embedding 队列（确定性，无外呼）。
       QIYU_LLM_PROVIDER: ${QIYU_LLM_PROVIDER:-}
+      QIYU_AUTOMATIC_MEMORY_V2: ${QIYU_AUTOMATIC_MEMORY_V2:-}
+      QIYU_AUTOMATIC_MEMORY_V2_ACCOUNTS: ${QIYU_AUTOMATIC_MEMORY_V2_ACCOUNTS:-}
+      QIYU_AUTOMATIC_MEMORY_V2_PERCENT: ${QIYU_AUTOMATIC_MEMORY_V2_PERCENT:-0}
       QWEN_API_KEY: ${QWEN_API_KEY:-}
       # 六项能力开关与 API 同步（Worker 侧解析一次；语义见 api 服务注释）。
       QIYU_DEV_FLAGS: ${QIYU_DEV_FLAGS:-}

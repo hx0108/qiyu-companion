@@ -33,12 +33,12 @@ function providerSessionContext(context) {
   const activePersona = { '角色名': context.character?.name || '', ...Object.fromEntries(Object.entries(persona).map(([key, value]) => [personaLabels[key] || key, value])), '与用户的关系': persona.relationship_to_user || '' };
   let instructions = header + JSON.stringify({ '当前生效人格': activePersona, user_preferences: context.user_preferences, world_state: context.world_state, boundaries, unresolved_fact_conflicts: context.unresolved_fact_conflicts || [] });
   if (instructions.length > instructionLimit) throw fail('REALTIME_CONTEXT_LIMIT', '角色资料超出实时语音限制', 400);
-  for (const [kind, entries] of Object.entries({ memories: (context.confirmed_assets || []).filter((item) => !['boundary', 'commitment'].includes(item.type)), events: context.active_life_events || [], summary: context.conversation_summary ? [context.conversation_summary] : [], bridge: context.unsummarized_context || [] })) {
+  for (const [kind, entries] of Object.entries({ memories: (context.confirmed_assets || []).filter((item) => !['boundary', 'commitment'].includes(item.type)), automatic_memories_unconfirmed: context.automatic_assets || [], events: context.active_life_events || [], summary: context.conversation_summary ? [context.conversation_summary] : [], bridge: context.unsummarized_context || [] })) {
     for (const entry of Array.isArray(entries) ? entries : [entries]) {
       const line = `\n${kind}: ${JSON.stringify(entry)}`;
       if (instructions.length + line.length <= instructionLimit) {
         instructions += line;
-        if (kind === 'memories') sourceSelection.assets.push(entry);
+        if (kind === 'memories' || kind === 'automatic_memories_unconfirmed') sourceSelection.assets.push(entry);
         else if (kind === 'events') sourceSelection.events.push(entry);
         else if (kind === 'summary') sourceSelection.summary = entry;
         else if (kind === 'bridge') sourceSelection.bridge.push(entry);
@@ -103,6 +103,11 @@ class RealtimeCallRegistry {
 
   async checkAccess(item, force = false) {
     const checkedAt = this.now();
+    if (item.memoryValidUntil !== null && item.memoryValidUntil !== undefined && checkedAt >= item.memoryValidUntil) {
+      const error = fail('REALTIME_CONTEXT_CHANGED', '记忆已到期，请重新接通', 409);
+      await this.close(item, error.code);
+      throw error;
+    }
     if (!force && item.lastAccessCheckAt !== null && checkedAt >= item.lastAccessCheckAt && checkedAt - item.lastAccessCheckAt < this.accessCheckIntervalMs) return;
     try { await this.transact(item, 'check'); item.lastAccessCheckAt = checkedAt; }
     catch (error) { await this.close(item, error.code || 'REALTIME_ACCESS_REVOKED'); throw error; }

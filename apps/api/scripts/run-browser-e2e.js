@@ -2,7 +2,7 @@
 
 // 浏览器全链路 E2E（P1-5）：把 development/LOCAL_BROWSER_QA_2026-09-05.md 的人工
 // 验收路径固化为可重复回归——必要告知 → 年龄声明 → 角色创建 → 对话（SSE 回放）→
-// 候选记忆横幅 → TTS 未启用降级 → 时间线 → 数据中心保留期切换 → 日夜主题。
+// 回忆页待确认 → TTS 未启用降级 → 时间线 → 数据中心保留期切换 → 日夜主题。
 // 环境：内存开发 Store、Mock 回复生成器；浏览器用系统 Edge（channel: msedge，
 // 不下载 Chromium）。外部供应商、支付、年龄核验与生产删除不在本链路内。
 // 报告写入 development/eval/browser-e2e-YYYY-MM-DD.md，截图写入 output/playwright/。
@@ -62,7 +62,7 @@ async function main() {
   if (realQwen && !replyGenerator) throw new Error('QIYU_E2E_REAL_QWEN=1 requires QIYU_LLM_PROVIDER=qwen and QWEN_API_KEY.');
   const providerRuntime = realTencentMedia ? createTencentMediaRuntime(process.env, store) : createMockContextImageRuntime();
   // 六项能力 A1：陪伴连续性场景走确定性 mock 提取器（关键词→固定候选），
-  // 开关全开；内存 worker 500ms 轮询，页面轮询等候选横幅。
+  // 开关全开；内存 worker 500ms 轮询，回忆页读取待确认项。
   // 六项能力 A2：跟进调度 worker 同场启动（composer=null 走模板措辞）。
   // 六项能力 A3：计划/卡片/审批三开关同场开启（createApp 默认 mock 提议器）。
   const a1DevFlags = parseDevFlags({ QIYU_DEV_FLAGS: 'LIFE_EVENTS,MEMORY_REFERENCES,FOLLOWUP_DISPATCH,COMPANION_PLANS,ARTIFACT_CARDS,ACTION_EXECUTION' });
@@ -371,22 +371,21 @@ async function main() {
 
     if (!realQwen) {
       await step('记忆拒绝撤销：不记住后 30 秒内可由服务端恢复候选', async () => {
-        await page.getByRole('button', { name: '此刻', exact: true }).click();
-        const candidate = page.locator('[data-action="open-candidate"]');
-        await candidate.waitFor({ state: 'visible', timeout: 10_000 });
-        await candidate.click();
-        await page.locator('[data-action="reject-candidate"]').click();
+        await openMemoryReview(page);
+        const reject = page.locator('[data-action="reject-inline-candidate"]').first();
+        const candidateId = await reject.getAttribute('data-candidate-id');
+        await reject.click();
         const undo = page.locator('[data-action="undo-memory-reject"]');
         await undo.waitFor({ state: 'visible', timeout: 10_000 });
         await undo.click();
-        await page.getByRole('button', { name: '此刻', exact: true }).click();
-        await page.locator('[data-action="open-candidate"]').waitFor({ state: 'visible', timeout: 10_000 });
+        await page.locator(`[data-action="reject-inline-candidate"][data-candidate-id="${candidateId}"]`).waitFor();
+        await backToChat();
       });
     }
 
     // ---- 陪伴连续性（六项能力 A1）：提取→确认→来源→修订→删除 全链路 ----
-    // mock 提取器关键词触发；worker 500ms 轮询，页面等横幅最多 10 秒。
-    await step('A1 提取确认：说“周五面试”→候选卡→补具体时间保存确认', async () => {
+    // mock 提取器关键词触发；worker 500ms 轮询，等待提取完成后在回忆页刷新。
+    await step('A1 提取确认：说“周五面试”→回忆页→补具体时间保存确认', async () => {
       await backToChat();
       await page.locator('#message-form [name="message"]').fill('我周五要去面试，好紧张');
       await page.locator('#message-form .send').click();
@@ -399,21 +398,13 @@ async function main() {
           else if (Date.now() - started > 10_000) { clearInterval(timer); reject(new Error('提取 worker 未在 10 秒内产出 life_event 候选')); }
         }, 200);
       });
-      await openPendingCandidate(page);
-      // 同一条消息会先产生普通 dev-note 候选（回复生成器附带）再产生生活事件
-      // 候选（提取 worker）；横幅一次只显示一个，先确认掉普通候选直到
-      // life_event 专用 sheet 出现（确认 dev-note 无害——它只是普通记忆）。
-      for (let attempt = 0; attempt < 4 && (await page.locator('#life-event-title').count()) === 0; attempt += 1) {
-        assert((await page.locator('[data-action="confirm-candidate"]').count()) > 0, '普通候选应可确认');
-        await page.locator('[data-action="confirm-candidate"]').click();
-        await page.waitForSelector('#message-form', { timeout: 10_000 });
-        await openPendingCandidate(page);
-      }
+      await openPendingLifeEvent(page, store);
       await page.waitForSelector('#life-event-title', { timeout: 10_000 });
       assert((await page.locator('#life-event-title').inputValue()).includes('面试'), '候选标题应含面试');
       await page.locator('#life-event-scheduled-at').fill('2026-10-02T14:30');
       await page.locator('[data-action="confirm-edited-candidate"]').click();
-      await page.waitForSelector('#message-form', { timeout: 10_000 });
+      await page.locator('#app[data-route="assets"]:not([aria-busy="true"])').waitFor();
+      await backToChat();
       const events = [...store.lifeEvents.values()].filter((event) => !event.deleted_at);
       assert(events.length === 1, `应恰好确认一个生活事件，实际 ${events.length}`);
       assert(events[0].scheduled_at === '2026-10-02T06:30:00.000Z', `补时间应固化为 UTC ISO（本地 +08:00），实际 ${events[0].scheduled_at}`);
@@ -915,10 +906,22 @@ function toLocalInput(ms) {
 // 生活事件确认 sheet 全流程（A1 内联逻辑固化，A2 复用）：发消息 → 等提取
 // worker 产出 life_event 候选（Node 侧先等落库再轮询 UI）→ 确认掉先行的普通
 // 候选直到专用 sheet 出现 → 补具体时间 → confirm-edited 固化字段集。
-async function openPendingCandidate(page) {
-  await page.getByRole('button', { name: '此刻', exact: true }).click();
-  await page.locator('[data-action="open-candidate"]').waitFor({ state: 'visible', timeout: 10000 });
-  await page.locator('[data-action="open-candidate"]').click();
+async function openMemoryReview(page) {
+  await page.locator('#app:not([aria-busy="true"])').waitFor();
+  assert(await page.locator('.chat-scroll .apricot-candidate').count() === 0, '聊天消息不应插入候选卡');
+  await page.locator('.apricot-nav [data-action="open-assets"]').click();
+  const toggle = page.locator('[data-action="toggle-memory-review"][aria-expanded="false"]');
+  if (await toggle.count()) await toggle.click();
+}
+
+async function openPendingLifeEvent(page, store) {
+  const candidate = [...store.candidates.values()].find(item => item.type === 'life_event' && item.state === 'CANDIDATE');
+  await openMemoryReview(page);
+  await page.locator('summary', { hasText: '更多回忆管理' }).click();
+  await page.locator('[data-action="refresh-assets"]').click();
+  const toggle = page.locator('[data-action="toggle-memory-review"][aria-expanded="false"]');
+  if (await toggle.count()) await toggle.click();
+  await page.locator(`[data-action="open-candidate"][data-candidate-id="${candidate.candidate_id}"]`).click();
 }
 
 async function confirmLifeEventCandidate(page, store, { message, localTime, titlePart }) {
@@ -931,17 +934,13 @@ async function confirmLifeEventCandidate(page, store, { message, localTime, titl
       else if (Date.now() - started > 10_000) { clearInterval(timer); reject(new Error('提取 worker 未在 10 秒内产出 life_event 候选')); }
     }, 200);
   });
-  await openPendingCandidate(page);
-  for (let attempt = 0; attempt < 4 && (await page.locator('#life-event-title').count()) === 0; attempt += 1) {
-    assert((await page.locator('[data-action="confirm-candidate"]').count()) > 0, '普通候选应可确认');
-    await page.locator('[data-action="confirm-candidate"]').click();
-    await page.waitForSelector('#message-form', { timeout: 10_000 });
-    await openPendingCandidate(page);
-  }
+  await openPendingLifeEvent(page, store);
   await page.waitForSelector('#life-event-title', { timeout: 10_000 });
   assert((await page.locator('#life-event-title').inputValue()).includes(titlePart), `候选标题应含「${titlePart}」`);
   await page.locator('#life-event-scheduled-at').fill(localTime);
   await page.locator('[data-action="confirm-edited-candidate"]').click();
+  await page.locator('#app[data-route="assets"]:not([aria-busy="true"])').waitFor();
+  await page.getByRole('button', { name: '陪伴', exact: true }).click();
   await page.waitForSelector('#message-form', { timeout: 10_000 });
 }
 

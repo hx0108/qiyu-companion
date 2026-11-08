@@ -36,7 +36,9 @@ const { inspectContextImage } = require('./domain/context-image-policy');
 const { guardPersonaReply, createPersonaStreamGuard, oocFallback } = require('./domain/persona-output-guard');
 const { deriveEpisodeCandidate } = require('./domain/episode-memory');
 const { explicitFact, deriveFactCandidate, unresolvedFactKeys, contextBridge } = require('./domain/memory-quality');
+const { decideAutomaticMemory, automaticMemoryCandidate } = require('./domain/automatic-memory-policy');
 const { enqueueLifeEventExtraction } = require('./domain/life-event-extraction-worker');
+const { enqueueAutomaticMemory } = require('./domain/automatic-memory-v2');
 const { confirmLifeEventFromCandidate, listLifeEvents, getLifeEvent, reviseLifeEvent, deleteLifeEvent, findLifeEvent, publicLifeEvent, lifeEventDisplayText } = require('./domain/life-event-service');
 const { messageMemoryReferences, buildMemoryRefs, recordMessageMemoryRefs, clearExpiredMessageMemoryLinks } = require('./domain/memory-reference-service');
 const { validateFollowupGrantRequest } = require('./domain/followup-schema');
@@ -171,12 +173,13 @@ async function routeWithPersistence(context) {
   }
   if (accountId && typeof store.withAccountTransaction === 'function') {
     const lockDailyUsage = req.method === 'POST' && /^\/api\/v1\/conversations\/[^/]+\/(?:messages|realtime-calls|calls)$/.test(url.pathname);
+    const lockMemory = (req.method === 'POST' && (url.pathname === '/api/v1/privacy/automatic-memory' || /^\/api\/v1\/memory-candidates\/[^/]+\/(?:confirm|confirm-edited|reject)$/.test(url.pathname))) || (['PATCH', 'DELETE'].includes(req.method) && /^\/api\/v1\/relationship-assets\/[^/]+$/.test(url.pathname)) || (req.method === 'DELETE' && /^\/api\/v1\/conversations\/[^/]+$/.test(url.pathname));
     const characterWrite = (req.method === 'PATCH' && /^\/api\/v1\/characters\/([^/]+)$/.exec(url.pathname))
       || (req.method === 'POST' && /^\/api\/v1\/characters\/([^/]+)\/persona-versions(?:\/\d+\/restore)?$/.exec(url.pathname));
     const lockCharacterId = characterWrite ? characterWrite[1] : null;
     const pendingRealtimeSessions = [];
     try {
-      const result = await store.withAccountTransaction(accountId, (scopedStore) => route({ ...context, store: scopedStore, trialAuth: resolvedTrialAuth, authenticatedAccountId: accountId, pendingRealtimeSessions }), { lockDailyUsage, lockCharacterId });
+      const result = await store.withAccountTransaction(accountId, (scopedStore) => route({ ...context, store: scopedStore, trialAuth: resolvedTrialAuth, authenticatedAccountId: accountId, pendingRealtimeSessions }), { lockDailyUsage, lockCharacterId, lockMemory });
       for (const session of pendingRealtimeSessions) context.realtimeRegistry.activate(session);
       return result;
     } catch (error) {
@@ -337,6 +340,8 @@ async function route(context) {
         session.promptBytes = Buffer.byteLength(promptText, 'utf8');
         session.dialogueBytes = 0;
         session.inputTokenEstimate = Math.ceil(session.promptBytes / 2);
+        const expiries = mappedPrompt.sourceSelection.assets.map((asset) => Date.parse(asset.valid_until || '')).filter(Number.isFinite);
+        session.memoryValidUntil = expiries.length ? Math.min(...expiries) : null;
         session.accessSnapshot = { accountId: account.account_id, conversationId: conversation.conversation_id, characterId: conversation.character_id, revocationEpoch: account.revocation_epoch, characterVersion: contextPack.character?.version };
         session.revision = realtimeRevision(store, session);
         return created({ session_id: session.id, mode: 'native-realtime', stream_url: `/api/v1/realtime-calls/${session.id}/stream`, ...context.realtimeMediaTransport.issue(session), max_duration_ms: REALTIME_MAX_DURATION_MS, max_responses: null, input_format: 'pcm_s16le', sample_rate: 16000, input_moderation_scope: 'display-and-persistence-only', usage_policy: 'closed-trial-no-media-charge-conservative-daily-token-reservation' });
@@ -527,6 +532,14 @@ async function route(context) {
   if (method === 'GET' && path === '/api/v1/data-exports/relationship-profile') return ok({ export: relationshipProfileExport(store, account) });
   if (method === 'GET' && path === '/api/v1/privacy/raw-interaction-retention') return ok({ raw_interaction_retention_days: account.raw_interaction_retention_days || 90 });
   if (method === 'POST' && path === '/api/v1/privacy/raw-interaction-retention') return idempotent(context, account, () => setRawInteractionRetention(store, account, body));
+  if (method === 'GET' && path === '/api/v1/privacy/automatic-memory') return ok({ enabled: account.automatic_memory_enabled === true, source: account.automatic_memory_preference_source || 'DEFAULT' });
+  if (method === 'POST' && path === '/api/v1/privacy/automatic-memory') return idempotent(context, account, () => {
+    if (typeof body?.enabled !== 'boolean') throw apiError(400, 'VALIDATION_ERROR', 'enabled 必须是布尔值');
+    account.automatic_memory_enabled = body.enabled;
+    account.automatic_memory_preference_source = 'USER';
+    account.automatic_memory_preference_version = Number(account.automatic_memory_preference_version || 0) + 1;
+    return ok({ enabled: account.automatic_memory_enabled, source: 'USER' });
+  });
   if (method === 'DELETE' && /^\/api\/v1\/relationship-assets\/[^/]+$/.test(path)) {
     return idempotent(context, account, () => deleteAsset(store, account, path));
   }
@@ -1526,7 +1539,7 @@ function deleteConversation(store, account, path) {
   for (const messageId of messageIds) store.messages.delete(messageId);
   for (const [feedbackId, feedback] of store.messageFeedback) if (messageIds.has(feedback.message_id)) store.messageFeedback.delete(feedbackId);
   for (const candidate of store.candidates.values()) if (candidateIds.has(candidate.candidate_id)) { candidate.state = 'DELETED'; candidate.deleted_at = deletedAt; }
-  for (const asset of store.assets.values()) if (candidateIds.has(asset.source_candidate_id) && asset.state !== 'DELETED') { asset.state = 'DELETED'; asset.deleted_at = deletedAt; invalidateAssetEmbedding(store, asset.asset_id, 'conversation deleted'); }
+  for (const asset of store.assets.values()) if ((candidateIds.has(asset.source_candidate_id) || messageIds.has(asset.automatic_source_message_id)) && asset.state !== 'DELETED') { asset.state = 'DELETED'; asset.deleted_at = deletedAt; invalidateAssetEmbedding(store, asset.asset_id, 'conversation deleted'); }
   conversation.status = 'DELETED'; conversation.deleted_at = deletedAt;
   account.revocation_epoch += 1;
   const deletionJob = { deletion_job_id: store.next('del'), account_id: account.account_id, asset_id: null, scope: 'CONVERSATION', state: 'COMPLETED', revocation_epoch: account.revocation_epoch, physical_cleanup_state: 'ROWS_CLEANED_INLINE', created_at: deletedAt, note: '会话消息、候选与派生关系资产已在本请求内清理；向量随资产下线（PG 模式转交 Embedding Worker）。媒体对象不隶属会话删除范围。' };
@@ -1625,8 +1638,9 @@ async function sendMessage(store, account, path, body, replyGenerator, summaryGe
     // The state used to generate this response belongs to the response itself,
     // not to whatever state the character may have when TTS is requested later.
     const assistantMessage = { message_id: store.next('msg'), conversation_id: conversation.conversation_id, actor: 'ASSISTANT', text: modelReply.reply_text, provider: modelReply.provider, model_version: modelReply.model_version, ai_generated: modelReply.ai_generated !== false, world_state_id: contextPack.world_state.world_state_id, world_state_version: contextPack.world_state.state_version, created_at: createdAt, retention_expires_at: retentionExpiresAt };
+    const automatic = attachmentIds.length === 0 ? recordAutomaticMemory(store, account, conversation, userMessage) : null;
     const episodeCandidate = !modelReply.memory_candidate ? deriveEpisodeCandidate({ text, characterId: conversation.character_id, worldState: contextPack.world_state }) : null;
-    const candidateSource = modelReply.memory_candidate || episodeCandidate;
+    const candidateSource = ['AUTOMATIC', 'EXISTING', 'REJECTED', 'QUEUED'].includes(automatic?.action) ? null : automatic?.candidate || modelReply.memory_candidate || episodeCandidate;
     const candidate = candidateSource && isNewMemoryCandidate(store, account.account_id, conversation.character_id, candidateSource) ? {
       candidate_id: store.next('memc'), account_id: account.account_id, character_id: conversation.character_id,
       state: 'CANDIDATE', version: 1, type: candidateSource.type,
@@ -1689,8 +1703,10 @@ async function buildContextPack(store, account, conversation, text, embeddingPro
     unsummarized_context: contextBridge(unSummarized, RECENT_CONTEXT_LIMIT, text),
     unresolved_fact_conflicts: scopedFacts.filter((asset) => unresolvedKeys.has(explicitFact(asset.display_text)?.key)).map(({ asset_id, display_text, version }) => ({ asset_id, display_text, version })).slice(0, 10),
     conversation_summary: summary ? { summary_id: summary.summary_id, source_to_id: summary.source_to_id, version: 1, text: summary.text } : null,
-    confirmed_assets: rankedAssets
+    confirmed_assets: rankedAssets.filter((asset) => asset.origin !== 'AUTOMATIC')
       .map(({ asset_id, type, display_text, version }) => (enriched ? { asset_id, type, display_text, version } : { type, display_text, version })),
+    automatic_assets: rankedAssets.filter((asset) => asset.origin === 'AUTOMATIC')
+      .map(({ asset_id, type, display_text, version, valid_until }) => ({ asset_id, type, display_text, version, origin: 'AUTOMATIC', valid_until: valid_until || null })),
     user_preferences: publicPreferencesOrNull(store.userPreferences?.get(`${account.account_id}:${conversation.character_id}`)),
     world_state: publicWorldState(currentWorldState(store, account, character))
   };
@@ -1880,7 +1896,7 @@ function acceptStreamingMessage(store, account, conversation, text, lifeEventExt
   if (lifeEventExtractionEnabled) enqueueLifeEventExtraction({ store, account, conversation, message: userMessage });
   const token = `st_${randomUUID()}`;
   const now = Date.now();
-  streamTokens.set(token, { mode: 'live', accountId: account.account_id, conversationId: conversation.conversation_id, text, expiresAt: now + STREAM_TOKEN_TTL_MS, used: false });
+  streamTokens.set(token, { mode: 'live', accountId: account.account_id, conversationId: conversation.conversation_id, userMessageId: userMessage.message_id, text, expiresAt: now + STREAM_TOKEN_TTL_MS, used: false });
   return accepted({
     status: 'ACCEPTED', user_message: userMessage, assistant_message: null, memory_candidate: null,
     stream: { stream_url: `/api/v1/conversation-streams/${token}`, stream_token: token, stream_expires_at: new Date(now + STREAM_TOKEN_TTL_MS).toISOString(), mode: 'live' },
@@ -1974,7 +1990,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
       // 终稿复核：片段全过不代表拼接终稿安全（跨片段可能拼出新表述）。
       if (assessModelOutputAuthority(modelReply.reply_text)) throw apiError(200, 'MODEL_CLAIMED_AUTHORITY', '终稿未通过输出门禁');
       const usage = commitUsage(modelReply);
-      persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true, contextPack, devFlags });
+      persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate: true, contextPack, devFlags, userMessageId: entry.userMessageId });
     } catch (error) {
       if (error?.code === 'OOC_STREAM_REPAIR_REQUIRED' && !signal?.aborted) {
         try {
@@ -1989,7 +2005,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
         }
         emit('message.replaced', { request_id: requestId, reason: 'OOC_REPAIR' });
         const usage = commitUsage(repaired);
-        persistStreamingFinal(store, account, conversation, repaired, { assistantMessageId, emit, requestId, usage, candidate: repaired.ai_generated !== false, contextPack, devFlags });
+        persistStreamingFinal(store, account, conversation, repaired, { assistantMessageId, emit, requestId, usage, candidate: repaired.ai_generated !== false, contextPack, devFlags, userMessageId: entry.userMessageId });
         return;
         } catch (repairError) {
           release();
@@ -2026,7 +2042,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
           }
           emit('message.replaced', { request_id: requestId, reason: 'STREAM_PROVIDER_FALLBACK' });
           const usage = commitUsage(fallbackReply);
-          persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true, contextPack: fallbackContext, devFlags });
+          persistStreamingFinal(store, account, conversation, fallbackReply, { assistantMessageId, emit, requestId, usage, candidate: true, contextPack: fallbackContext, devFlags, userMessageId: entry.userMessageId });
           return;
         } catch {
           // 降级也失败时由下方统一释放额度并返回可重试终态。
@@ -2049,7 +2065,7 @@ function liveConversationStream(requestStore, account, entry, requestId, streami
 
 // 流式终态统一持久化：助手消息（含世界状态快照）与可选候选；拦截/安全路径
 // 不创建候选。最后发 message.completed（断线后客户端以 GET /messages/{id} 恢复终态）。
-function persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate, contextPack = null, devFlags = null }) {
+function persistStreamingFinal(store, account, conversation, modelReply, { assistantMessageId, emit, requestId, usage, candidate, contextPack = null, devFlags = null, userMessageId = null }) {
   const createdAt = new Date().toISOString();
   const contextCharacter = store.characters.get(conversation.character_id);
   const worldState = contextCharacter ? publicWorldState(currentWorldState(store, account, contextCharacter)) : null;
@@ -2066,13 +2082,15 @@ function persistStreamingFinal(store, account, conversation, modelReply, { assis
     recordMessageMemoryRefs({ store, account, conversation, message: assistantMessage, refs: contextPack.memory_refs });
   }
   let memoryCandidate = null;
-  if (candidate && modelReply.memory_candidate && isNewMemoryCandidate(store, account.account_id, conversation.character_id, modelReply.memory_candidate)) {
+  const automatic = candidate && userMessageId ? recordAutomaticMemory(store, account, conversation, store.messages.get(userMessageId)) : null;
+  const candidateSource = ['AUTOMATIC', 'EXISTING', 'REJECTED', 'QUEUED'].includes(automatic?.action) ? null : automatic?.candidate || modelReply.memory_candidate;
+  if (candidate && candidateSource && isNewMemoryCandidate(store, account.account_id, conversation.character_id, candidateSource)) {
     memoryCandidate = {
       candidate_id: store.next('memc'), account_id: account.account_id, character_id: conversation.character_id,
-      state: 'CANDIDATE', version: 1, type: modelReply.memory_candidate.type,
-      normalized_value: modelReply.memory_candidate.normalized_value, display_text: modelReply.memory_candidate.display_text,
-      provider: modelReply.provider, expires_at: plusDays(30), source_message_id: null,
-      conflicts_with: detectAssetConflicts(store, account.account_id, conversation.character_id, modelReply.memory_candidate.display_text)
+      state: 'CANDIDATE', version: 1, type: candidateSource.type,
+      normalized_value: candidateSource.normalized_value, display_text: candidateSource.display_text,
+      provider: modelReply.provider, expires_at: plusDays(30), source_message_id: userMessageId,
+      conflicts_with: detectAssetConflicts(store, account.account_id, conversation.character_id, candidateSource.display_text)
     };
     store.candidates.set(memoryCandidate.candidate_id, memoryCandidate);
   }
@@ -2209,7 +2227,8 @@ function createRealtimeRegistry({ store, provider, textModerator, trialAuthEnabl
         const userMessage = { message_id: scoped.next('msg'), conversation_id: session.conversationId, actor: 'USER', text: session.userText, provider: 'volcengine-realtime', ai_generated: false, created_at: createdAt, ...worldStateSnapshot };
         const assistantMessage = { message_id: scoped.next('msg'), conversation_id: session.conversationId, actor: 'ASSISTANT', text: session.replies.get(payload.replyId), provider: 'volcengine-realtime', model_version: provider.model || 'native-realtime', ai_generated: true, created_at: createdAt, ...worldStateSnapshot };
         scoped.messages.set(userMessage.message_id, userMessage); scoped.messages.set(assistantMessage.message_id, assistantMessage);
-        const source = deriveFactCandidate(userMessage.text, session.context) || deriveEpisodeCandidate({ text: userMessage.text, characterId: conversation.character_id, worldState: session.context.world_state });
+        const automatic = recordAutomaticMemory(scoped, account, conversation, userMessage);
+        const source = ['AUTOMATIC', 'EXISTING', 'REJECTED', 'QUEUED'].includes(automatic?.action) ? null : automatic?.candidate || deriveFactCandidate(userMessage.text, session.context) || deriveEpisodeCandidate({ text: userMessage.text, characterId: conversation.character_id, worldState: session.context.world_state });
         if (source && isNewMemoryCandidate(scoped, account.account_id, conversation.character_id, source)) {
           const candidate = { candidate_id: scoped.next('memc'), account_id: account.account_id, character_id: conversation.character_id, state: 'CANDIDATE', version: 1, type: source.type, normalized_value: source.normalized_value, display_text: source.display_text, provider: 'volcengine-realtime', expires_at: plusDays(30), source_message_id: userMessage.message_id, conflicts_with: detectAssetConflicts(scoped, account.account_id, conversation.character_id, source.display_text) };
           scoped.candidates.set(candidate.candidate_id, candidate);
@@ -2281,6 +2300,14 @@ function callEngineDeps(callProviders, store, devFlags = null) {
     authorize,
     normalizeUnpromptedSelfIntro: normalizeUnpromptedCharacterSelfIntroduction,
     normalizePersonaGender,
+    recordAutomaticMemory: (scopedStore, account, conversation, message) => {
+      const decision = recordAutomaticMemory(scopedStore, account, conversation, message);
+      if (decision?.action !== 'CONFIRM' || !isNewMemoryCandidate(scopedStore, account.account_id, conversation.character_id, decision.candidate)) return decision;
+      const source = decision.candidate;
+      const candidate = { candidate_id: scopedStore.next('memc'), account_id: account.account_id, character_id: conversation.character_id, state: 'CANDIDATE', version: 1, type: source.type, normalized_value: source.normalized_value, display_text: source.display_text, provider: message.provider || 'voice', expires_at: plusDays(30), source_message_id: message.message_id, conflicts_with: detectAssetConflicts(scopedStore, account.account_id, conversation.character_id, source.display_text) };
+      scopedStore.candidates.set(candidate.candidate_id, candidate);
+      return decision;
+    },
     currentWorldState,
     publicWorldState,
     estimateAudioSeconds,
@@ -3270,6 +3297,7 @@ function resolveCandidate(store, account, path, body, context = null) {
   authorize(account, 'WRITE_MEMORY', store);
   const parts = path.split('/');
   const candidate = ownCandidate(store, account.account_id, parts[4]);
+  const proposedFactKey = candidate.normalized_value?.fact_key;
   const action = parts[5];
   if (action === 'undo-reject') {
     if (candidate.state !== 'REJECTED') throw apiError(409, 'STATE_TRANSITION_INVALID', '仅刚刚拒绝的候选记忆可撤销');
@@ -3339,12 +3367,38 @@ function resolveCandidate(store, account, path, body, context = null) {
     candidate.state = 'CONFIRMED';
   }
   candidate.version += 1;
-  const asset = { asset_id: store.next('ras'), account_id: account.account_id, character_id: candidate.character_id, type: candidate.type, value: candidate.normalized_value, display_text: candidate.display_text, state: 'ACTIVE', version: 1, index_state: 'PENDING', source_candidate_id: candidate.candidate_id, created_at: new Date().toISOString() };
+  const asset = { asset_id: store.next('ras'), account_id: account.account_id, character_id: candidate.character_id, type: candidate.type, value: candidate.normalized_value, display_text: candidate.display_text, state: 'ACTIVE', version: 1, index_state: 'PENDING', origin: 'USER_CONFIRMED', source_candidate_id: candidate.candidate_id, created_at: new Date().toISOString() };
+  // Confirming a new value explicitly replaces only conflicting automatic
+  // entries. Confirmed assets are never silently overwritten.
+  const factKey = proposedFactKey || asset.value?.fact_key;
+  if (factKey) for (const previous of store.assets.values()) {
+    if (previous.account_id !== account.account_id || previous.character_id !== candidate.character_id || previous.origin !== 'AUTOMATIC' || previous.state !== 'ACTIVE' || previous.value?.fact_key !== factKey) continue;
+    previous.state = 'SUPERSEDED'; previous.superseded_by = asset.asset_id;
+    invalidateAssetEmbedding(store, previous.asset_id, 'automatic memory superseded by user confirmation');
+  }
   store.assets.set(asset.asset_id, asset);
   // 技术设计 6.3.2/8.5：确认响应返回 index_state=PENDING；异步建索引就绪后变 READY，
   // 未就绪期间该资产仍以确定性词法召回参与上下文（不得丢失召回）。
   enqueueAssetEmbedding({ store, asset });
   return created({ candidate, asset });
+}
+
+// Never invoke the model to decide whether a memory can be activated. The
+// whitelist and account preference are checked against the current transaction.
+function recordAutomaticMemory(store, account, conversation, message) {
+  if (!message || message.actor !== 'USER') return null;
+  const currentAccount = store.account(account.account_id) || account;
+  const decision = decideAutomaticMemory({ text: message.text, enabled: currentAccount.automatic_memory_enabled, assets: [...store.assets.values()], candidates: [...store.candidates.values()], accountId: account.account_id, characterId: conversation.character_id });
+  if (decision.action === 'NONE' && enqueueAutomaticMemory(store, currentAccount, message) === 'active') return { action: 'QUEUED' };
+  if (decision.action !== 'AUTOMATIC') return decision;
+  // Explicit user-set style always takes priority; ask rather than overwrite it.
+  const explicitStyle = decision.candidate.normalized_value.fact_key === 'communication.response_style' && store.userPreferences.get(`${account.account_id}:${conversation.character_id}`)?.style?.reply_length;
+  if (explicitStyle || detectAssetConflicts(store, account.account_id, conversation.character_id, decision.candidate.display_text).length) return { ...decision, action: 'CONFIRM' };
+  const source = decision.candidate;
+  const asset = { asset_id: store.next('ras'), account_id: account.account_id, character_id: conversation.character_id, type: source.type, value: { fact_key: source.normalized_value.fact_key, fact_value: source.normalized_value.fact_value }, display_text: source.automatic_display_text, state: 'ACTIVE', version: 1, index_state: 'PENDING', origin: 'AUTOMATIC', source_candidate_id: null, automatic_source_message_id: message.message_id, valid_until: source.expires_in_days ? plusDays(source.expires_in_days) : null, created_at: new Date().toISOString() };
+  store.assets.set(asset.asset_id, asset);
+  enqueueAssetEmbedding({ store, asset });
+  return { action: 'AUTOMATIC', asset };
 }
 
 function deleteAsset(store, account, path) {
@@ -3381,8 +3435,8 @@ function reviseAsset(store, account, path, body) {
   asset.superseded_at = new Date().toISOString();
   const revision = {
     asset_id: store.next('ras'), account_id: account.account_id, character_id: asset.character_id,
-    type: asset.type, value: normalizedValue, display_text: displayText, state: 'ACTIVE', version: 1, index_state: 'PENDING',
-    source_candidate_id: asset.source_candidate_id, supersedes_asset_id: asset.asset_id, superseded_by: null, created_at: new Date().toISOString()
+    type: asset.type, value: normalizedValue, display_text: displayText, state: 'ACTIVE', version: 1, index_state: 'PENDING', origin: 'USER_CONFIRMED',
+    source_candidate_id: asset.source_candidate_id, automatic_source_message_id: asset.automatic_source_message_id || null, supersedes_asset_id: asset.asset_id, superseded_by: null, created_at: new Date().toISOString()
   };
   asset.superseded_by = revision.asset_id;
   store.assets.set(revision.asset_id, revision);
@@ -3400,7 +3454,7 @@ function timelineEntries(store, accountId, filter) {
   const assetEntries = activeAssets(store, accountId)
     .filter((asset) => !filter || filter === 'all' || filter === typeToFilter(asset.type))
     .map((asset) => ({
-      entry_type: 'CONFIRMED_ASSET', asset_id: asset.asset_id, character_id: asset.character_id,
+      entry_type: asset.origin === 'AUTOMATIC' ? 'AUTOMATIC_ASSET' : 'CONFIRMED_ASSET', origin: asset.origin || 'USER_CONFIRMED', asset_id: asset.asset_id, character_id: asset.character_id,
       type: asset.type, filter_group: typeToFilter(asset.type), display_text: asset.display_text,
       version: asset.version, supersedes_asset_id: asset.supersedes_asset_id ?? null, created_at: asset.created_at
     }))
@@ -3461,7 +3515,7 @@ function typeToFilter(type) {
 
 // AC-06 冲突检测：新候选与同角色 ACTIVE 资产文本 bigram 相似但不相等时标记冲突，
 // 由用户在确认时选择有效版本；模型与系统均不得自动覆盖。
-function detectAssetConflicts(store, accountId, characterId, candidateText) {
+function detectAssetConflicts(store, accountId, characterId, candidateText, normalizedValue) {
   const target = String(candidateText ?? '').trim();
   if (!target) return [];
   return activeAssets(store, accountId)
@@ -3469,9 +3523,16 @@ function detectAssetConflicts(store, accountId, characterId, candidateText) {
     .filter((asset) => {
       const existing = String(asset.display_text ?? '').trim();
       if (!existing || existing === target) return false;
+      const key = asset.value?.fact_key;
+      if (key && normalizedValue && (key === normalizedValue.fact_key ||
+        (Array.isArray(normalizedValue.related_fact_keys) && normalizedValue.related_fact_keys.includes(key)))) {
+        return asset.value.fact_value !== normalizedValue.fact_value;
+      }
       const oldFact = explicitFact(existing);
       const newFact = explicitFact(target);
       if (oldFact && newFact && oldFact.key === newFact.key && oldFact.value !== newFact.value) return true;
+      const autoFact = automaticMemoryCandidate(target);
+      if (autoFact && asset.value?.fact_key) return asset.value.fact_key === autoFact.normalized_value.fact_key && asset.value?.fact_value !== autoFact.normalized_value.fact_value;
       return bigramJaccard(existing, target) >= 0.5;
     })
     .map((asset) => ({ asset_id: asset.asset_id, display_text: asset.display_text, similarity: 'similar' }));
@@ -3507,7 +3568,7 @@ function relationshipProfileExport(store, account) {
     // ai_generated/provider/model_version，下载的音频/图片文件内嵌隐式标识。
     aigc_disclosure: { notice: '本档案中 actor=ASSISTANT 的消息与关联媒体由人工智能生成', ai_message_marker: 'ai_generated', audio_implicit_label: AIGC_MARK_VERSION_AUDIO, image_implicit_label: AIGC_MARK_VERSION_IMAGE },
     characters: [...store.characters.values()].filter((item) => item.account_id === account.account_id).map(({ character_id, name, status, version }) => ({ character_id, name, status, version })),
-    relationship_assets: activeAssets(store, account.account_id).map(({ asset_id, character_id, type, value, display_text, version, created_at }) => ({ asset_id, character_id, type, value, display_text, version, created_at })),
+    relationship_assets: activeAssets(store, account.account_id).map(({ asset_id, character_id, type, value, display_text, version, created_at, origin }) => ({ asset_id, character_id, type, value, display_text, version, created_at, origin: origin || 'USER_CONFIRMED' })),
     conversations: conversations.map(({ conversation_id, character_id, created_at }) => ({ conversation_id, character_id, created_at })),
     messages: [...store.messages.values()].filter((item) => conversationIds.has(item.conversation_id)).map(({ message_id, conversation_id, actor, text, ai_generated, provider, model_version, created_at }) => ({ message_id, conversation_id, actor, text, ai_generated, provider: provider || null, model_version: model_version || null, created_at: created_at || null })),
     // A1/A2 补欠账 + A3 数据域（§6.3 删除矩阵导出面）：事件、跟进许可与
@@ -4372,8 +4433,8 @@ function actionRequestDecisionRoute(store, account, path) {
   return ok({ action_request: publicActionRequest(executed), result: accepted });
 }
 function ownAsset(store, accountId, id) { const item = store.assets.get(id); if (!item || item.account_id !== accountId) throw apiError(404, 'RESOURCE_NOT_FOUND', '关系资产不存在'); return item; }
-function ownCandidates(store, accountId) { return [...store.candidates.values()].filter((item) => item.account_id === accountId && item.state === 'CANDIDATE' && new Date(item.expires_at).getTime() > Date.now()); }
-function activeAssets(store, accountId) { return [...store.assets.values()].filter((item) => item.account_id === accountId && item.state === 'ACTIVE'); }
+function ownCandidates(store, accountId) { return [...store.candidates.values()].filter((item) => item.account_id === accountId && item.state === 'CANDIDATE' && new Date(item.expires_at).getTime() > Date.now()).map((item) => ({ ...item, conflicts_with: detectAssetConflicts(store, accountId, item.character_id, item.display_text, item.normalized_value) })); }
+function activeAssets(store, accountId) { return [...store.assets.values()].filter((item) => item.account_id === accountId && item.state === 'ACTIVE' && (!item.valid_until || new Date(item.valid_until).getTime() > Date.now())); }
 async function accountIdForRequest(req, store, trialAuth = null, { allowDevelopmentTokens = true } = {}) {
   const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const developmentId = TOKENS.get(token);

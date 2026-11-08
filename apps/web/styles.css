@@ -124,6 +124,7 @@ p { margin: 0; }
 .generated-image img { width: 100%; max-height: 480px; object-fit: contain; border-radius: var(--qy-radius-md); background: var(--qy-paper); }
 .asset { display: grid; gap: var(--qy-space-2); }
 .asset small { color: var(--qy-text-secondary); overflow-wrap: anywhere; }
+.asset.timeline-entry > div:first-child { display: grid; gap: var(--qy-space-2); }
 .deletion { border-left: 4px solid var(--qy-gold); }
 .deletion[data-state="COMPLETED"] { border-left-color: var(--qy-success); }
 .deletion[data-state="PARTIAL_FAILED"], .error-state { border-left: 4px solid var(--qy-danger); }

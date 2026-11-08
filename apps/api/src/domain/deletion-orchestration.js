@@ -272,7 +272,7 @@ function replayConversationDeletion(store, account, conversationId, now = new Da
   for (const messageId of messageIds) store.messages.delete(messageId);
   for (const [feedbackId, feedback] of store.messageFeedback) if (messageIds.has(feedback.message_id)) store.messageFeedback.delete(feedbackId);
   for (const candidate of store.candidates.values()) if (candidateIds.has(candidate.candidate_id)) { candidate.state = 'DELETED'; candidate.deleted_at = now; }
-  for (const asset of store.assets.values()) if (candidateIds.has(asset.source_candidate_id) && asset.state !== 'DELETED') { asset.state = 'DELETED'; asset.deleted_at = now; invalidateAssetEmbedding(store, asset.asset_id, 'conversation deletion replay'); }
+  for (const asset of store.assets.values()) if ((candidateIds.has(asset.source_candidate_id) || messageIds.has(asset.automatic_source_message_id)) && asset.state !== 'DELETED') { asset.state = 'DELETED'; asset.deleted_at = now; invalidateAssetEmbedding(store, asset.asset_id, 'conversation deletion replay'); }
   conversation.status = 'DELETED';
   conversation.deleted_at = now;
   account.revocation_epoch += 1;

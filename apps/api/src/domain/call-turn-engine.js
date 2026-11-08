@@ -309,6 +309,9 @@ async function runCallTurn(deps, { store, account, call, turn, emit, signal }, c
   }, call);
   store.messages.set(assistantMessage.message_id, assistantMessage);
   ctx.partialPersisted = true;
+  if (!replaced && typeof deps.recordAutomaticMemory === 'function') {
+    deps.recordAutomaticMemory(store, account, conversation, userMessage);
+  }
   // 来源落库（通道三：通话）：与文字/SSE 同一份注入快照语义；安全替换路径
   // （replaced=true）不是模型正常产物，不记引用。deps 未注入时静默跳过。
   if (!replaced && typeof deps.recordMessageMemoryRefs === 'function' && Array.isArray(contextPack.memory_refs) && contextPack.memory_refs.length > 0) {

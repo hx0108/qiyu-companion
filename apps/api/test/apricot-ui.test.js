@@ -30,7 +30,7 @@ test('homepage escapes service text and never fabricates relationship duration o
   assert.ok(!html.includes('126'));
   assert.ok(!html.includes('那个有阳光的午后'));
   assert.ok(html.includes('disabled aria-label="语音陪伴暂不可用"'));
-  assert.ok(html.includes('还没有确认的回忆'));
+  assert.ok(html.includes('还没有回忆'));
 });
 
 test('profile retains secondary capabilities without removed persona tagline', async () => {
@@ -103,15 +103,25 @@ test('approved SVG geometry is reused exactly from the confirmed prototype', asy
   assert.deepEqual(APRICOT_ICONS, { ...nav, ...home });
 });
 
-test('inline memory card escapes server text and carries the selected candidate identity', async () => {
-  const { apricotCandidate } = await ui();
-  assert.equal(apricotCandidate(null), '');
-  const card = apricotCandidate({ candidate_id: 'candidate-1', display_text: '<unsafe>' }, true);
-  assert.ok(card.includes('&lt;unsafe&gt;'));
-  assert.equal((card.match(/data-candidate-id="candidate-1"/g) || []).length, 2);
-  assert.ok(card.includes('confirm-inline-candidate'));
-  assert.ok(card.includes('reject-inline-candidate'));
-  assert.equal((card.match(/ disabled/g) || []).length, 2);
+test('pending memories show a count and can be reviewed without exposing text in the collapsed view', async () => {
+  const { apricotNav, apricotMemoryReview, pendingMemoryCandidates } = await ui();
+  const pending = pendingMemoryCandidates([
+    { candidate_id: 'candidate-1', type: 'development_note', state: 'CANDIDATE', display_text: '<unsafe>' },
+    { candidate_id: 'candidate-2', type: 'life_event', state: 'PENDING', display_text: '面试' },
+    { candidate_id: 'candidate-3', state: 'CONFIRMED' },
+  ]);
+  assert.equal(pending.length, 2);
+  assert.match(apricotNav('chat', pending.length), /回忆，2 条待确认/);
+  assert.doesNotMatch(apricotNav('chat', 0), /memory-count-badge/);
+  assert.equal(apricotMemoryReview([]), '');
+  assert.doesNotMatch(apricotMemoryReview(pending), /unsafe/);
+  const review = apricotMemoryReview(pending, { expanded: true });
+  assert.match(review, /近况/);
+  assert.match(review, /&lt;unsafe&gt;/);
+  assert.match(review, /confirm-inline-candidate" data-candidate-id="candidate-1"/);
+  assert.match(review, /open-candidate" data-candidate-id="candidate-2"/);
+  assert.match(review, /reject-inline-candidate" data-candidate-id="candidate-2"/);
+  assert.match(apricotMemoryReview(pending, { expanded: true, editingId: 'candidate-1', draft: '新措辞' }), /id="candidate-edit">新措辞/);
 });
 
 test('same-origin server exposes approved presentation assets without opening arbitrary files', async t => {

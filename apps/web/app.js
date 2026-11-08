@@ -3,10 +3,10 @@ import { clearEncryptedSession, loadEncryptedSession, saveEncryptedSession } fro
 import { MAX_RECORDING_MS, MIN_HOLD_MS, createPcmWavRecorder, recordingBlobToWav, selectRecordingMimeType, shouldCancelHold } from './media-input.js';
 import { AudioOutPipeline } from './call-client.js';
 import { RealtimeCallClient } from './realtime-call-client.js?v=20261021-polish-v25';
-import { lifeEventCandidateSheet, collectLifeEventCandidateFields, memoryReferenceSheet, lifeEventTimelineCard, lifeEventReviseForm, fromLocalInputValue } from './memory-panel.js';
+import { lifeEventCandidateSheet, collectLifeEventCandidateFields, memoryReferenceSheet, lifeEventTimelineCard, lifeEventReviseForm, fromLocalInputValue } from './memory-panel.js?v=20261107-memory-review-v34';
 import { companionCardShell, companionCardBody, companionCardFallback, eventCardSheet, planPageCard } from './companion-cards.js';
 
-import { apricotNav, apricotHome, apricotProfile, apricotFrame, apricotHeader, apricotChatMenu, formatVoiceDuration, apricotAvatar, apricotCandidate, APRICOT_ACTIONS, replyTextMarkup, apricotBackButton, apricotPersonaEditor, apricotPersonaVersions, apricotSettingsPage, personaFeedbackPrefix } from "./apricot-ui.js?v=20261021-chat-menu-v32";
+import { apricotNav, apricotHome, apricotProfile, apricotFrame, apricotHeader, apricotChatMenu, formatVoiceDuration, apricotAvatar, apricotMemoryReview, pendingMemoryCandidates, APRICOT_ACTIONS, replyTextMarkup, apricotBackButton, apricotPersonaEditor, apricotPersonaVersions, apricotSettingsPage, personaFeedbackPrefix } from "./apricot-ui.js?v=20261107-memory-review-v34";
 
 const API_BASE = "/api/v1";
 const DEVELOPMENT_BEARER_TOKEN = "dev-alice-token";
@@ -39,6 +39,7 @@ const state = {
   proactiveMessages: [],
   deletionJob: null,
   rawInteractionRetentionDays: null,
+  automaticMemoryEnabled: null,
   route: "bootstrap",
   secondaryOrigin: "chat",
   secondaryParents: {},
@@ -102,6 +103,7 @@ const state = {
   trialFeedback: [],
   notifications: [],
   lastRejectedCandidate: null,
+  memoryReviewExpanded: false,
   // 1:1 通话页（route="call"）：骨架只渲染一次，HUD/字幕由 call-client 事件
   // 定点更新；通话结束回聊天页落通话记录卡片。
   call: null,
@@ -779,14 +781,14 @@ async function savePreferences(form) {
   finally { setBusy(false); }
 }
 
-// 高光沉淀（方向二）：点赞最新回复 → 服务端提炼行为模式候选 → 记忆横幅确认。
+// 高光沉淀（方向二）：点赞最新回复 → 服务端提炼行为模式候选 → 回忆页确认。
 async function praiseMessage(messageIdValue) {
   if (!messageIdValue) return;
   setBusy(true);
   try {
     const payload = await api(`/messages/${encodeURIComponent(messageIdValue)}/feedback`, { method: "POST", idempotent: uuid(), body: { type: "PRAISE", severity: "LOW" } });
     await refreshMemoryAndAssets();
-    setToast(payload.skill_candidate ? "已把这句回应沉淀为待确认的行为模式，可在上方横幅里确认。" : "已记录你的认可。");
+    setToast(payload.skill_candidate ? "这条行为模式可在「回忆」里确认。" : "已记录你的认可。");
   } catch (error) { setToast(serverMessage(error)); }
   finally { setBusy(false); }
 }
@@ -1007,6 +1009,11 @@ async function sendMessage(form) {
       render();
     }
     await refreshMemoryAndAssets();
+    const sentMessageId = payload?.user_message?.message_id;
+    if (sentMessageId && /^(?:请|帮我)?记住/.test(content) &&
+        pendingMemoryCandidates(state.candidates).some(candidate => candidate.source_message_id === sentMessageId)) {
+      setToast("这条可以在「回忆」里确认。");
+    }
   } catch (error) {
     if (error.payload?.error?.code === "USER_PAUSED") {
       // 退出意图已暂停普通互动：保留输入内容，提供显式恢复入口（AC-10：不以话术阻碍退出，也不困住用户）。
@@ -1519,9 +1526,19 @@ async function setRawInteractionRetention(days) {
 async function openDataCenter() {
   setBusy(true);
   try {
-    const payload = await api("/privacy/raw-interaction-retention");
+    const [payload, automaticMemory] = await Promise.all([api("/privacy/raw-interaction-retention"), api("/privacy/automatic-memory")]);
     state.rawInteractionRetentionDays = payload?.raw_interaction_retention_days ?? null;
+    state.automaticMemoryEnabled = automaticMemory?.enabled === true;
     state.route = "data";
+  } catch (error) { setToast(serverMessage(error)); } finally { setBusy(false); }
+}
+
+async function setAutomaticMemory(enabled) {
+  setBusy(true);
+  try {
+    const payload = await api('/privacy/automatic-memory', { method: 'POST', idempotent: uuid(), body: { enabled } });
+    state.automaticMemoryEnabled = payload.enabled === true;
+    setToast(enabled ? '自动记忆已开启。你可以随时查看、修订或删除。' : '自动记忆已关闭；已保存的记忆可在回忆中管理。');
   } catch (error) { setToast(serverMessage(error)); } finally { setBusy(false); }
 }
 
@@ -2030,6 +2047,10 @@ async function resolveCandidate(kind) {
   const id = candidateId(candidate);
   const expectedVersion = candidateVersion(candidate);
   const editedText = state.confirmEdit.trim();
+  if (kind === "confirm-edited" && candidate.type !== "life_event" && !editedText) {
+    setToast("请填写要记住的内容。");
+    return;
+  }
   let path = `/memory-candidates/${encodeURIComponent(id)}/reject`;
   let body = undefined;
   if (kind === "confirm") path = `/memory-candidates/${encodeURIComponent(id)}/confirm`;
@@ -2052,6 +2073,8 @@ async function resolveCandidate(kind) {
     state.selectedCandidate = null;
     state.confirmEdit = "";
     state.eventDraft = null;
+    state.candidates = state.candidates.filter(item => candidateId(item) !== id);
+    if (state.route === "candidate") state.route = "assets";
     await refreshMemoryAndAssets();
   } catch (error) {
     setToast(serverMessage(error));
@@ -2115,7 +2138,7 @@ function renderNotices() {
   const facts = [
     ["spark", "你正在与 AI 互动", "角色的文字、语音与图片均由人工智能生成并标识。"],
     ["shield", "仅面向 18 岁以上用户", "年龄风险较高时，会进入增强核验；未成年人不可使用虚拟伴侣服务。"],
-    ["archive", "关系资产由你确认", "候选记忆不会自动成为长期事实，你可以查看、修改或删除。"]
+    ["archive", "回忆由你掌握", "重要记忆由你确认；你也可以选择开启自动记忆，随时管理。"]
   ].map(([icon, title, copy]) => `<article class="fact"><span class="fact-icon">${prototypeIcon(icon)}</span><div><strong>${title}</strong><small>${copy}</small></div></article>`).join("");
   const noticeChecks = pending.map((notice) => {
     const id = String(notice.notice_id);
@@ -2283,12 +2306,10 @@ function renderWorldState() {
 function renderHome() {
   return apricotHome({ name: state.character?.name ?? "当前角色", portrait: selectedPortrait().src, assets: state.assets, candidates: state.candidates, canCall: Boolean(realtimeCallAvailable() && characterId()), createdAt: state.character?.created_at, night: state.theme === "night", busy: state.busy, icon: prototypeIcon });
 }
-function renderProfile() { return apricotProfile({ name: state.character?.name ?? "当前角色", portrait: selectedPortrait().src, night: state.theme === "night", icon: prototypeIcon }); }
+function renderProfile() { return apricotProfile({ pendingCount: pendingMemoryCandidates(state.candidates).length, name: state.character?.name ?? "当前角色", portrait: selectedPortrait().src, night: state.theme === "night", icon: prototypeIcon }); }
 function renderChat() {
   const characterName = state.character?.name ?? "当前角色";
-  const candidate = state.candidates.find((item) => ["CANDIDATE", "PENDING"].includes(item.state));
   const ttsFailure = state.lastTtsJob ? `<section class="rights" data-media-type="TTS" data-state="${escapeHtml(state.lastTtsJob.state)}">${prototypeIcon("shield", 17)}<span><b>角色语音未生成</b><br>${state.lastTtsJob.failure_code === "ENTITLEMENT_QUOTA_EXCEEDED" ? '需先领取 7 天完整体验，或当前语音额度已用完。' : `文字回复仍可正常阅读。失败码：${escapeHtml(state.lastTtsJob.failure_code ?? "未返回")}。`}${state.lastTtsJob.failure_code === "ENTITLEMENT_QUOTA_EXCEEDED" ? `<br><button class="btn btn-line" data-action="open-subscription">查看权益与领取试用</button>` : ""}</span></section>` : "";
-  const memoryBanner = apricotCandidate(candidate, state.busy, prototypeIcon("bookmark", 21));
   const paused = state.userPaused ? `<button class="memory-banner" data-action="resume-interaction"><span>${prototypeIcon("shield", 18)}</span><span><b>普通互动已暂停</b><small>由你恢复前，不会继续生成角色回复</small></span></button>` : "";
   // 转写完成不再弹"检查转写后再发送"面板：确认由前端自动完成（并触发原始音频
   // 删除），文字直接回填发送框；只有失败时才保留错误面板供删除原音频。
@@ -2308,7 +2329,7 @@ function renderChat() {
     : `<textarea name="message" rows="1" maxlength="2000" autocomplete="off" placeholder="和${escapeHtml(characterName)}说点什么…" ${state.busy ? "disabled" : ""}>${escapeHtml(state.pendingTranscript)}</textarea>`;
   const sendButton = voiceMode ? "" : `<button class="icon-btn send" aria-label="发送" ${state.busy ? "disabled" : ""}>${prototypeIcon("send", 25)}</button>`;
   const latestAssistantId = messageId([...state.messages].reverse().find((item) => (item.actor ?? item.role) === "ASSISTANT") ?? {});
-  return `<section class="screen qiyu-prototype app-screen apricot-chat ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><button type="button" class="avatar-picker-trigger" data-action="open-portrait-picker" aria-label="更换角色头像">${apricotAvatar(selectedPortrait().src, characterName)}</button><div><b title="${escapeHtml(characterName)}">${escapeHtml(characterName)}</b></div></div><div class="header-actions">${realtimeCallAvailable() && characterId() ? `<button class="icon-btn soft" data-action="start-call" aria-label="发起语音通话">${prototypeIcon("phone",26)}</button>` : ""}<button class="icon-btn soft" data-action="open-chat-menu" aria-label="陪伴设置" aria-haspopup="dialog" aria-controls="chat-menu-dialog" aria-expanded="${state.chatMenuOpen}">${prototypeIcon("more",26)}</button></div></header><div class="chat-scroll"><div class="date-rule">今天</div>${paused}${ttsFailure}<section aria-label="对话消息">${state.messages.map((message) => messageMarkup(message, latestAssistantId)).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section>${memoryBanner}</div><div class="bottom-dock"><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("plus", 26)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</div></section>`;
+  return `<section class="screen qiyu-prototype app-screen apricot-chat ${state.theme === "night" ? "night" : "paper"}"><header class="app-header"><div class="identity"><button type="button" class="avatar-picker-trigger" data-action="open-portrait-picker" aria-label="更换角色头像">${apricotAvatar(selectedPortrait().src, characterName)}</button><div><b title="${escapeHtml(characterName)}">${escapeHtml(characterName)}</b></div></div><div class="header-actions">${realtimeCallAvailable() && characterId() ? `<button class="icon-btn soft" data-action="start-call" aria-label="发起语音通话">${prototypeIcon("phone",26)}</button>` : ""}<button class="icon-btn soft" data-action="open-chat-menu" aria-label="陪伴设置" aria-haspopup="dialog" aria-controls="chat-menu-dialog" aria-expanded="${state.chatMenuOpen}">${prototypeIcon("more",26)}</button></div></header><div class="chat-scroll"><div class="date-rule">今天</div>${paused}${ttsFailure}<section aria-label="对话消息">${state.messages.map((message) => messageMarkup(message, latestAssistantId)).join("") || '<div class="empty-state">从一句问候开始，让这段关系慢慢展开。</div>'}</section></div><div class="bottom-dock"><form id="message-form" class="composer-wrap">${asrPanel}${imagePanel}${recordingIndicator}<div class="composer">${inputToggle}${inputArea}<label class="icon-btn context-image-picker" aria-label="上传聊天图片">${prototypeIcon("plus", 26)}<input id="context-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></label>${sendButton}</div></form>${prototypeNav("chat")}</div></section>`;
 }
 
 // ---- 1:1 通话页（route="call"，豆包式免提）----
@@ -2546,16 +2567,23 @@ function deletionMarkup() {
 }
 
 function renderAssets() {
+  const pending = pendingMemoryCandidates(state.candidates);
+  const review = apricotMemoryReview(pending, {
+    expanded: state.memoryReviewExpanded,
+    editingId: candidateId(state.selectedCandidate),
+    draft: state.confirmEdit,
+    busy: state.busy,
+  });
   const filter = state.timelineFilter ?? "all";
   const timelineCards = (state.timeline ?? []).map((entry) => entry.entry_type === "LIFE_EVENT"
     ? lifeEventTimelineCard(entry, { busy: state.busy })
-    : `<article class="asset timeline-entry"><div><b>${escapeHtml(entry.display_text ?? entry.type)}</b><small>${escapeHtml(new Date(entry.created_at).toLocaleString())} · ${FILTER_GROUP_LABELS[entry.filter_group] ?? FILTER_GROUP_LABELS[entry.type] ?? "记录"} · 版本 ${escapeHtml(entry.version ?? "?")}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>删除</button></div></article>`).join("");
+    : `<article class="asset timeline-entry"><div><b>${escapeHtml(entry.display_text ?? entry.type)}</b><small>${escapeHtml(new Date(entry.created_at).toLocaleString())} · ${entry.origin === 'AUTOMATIC' ? '自动记住' : '你已确认'} · ${FILTER_GROUP_LABELS[entry.filter_group] ?? FILTER_GROUP_LABELS[entry.type] ?? "记录"} · 版本 ${escapeHtml(entry.version ?? "?")}</small></div><div class="button-row"><button class="btn btn-line" data-action="revise-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>修订</button><button class="btn btn-danger" data-action="delete-asset" data-asset-id="${escapeHtml(entry.asset_id)}" ${state.busy ? "disabled" : ""}>删除</button></div></article>`).join("");
   // 六项能力 A2：改期撤销提醒后的重新确认卡（放最上面，看完即可处理）。
   const regrant = state.pendingFollowupRegrant;
   const regrantCard = regrant ? `<section class="card followup-regrant"><b>提醒已随改期关闭</b><p class="muted">事件已改到新时间，原来的跟进提醒已取消（${escapeHtml(regrant.jobs_cancelled)} 条任务）。确认事件 ≠ 允许提醒——按新时间重新开启需要你再确认一次。</p><div class="button-row"><button class="btn btn-primary" data-action="regrant-followup" ${state.busy ? "disabled" : ""}>为新时间重新开启提醒</button><button class="btn btn-line" data-action="dismiss-regrant" ${state.busy ? "disabled" : ""}>不用了</button></div></section>` : "";
   const primaryChips = [["all", "全部"], ["memory", "记忆"], ["commitment", "约定"]].map(([value,label]) => `<button class="btn ${filter === value ? "btn-primary" : "btn-line"}" data-timeline-filter="${value}" ${state.busy ? "disabled" : ""}>${label}</button>`).join("");
   const extraChips = [["boundary","边界"],["event","事件"]].map(([value,label]) => `<button class="btn btn-line" data-timeline-filter="${value}">${label}</button>`).join("");
-  return apricotFrame(`<div class="apricot-scroll">${apricotHeader("我们的回忆", `<button class="icon-btn soft" data-action="remember-in-chat" aria-label="添加回忆">${prototypeIcon("plus",26)}</button>`)}<div class="apricot-filter" role="group" aria-label="回忆分类">${primaryChips}</div><div class="stack">${regrantCard}${deletionMarkup()}${timelineCards || '<div class="empty-state">当前筛选下还没有回忆。</div>'}</div><details><summary>更多回忆管理</summary><div class="apricot-filter">${extraChips}</div><div class="flow-actions"><button class="btn btn-line" data-action="download-relationship-profile">下载关系档案 JSON</button><button class="btn btn-line" data-action="refresh-assets">刷新回忆</button><button class="btn btn-line" data-action="open-data">数据与保留周期</button></div></details></div>`, "assets", state.theme === "night");
+  return apricotFrame(`<div class="apricot-scroll">${apricotHeader("我们的回忆", `<button class="icon-btn soft" data-action="remember-in-chat" aria-label="添加回忆">${prototypeIcon("plus",26)}</button>`)}<div class="apricot-filter" role="group" aria-label="回忆分类">${primaryChips}</div>${review}<div class="stack">${regrantCard}${deletionMarkup()}${timelineCards || '<div class="empty-state">当前筛选下还没有回忆。</div>'}</div><details><summary>更多回忆管理</summary><div class="apricot-filter">${extraChips}</div><div class="flow-actions"><button class="btn btn-line" data-action="download-relationship-profile">下载关系档案 JSON</button><button class="btn btn-line" data-action="refresh-assets">刷新回忆</button><button class="btn btn-line" data-action="open-data">数据与保留周期</button></div></details></div>`, "assets", state.theme === "night", "", pending.length);
 }
 
 function trialFeedbackMarkup() {
@@ -2570,8 +2598,9 @@ function renderDataCenter() {
   return apricotSettingsPage("数据与隐私", `
   <section class="settings-panel"><h2>账户</h2><div class="list"><button class="list-row" data-action="open-subscription"><span class="list-ico">${prototypeIcon("spark", 24)}</span><span class="list-copy"><b>试用与可用能力</b><small>查看试用状态、语音权益和到期时间</small></span></button></div></section>
   <section class="settings-panel settings-rights"><span class="settings-symbol">${prototypeIcon("lock", 24)}</span><h2>数据权利独立于关系</h2><p>聊天记录、候选记忆和确认的关系资产分层保存；删除后是否完成以服务端回执为准。</p></section>
+  <section class="settings-panel"><div class="settings-section-head"><h2>自动记忆</h2><small>${state.automaticMemoryEnabled ? '已开启' : '已关闭'}</small></div><p>开启后，系统可自动记住少量明确的沟通、饮品偏好和近期面试准备；近期事项的自动记忆 30 天后停止召回，聊天记录仍按保留周期管理。重要或有冲突的信息仍需确认。你可查看、修订或删除；关闭不会删除已保存的记忆。</p><div class="segment" role="group" aria-label="自动记忆"><button class="${state.automaticMemoryEnabled === true ? 'on' : ''}" data-action="enable-automatic-memory" aria-pressed="${state.automaticMemoryEnabled === true}" ${state.busy ? 'disabled' : ''}>开启</button><button class="${state.automaticMemoryEnabled === false ? 'on' : ''}" data-action="disable-automatic-memory" aria-pressed="${state.automaticMemoryEnabled === false}" ${state.busy ? 'disabled' : ''}>关闭</button></div></section>
   <section class="settings-panel"><div class="settings-section-head"><h2>聊天保留周期</h2><small>当前 ${escapeHtml(retentionText)}</small></div><div class="segment" role="group" aria-label="聊天保留周期"><button class="${retention === 30 ? "on" : ""}" data-action="set-retention-30" aria-pressed="${retention === 30}" ${state.busy ? "disabled" : ""}>30 天</button><button class="${retention === 90 ? "on" : ""}" data-action="set-retention-90" aria-pressed="${retention === 90}" ${state.busy ? "disabled" : ""}>90 天</button></div></section>
-  <section class="settings-panel"><div class="settings-section-head"><h2>关系资产</h2><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 24)}</span><span class="list-copy"><b>导出我的数据</b><small>关系档案、当前可见文本与确认记忆</small></span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 24)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修订或删除确认内容</small></span></button><button class="list-row" data-action="open-safety"><span class="list-ico">${prototypeIcon("shield", 24)}</span><span class="list-copy"><b>帮助与反馈</b><small>联系人、举报、申诉和紧急帮助</small></span></button></div></section>
+  <section class="settings-panel"><div class="settings-section-head"><h2>关系资产</h2><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 24)}</span><span class="list-copy"><b>导出我的数据</b><small>关系档案、当前可见文本与回忆</small></span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 24)}</span><span class="list-copy"><b>管理关系资产</b><small>查看、修订或删除回忆</small></span></button><button class="list-row" data-action="open-safety"><span class="list-ico">${prototypeIcon("shield", 24)}</span><span class="list-copy"><b>帮助与反馈</b><small>联系人、举报、申诉和紧急帮助</small></span></button></div></section>
   ${trialFeedbackMarkup()}${deletionMarkup()}
   <section class="settings-panel"><h2>删除与注销</h2><p class="muted">订阅不影响数据权利</p><div class="list"><button class="list-row settings-danger" data-action="delete-account" ${state.busy ? "disabled" : ""}><span class="list-ico">${prototypeIcon("trash", 24)}</span><span class="list-copy"><b>注销账户</b><small>终止访问并进入可审计删除流程</small></span></button></div></section>
   `, { night: state.theme === "night" });
@@ -2927,7 +2956,7 @@ function prototypeShell(content, step) {
   return `<section class="screen qiyu-prototype paper"><header class="brandline"><span class="wordmark">栖语</span><span class="step">${escapeHtml(step)}</span></header><div class="orbit"></div>${content}</section>`;
 }
 
-function prototypeNav(active) { return apricotNav(active === "timeline" ? "assets" : active); }
+function prototypeNav(active) { return apricotNav(active === "timeline" ? "assets" : active, pendingMemoryCandidates(state.candidates).length); }
 
 function screen(content) { return `<section class="screen">${content}</section>`; }
 
@@ -3296,6 +3325,25 @@ document.addEventListener("click", (event) => {
   }
   if (action === "toggle-theme") { state.theme = state.theme === "day" ? "night" : "day"; render(); }
   if (action === "open-assets") { state.route = "assets"; render(); }
+  if (action === "toggle-memory-review") {
+    state.memoryReviewExpanded = !state.memoryReviewExpanded;
+    render();
+    app.querySelector('[data-action="toggle-memory-review"]')?.focus();
+  }
+  if (action === "edit-memory-review") {
+    const candidate = pendingMemoryCandidates(state.candidates).find(item => String(candidateId(item)) === button.dataset.candidateId);
+    if (candidate) {
+      state.selectedCandidate = candidate;
+      state.confirmEdit = candidate.display_text ?? "";
+      render();
+      app.querySelector("#candidate-edit")?.focus();
+    }
+  }
+  if (action === "cancel-memory-edit") {
+    state.selectedCandidate = null;
+    state.confirmEdit = "";
+    render();
+  }
   if (action === "open-character-profile") openCharacterProfile();
   if (action === "open-world-state") openWorldState();
   if (action === "reset-world-state") resetWorldState();
@@ -3335,7 +3383,7 @@ document.addEventListener("click", (event) => {
   if (action === "remove-emergency-contact") removeEmergencyContact();
   if (action === "delete-account") deleteAccount();
   if (action === "dismiss-reminder") { state.continuousReminder = null; render(); }
-  if (action === "back-chat") { state.route = button.closest('.bottom-nav') ? "chat" : state.secondaryParents[state.route] ?? state.secondaryOrigin; render(); }
+  if (action === "back-chat") { if (state.route === "candidate") { state.selectedCandidate = null; state.confirmEdit = ""; state.eventDraft = null; } state.route = button.closest('.bottom-nav') ? "chat" : state.secondaryParents[state.route] ?? state.secondaryOrigin; render(); }
   if (action === "start-call") startVoiceCall();
   if (action === "call-mute") toggleCallMute();
   if (action === "call-interrupt") { if (typeof callClient?.bargeIn === "function") callClient.bargeIn(); else if (callClient?.stopPlayback) { if (callClient.replyId) callClient.blockedReplies.add(callClient.replyId); callClient.stopPlayback(); callClient.setPhase("ready"); } }
@@ -3363,8 +3411,11 @@ document.addEventListener("click", (event) => {
   if (action === "download-relationship-profile") downloadRelationshipProfile();
   if (action === "set-retention-30") setRawInteractionRetention(30);
   if (action === "set-retention-90") setRawInteractionRetention(90);
+  if (action === "enable-automatic-memory") setAutomaticMemory(true);
+  if (action === "disable-automatic-memory") setAutomaticMemory(false);
   if (action === "delete-conversation") deleteCurrentConversation();
   if (action === "open-candidate") {
+    state.memoryReviewExpanded = true;
     state.selectedCandidate = state.candidates.find((candidate) => String(candidateId(candidate)) === button.dataset.candidateId) ?? null;
     state.confirmEdit = state.selectedCandidate?.display_text ?? state.selectedCandidate?.normalized_value ?? "";
     state.route = "candidate";

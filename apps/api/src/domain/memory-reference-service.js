@@ -13,7 +13,7 @@ const MEMORY_REFS_CAP = 20;
 // 权重排序，排最后的先丢）。
 function buildMemoryRefs(contextPack) {
   const refs = [];
-  const assets = Array.isArray(contextPack?.confirmed_assets) ? contextPack.confirmed_assets : [];
+  const assets = [...(Array.isArray(contextPack?.confirmed_assets) ? contextPack.confirmed_assets : []), ...(Array.isArray(contextPack?.automatic_assets) ? contextPack.automatic_assets : [])];
   for (const asset of assets) {
     if (refs.length >= MEMORY_REFS_CAP) break;
     if (!asset?.asset_id) continue;
@@ -63,11 +63,12 @@ function resolveMemoryRef(store, accountId, ref) {
     const asset = store.assets.get(ref.id);
     if (!asset || asset.account_id !== accountId) return { kind: 'ASSET', id: ref.id, version: ref.version ?? null, available: false, reason: 'MISSING' };
     if (asset.state === 'DELETED') return { kind: 'ASSET', id: ref.id, version: ref.version ?? null, available: false, reason: 'DELETED' };
+    if (asset.valid_until && new Date(asset.valid_until).getTime() <= Date.now()) return { kind: 'ASSET', id: ref.id, version: ref.version ?? null, available: false, reason: 'EXPIRED' };
     if (asset.state === 'SUPERSEDED') return { kind: 'ASSET', id: ref.id, version: ref.version ?? null, available: false, reason: 'SUPERSEDED', current_asset_id: asset.superseded_by ?? null };
     if (ref.version !== undefined && ref.version !== null && ref.version !== asset.version) {
       return { kind: 'ASSET', id: ref.id, version: ref.version, available: false, reason: 'SUPERSEDED', current_version: asset.version };
     }
-    return { kind: 'ASSET', id: asset.asset_id, version: asset.version, available: true, reason: null, display_text: asset.display_text, type: asset.type };
+    return { kind: 'ASSET', id: asset.asset_id, version: asset.version, available: true, reason: null, display_text: asset.display_text, type: asset.type, origin: asset.origin || 'USER_CONFIRMED' };
   }
   return { kind: ref?.kind ?? 'UNKNOWN', id: ref?.id ?? null, version: ref?.version ?? null, available: false, reason: 'UNSUPPORTED' };
 }

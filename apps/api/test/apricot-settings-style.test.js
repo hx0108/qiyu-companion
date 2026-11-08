@@ -136,11 +136,11 @@ test('settings forms cannot inherit shrinking onboarding flex layout or undersiz
 });
 
 test('versioned app imports and cached settings assets advance together', () => {
-  const version = '20261021-chat-menu-v32';
+  const version = '20261107-memory-review-v34';
   const index = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
   const worker = fs.readFileSync(path.join(web, 'service-worker.js'), 'utf8');
   assert.ok(index.includes(`app.js?v=${version}`) && index.includes(`apricot.css?v=${version}`));
   assert.ok(source.includes(`apricot-ui.js?v=${version}`));
   assert.ok(worker.includes(`/apricot-ui.js?v=${version}`) && worker.includes(`/apricot.css?v=${version}`));
-  assert.ok(worker.includes('qiyu-shell-v32-apricot'));
+  assert.ok(worker.includes('qiyu-shell-v34-memory-review'));
 });
