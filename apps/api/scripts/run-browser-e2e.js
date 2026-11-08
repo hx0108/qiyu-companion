@@ -72,7 +72,7 @@ async function main() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const { browser, close: closeBrowser } = await launchIsolatedBrowser({ channel: process.env.QIYU_E2E_BROWSER_CHANNEL || 'msedge', headless: true, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${fakeMicWav.replace(/\\/g, '/')}`] });
-  const page = await browser.newPage({ serviceWorkers: 'block' });
+  const page = await browser.newPage({ serviceWorkers: 'block', timezoneId: fixtureTimeZone });
   const consoleErrors = [];
   const expectedFailures = [];
   page.on('console', (message) => {
@@ -896,11 +896,16 @@ function reviewerHeaders() {
   return { Authorization: 'Bearer reviewer-dev-token', 'Content-Type': 'application/json', 'Idempotency-Key': `e2e-${Date.now()}-${Math.random().toString(16).slice(2)}` };
 }
 
-// datetime-local 本地值（YYYY-MM-DDTHH:mm）。
+const fixtureTimeZone = 'Asia/Shanghai';
+const fixtureDateTime = new Intl.DateTimeFormat('en-GB', {
+  timeZone: fixtureTimeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+});
+
+// Match the browser time zone when producing datetime-local fixture values.
 function toLocalInput(ms) {
-  const date = new Date(ms);
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const fields = Object.fromEntries(fixtureDateTime.formatToParts(ms).map(({ type, value }) => [type, value]));
+  return `${fields.year}-${fields.month}-${fields.day}T${fields.hour}:${fields.minute}`;
 }
 
 // 生活事件确认 sheet 全流程（A1 内联逻辑固化，A2 复用）：发消息 → 等提取
