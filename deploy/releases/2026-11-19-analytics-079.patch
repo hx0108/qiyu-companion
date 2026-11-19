@@ -1,0 +1,567 @@
+--- /dev/null
++++ b/apps/api/scripts/purge-expired-trial-behavior.sql
+@@ -0,0 +1,11 @@
++WITH due AS (
++  SELECT account_id, event_id
++  FROM trial_behavior_events
++  WHERE received_at < statement_timestamp() - INTERVAL '30 days'
++  ORDER BY received_at
++  LIMIT 2000
++  FOR UPDATE SKIP LOCKED
++)
++DELETE FROM trial_behavior_events AS event
++USING due
++WHERE event.account_id = due.account_id AND event.event_id = due.event_id;
+--- a/apps/api/scripts/run-workers.js
++++ b/apps/api/scripts/run-workers.js
+@@ -1,4 +1,7 @@
+ 'use strict';
++const trialBehaviorPurgeSql = require('node:fs').readFileSync(
++  require('node:path').join(__dirname, 'purge-expired-trial-behavior.sql'), 'utf8'
++);
+ 
+ // 独立后台 Worker 进程（技术设计 12.4 的隔离 Worker 部署形态，本地开发版）：
+ // API 进程以 QIYU_PERSISTENCE=postgres 运行时不内嵌任何 Worker（请求作用域存储
+@@ -175,8 +178,20 @@
+     return outcomes.some(Boolean);
+   }
+ 
++  let nextTrialBehaviorPurge = 0;
+   async function tick() {
+     let worked = 0;
++    if (Date.now() >= nextTrialBehaviorPurge) {
++      try {
++        const result = await pool.query(trialBehaviorPurgeSql);
++        nextTrialBehaviorPurge = result.rowCount >= 2000 ? 0 : Date.now() + 60 * 60 * 1000;
++        worked += result.rowCount;
++        if (result.rowCount) console.log(`[worker] 封测浏览明细清理 ${result.rowCount} 项`);
++      } catch (error) {
++        nextTrialBehaviorPurge = Date.now() + 5 * 60 * 1000;
++        console.error('[worker] 封测浏览明细清理失败', error.code || error.name);
++      }
++    }
+     const summaryAccounts = await discoverAccounts(`
+       SELECT DISTINCT account_id FROM (
+         SELECT account_id FROM conversation_summary_jobs WHERE state = 'PENDING' AND exhausted_at IS NULL AND next_attempt_at <= CURRENT_TIMESTAMP
+--- a/apps/api/src/app.js
++++ b/apps/api/src/app.js
+@@ -1,4 +1,5 @@
+ 'use strict';
++const { markEffectiveChatTurn } = require('./domain/effective-chat-turn');
+ 
+ const http = require('node:http');
+ const { randomUUID, createHash, createHmac, timingSafeEqual } = require('node:crypto');
+@@ -162,6 +163,28 @@
+   // 邀请码封测不能回退到旧的开发 token 或开发支付回调；两种认证模型必须互斥。
+   const accountId = (await accountIdForRequest(req, store, resolvedTrialAuth, { allowDevelopmentTokens: !trialAuthEnabled }))
+     || (!trialAuthEnabled ? verifiedDevelopmentCallbackAccountId(req, url, body, store) : null);
++  if (url.pathname === '/api/v1/privacy/trial-behavior' || url.pathname === '/api/v1/trial-behavior-events') {
++    if (!trialAuthEnabled || !store.pool) throw apiError(404, 'ROUTE_NOT_FOUND', '接口不存在');
++    if (!accountId) throw apiError(401, 'AUTH_REQUIRED', '需要有效的试用会话');
++    const { trialBehavior, validTrialBehaviorEvent, trialBehaviorBatchLimit } = require('./persistence/postgres-trial-behavior');
++    if (url.pathname.endsWith('/privacy/trial-behavior')) {
++      if (req.method === 'GET') return ok(await trialBehavior(store.pool, accountId));
++      if (req.method === 'POST' && typeof body?.enabled === 'boolean' &&
++          (Object.keys(body).length === 1 || (Object.keys(body).length === 2 && body.enabled && body.include_relationship_actions === true))) {
++        return ok(await trialBehavior(store.pool, accountId, { enabled: body.enabled,
++          includeRelationshipActions: body.include_relationship_actions }));
++      }
++    } else if (req.method === 'POST' && body && !Array.isArray(body)) {
++      if (validTrialBehaviorEvent(body)) return ok(await trialBehavior(store.pool, accountId, { event: body }));
++      const events = body.events;
++      if (Object.keys(body).length === 1 && Array.isArray(events) && events.length > 0 &&
++          events.length <= trialBehaviorBatchLimit && events.every(validTrialBehaviorEvent) &&
++          new Set(events.map(event => event.event_id.toLowerCase())).size === events.length) {
++        return ok(await trialBehavior(store.pool, accountId, { events }));
++      }
++    }
++    throw apiError(400, 'VALIDATION_ERROR', '无效的试用分析请求');
++  }
+   // 通话音频分块只写进程内缓冲（不触任何表）：绕开账户事务，凭缓冲自身的
+   // 归属绑定做账户隔离，避免长时间通话期间每 2 秒一次的块上传排队账户事务。
+   if (accountId && req.method === 'POST' && /^\/api\/v1\/calls\/[^/]+\/turns\/[^/]+\/audio-chunks$/.test(url.pathname)) {
+@@ -1658,6 +1681,7 @@
+     } : null;
+     store.messages.set(userMessage.message_id, userMessage);
+     for (const assetId of attachmentIds) store.mediaAssets.get(assetId).message_id = userMessage.message_id;
++    markEffectiveChatTurn(userMessage, assistantMessage);
+     store.messages.set(assistantMessage.message_id, assistantMessage);
+     if (candidate) store.candidates.set(candidate.candidate_id, candidate);
+     // The user-facing transaction only records a deterministic task. The
+@@ -2168,6 +2192,7 @@
+     ai_generated: modelReply.ai_generated !== false, world_state_id: worldState?.world_state_id ?? null,
+     world_state_version: worldState?.state_version ?? null, created_at: createdAt
+   };
++  if (userMessageId) markEffectiveChatTurn(store.messages.get(userMessageId), assistantMessage);
+   store.messages.set(assistantMessage.message_id, assistantMessage);
+   // 来源落库（通道二：SSE）：终稿与注入快照同事务固化；安全替换路径
+   //（candidate:null）不带 contextPack——它不是模型正常产物，不记引用。
+@@ -2296,7 +2321,7 @@
+         // The provider may retain an interrupted turn. Count its known text
+         // once before clearing userText; no transcript means no invented turn.
+         retainDialogueEstimate(session, session.userText, [...session.replies.values()].join(''));
+-        session.userText = null;
++        session.userText = null; session.userVoiceStartedAt = null;
+         session.reservation = reserveDailyChatUsage(scoped, { accountId: session.accountId, estimatedInputTokens: session.tokenBudget });
+         return;
+       }
+@@ -2308,7 +2333,7 @@
+           const inputTokenEstimate = Math.ceil((session.promptBytes + session.dialogueBytes + Buffer.byteLength(JSON.stringify({ role: 'user', text: payload.text }), 'utf8')) / 2);
+           if (inputTokenEstimate > session.reservation.reservation_tokens) throw apiError(409, 'REALTIME_TOKEN_RESERVATION_EXCEEDED', '实时语音输入超出预留预算');
+           session.inputTokenEstimate = inputTokenEstimate;
+-          session.userText = payload.text;
++          session.userText = payload.text; session.userVoiceStartedAt = payload.startedAt ?? null;
+         }
+       }
+       if (action === 'complete') {
+@@ -2319,6 +2344,7 @@
+         const worldStateSnapshot = { world_state_id: worldState.world_state_id, world_state_version: worldState.state_version };
+         const userMessage = { message_id: scoped.next('msg'), conversation_id: session.conversationId, actor: 'USER', text: session.userText, provider: 'volcengine-realtime', ai_generated: false, created_at: createdAt, ...worldStateSnapshot };
+         const assistantMessage = { message_id: scoped.next('msg'), conversation_id: session.conversationId, actor: 'ASSISTANT', text: session.replies.get(payload.replyId), provider: 'volcengine-realtime', model_version: provider.model || 'native-realtime', ai_generated: true, created_at: createdAt, ...worldStateSnapshot };
++        markEffectiveChatTurn(userMessage, assistantMessage, session.userVoiceStartedAt, session.analyticsSessionKey);
+         scoped.messages.set(userMessage.message_id, userMessage); scoped.messages.set(assistantMessage.message_id, assistantMessage);
+         const automatic = recordAutomaticMemory(scoped, account, conversation, userMessage);
+         const source = ['AUTOMATIC', 'EXISTING', 'REJECTED', 'QUEUED'].includes(automatic?.action) ? null : automatic?.candidate || deriveFactCandidate(userMessage.text, session.context) || deriveEpisodeCandidate({ text: userMessage.text, characterId: conversation.character_id, worldState: session.context.world_state });
+@@ -2328,7 +2354,7 @@
+         }
+         if (devFlags && devFlagEnabled(devFlags, 'LIFE_EVENTS', account.account_id)) enqueueLifeEventExtraction({ store: scoped, account, conversation, message: userMessage });
+         if (memoryReferencesEnabled(scoped, account.account_id, devFlags) && session.context.memory_refs?.length) recordMessageMemoryRefs({ store: scoped, account, conversation, message: assistantMessage, refs: session.context.memory_refs });
+-        settleReservation(scoped, session); session.userText = null;
++        settleReservation(scoped, session); session.userText = null; session.userVoiceStartedAt = null;
+         session.revision = realtimeRevision(scoped, session);
+         // Existing native provider retains dialogue context; reserve its conservative
+         // growing upper bound before accepting the next user utterance.
+@@ -2347,7 +2373,7 @@
+       committedSession = { ...session };
+       return run(scoped, committedSession);
+     }, { lockDailyUsage: true });
+-    for (const key of ['reservation', 'userText', 'tokenBudget', 'dialogueBytes', 'inputTokenEstimate', 'revision', 'settled']) {
++    for (const key of ['reservation', 'userText', 'userVoiceStartedAt', 'tokenBudget', 'dialogueBytes', 'inputTokenEstimate', 'revision', 'settled']) {
+       if (Object.prototype.hasOwnProperty.call(committedSession, key)) session[key] = committedSession[key];
+     }
+     return result;
+--- a/apps/api/src/domain/call-turn-engine.js
++++ b/apps/api/src/domain/call-turn-engine.js
+@@ -1,4 +1,5 @@
+ 'use strict';
++const { markEffectiveChatTurn } = require('./effective-chat-turn');
+ 
+ // 1:1 通话回合执行体（每回合 SSE 的 produce 体，域层实现）。
+ // 形态对齐 app.js liveConversationStream：路由层负责 sseLive 包装与账户事务，
+@@ -334,6 +335,7 @@
+   const usage = usageCommit(modelReply);
+   const settled = await ctx.speech.settle();
+   settleTurnSafely(store, call, turn, { state: 'COMPLETED', asrSeconds: ctx.asrSeconds, ttsSeconds: settled.committedSeconds, now: now() });
++  if (turn.state === 'COMPLETED') markEffectiveChatTurn(userMessage, assistantMessage);
+   emit('call.turn.completed', {
+     turn_id: turn.turn_id, user_message_id: turn.user_message_id, assistant_message_id: assistantMessage.message_id,
+     tts_job_id: settled.job?.job_id ?? null, usage: usage ?? null, tts_degraded: Boolean(settled.job?.failure_code),
+--- /dev/null
++++ b/apps/api/src/domain/effective-chat-turn.js
+@@ -0,0 +1,19 @@
++'use strict';
++
++const effectiveChatSource = Symbol('effectiveChatSource');
++const effectiveChatStartedAt = Symbol('effectiveChatStartedAt');
++const effectiveChatSessionKey = Symbol('effectiveChatSessionKey');
++
++function markEffectiveChatTurn(userMessage, assistantMessage, startedAt = null, sessionKey = null) {
++  if (userMessage?.actor !== 'USER' || assistantMessage?.actor !== 'ASSISTANT' ||
++      !assistantMessage.ai_generated || !assistantMessage.text?.trim() ||
++      userMessage.conversation_id !== assistantMessage.conversation_id) return;
++  const text = userMessage.text?.replace(/[0-9#*]\uFE0F?\u20E3|[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\u200D\uFE0F\u{E0020}-\u{E007F}]/gu, '').trim();
++  if (text) {
++    assistantMessage[effectiveChatSource] = userMessage.message_id;
++    if (startedAt !== null) assistantMessage[effectiveChatStartedAt] = startedAt;
++    if (sessionKey !== null) assistantMessage[effectiveChatSessionKey] = sessionKey;
++  }
++}
++
++module.exports = { effectiveChatSource, effectiveChatStartedAt, effectiveChatSessionKey, markEffectiveChatTurn };
+--- a/apps/api/src/domain/realtime-call.js
++++ b/apps/api/src/domain/realtime-call.js
+@@ -79,7 +79,7 @@
+   create({ accountId, conversationId, context, reservation, pendingCommit = false }) {
+     if ([...this.sessions.values()].some((item) => item.accountId === accountId && !item.closed)) throw fail('CALL_ALREADY_ACTIVE', '已有实时通话');
+     const id = `rt_${randomUUID()}`;
+-    const item = { id, accountId, conversationId, context, reservation, createdAt: Date.now(), started: false, closed: false, sequence: 0, inputBytes: 0, outputBytes: 0, roundOutputBytes: 0, completedRounds: 0, pendingBytes: 0, lastAccessCheckAt: null, segments: new Map(), questions: new Map(), replies: new Map(), rejectedReplies: new Set(), chain: Promise.resolve(), emit: null, socket: null };
++    const item = { id, analyticsSessionKey: randomUUID(), accountId, conversationId, context, reservation, createdAt: Date.now(), started: false, closed: false, sequence: 0, inputBytes: 0, outputBytes: 0, roundOutputBytes: 0, completedRounds: 0, pendingBytes: 0, lastAccessCheckAt: null, segments: new Map(), questions: new Map(), replies: new Map(), rejectedReplies: new Set(), chain: Promise.resolve(), emit: null, socket: null };
+     this.sessions.set(id, item);
+     if (!pendingCommit) this.activate(item);
+     return item;
+@@ -189,6 +189,7 @@
+         await this.transact(item, 'interrupt');
+         item.segments.clear(); item.questions.clear(); item.replies.clear(); item.rejectedReplies.clear(); item.roundOutputBytes = 0;
+       }
++      if (item.roundQuestion !== event.questionId) item.roundStartedAt = new Date().toISOString();
+       item.roundQuestion = event.questionId;
+       return;
+     }
+@@ -198,7 +199,7 @@
+       if (item.questions.has(event.questionId)) throw fail('REALTIME_TRANSCRIPT_CHANGED', '实时语音转写发生冲突');
+       const safety = responseForExistingSafetyMode(item.context.safety_mode) || assessSafety(event.text);
+       if (safety) { await this.transact(item, 'safety', { safety }); throw fail('REALTIME_SAFETY_BLOCKED', '本次通话需切换安全处理'); }
+-      await this.transact(item, 'input', { text: event.text, questionId: event.questionId });
++      await this.transact(item, 'input', { text: event.text, questionId: event.questionId, startedAt: item.roundQuestion === event.questionId ? item.roundStartedAt ?? null : null });
+       if (item.activeQuestion && item.activeQuestion !== event.questionId || item.closed) return;
+       item.questions.set(event.questionId, event.text);
+       item.emit('realtime.transcript', { role: 'user', text: event.text, question_id: event.questionId });
+--- a/apps/api/src/persistence/postgres-store.js
++++ b/apps/api/src/persistence/postgres-store.js
+@@ -925,23 +925,33 @@
+ }
+ async function persistMessage(client, item, exists, retentionDays, job, accountId, ref) {
+   if (exists) return;
++  const { effectiveChatSource, effectiveChatStartedAt, effectiveChatSessionKey } = require('../domain/effective-chat-turn');
++  const metadata = [
++    ['effective_chat_source_id', item[effectiveChatSource], 'uuid'],
++    ['effective_chat_started_at', item[effectiveChatStartedAt], 'timestamptz'],
++    ['effective_chat_session_key', item[effectiveChatSessionKey], 'uuid']
++  ].filter(([, value]) => value != null);
++  const sourceColumn = metadata.map(([column]) => ', ' + column).join('');
++  const sourceValue = metadata.map(([, , type], index) => `, $${14 + index}::${type}`).join('');
++  const offset = metadata.length;
+   const insert = `INSERT INTO messages (
+     message_id, conversation_id, actor, content_ciphertext, created_at, retention_expires_at, provider, model_version,
+-    ai_generated, world_state_id, world_state_version, attachments, call_session_id
++    ai_generated, world_state_id, world_state_version, attachments, call_session_id${sourceColumn}
+   ) VALUES ($1, $2, $3, convert_to($4, 'UTF8'), COALESCE($5::timestamptz, CURRENT_TIMESTAMP),
+-    COALESCE($5::timestamptz, CURRENT_TIMESTAMP) + make_interval(days => $6), $7, $8, $9, $10, $11, $12::jsonb, $13)`;
++    COALESCE($5::timestamptz, CURRENT_TIMESTAMP) + make_interval(days => $6), $7, $8, $9, $10, $11, $12::jsonb, $13${sourceValue})`;
+   const values = [item.message_id, item.conversation_id, item.actor, item.text, item.created_at || null, retentionDays,
+     item.provider || null, item.model_version || null, Boolean(item.ai_generated), item.world_state_id || null,
+     item.world_state_version || null, JSON.stringify(item.attachments ?? []), item.call_session_id || null];
++  values.push(...metadata.map(([, value]) => value));
+   if (ref) return client.query(`WITH source AS (${insert} RETURNING message_id, conversation_id)
+     INSERT INTO message_memory_refs (ref_id, message_id, account_id, character_id, conversation_id, refs_json, context_bundle_version, created_at)
+-    SELECT $14, message_id, $15, $16, conversation_id, $17::jsonb, $18, $19::timestamptz FROM source
++    SELECT $${14 + offset}, message_id, $${15 + offset}, $${16 + offset}, conversation_id, $${17 + offset}::jsonb, $${18 + offset}, $${19 + offset}::timestamptz FROM source
+     ON CONFLICT (message_id) DO UPDATE SET refs_json = EXCLUDED.refs_json, context_bundle_version = EXCLUDED.context_bundle_version`,
+   [...values, ref.ref_id, ref.account_id, ref.character_id, JSON.stringify(ref.refs_json ?? { refs: [] }), ref.context_bundle_version, ref.created_at]);
+   if (!job) return client.query(insert, values);
+   return client.query(`WITH source AS (${insert} RETURNING message_id)
+     INSERT INTO automatic_memory_jobs (message_id, account_id, preference_version, revocation_epoch, mode, source_utc_offset_minutes)
+-    SELECT message_id, $14, $15, $16, $17, $18 FROM source ON CONFLICT (message_id) DO NOTHING`,
++    SELECT message_id, $${14 + offset}, $${15 + offset}, $${16 + offset}, $${17 + offset}, $${18 + offset} FROM source ON CONFLICT (message_id) DO NOTHING`,
+   [...values, accountId, job.preferenceVersion, job.revocationEpoch, job.mode, job.sourceUtcOffsetMinutes]);
+ }
+ async function persistCallSession(client, item, exists) {
+--- /dev/null
++++ b/apps/api/src/persistence/postgres-trial-behavior.js
+@@ -0,0 +1,85 @@
++'use strict';
++
++const { PostgresRepository } = require('./postgres-repository');
++const trialBehaviorBatchLimit = 10;
++const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++function validTrialBehaviorMetadata(metadata) {
++  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata) || Object.keys(metadata).length !== 3 ||
++      !['home', 'chat', 'profile', 'data', 'assets', 'subscription', 'other'].includes(metadata.entry_surface) ||
++      typeof metadata.client_build !== 'string' || !/^(unversioned|[0-9]{8}-[a-z0-9-]{1,40})$/.test(metadata.client_build) ||
++      typeof metadata.observed_at !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(metadata.observed_at)) return false;
++  const time = new Date(metadata.observed_at);
++  return Number.isFinite(time.getTime()) && time.toISOString() === metadata.observed_at;
++}
++
++function validTrialBehaviorEvent(event) {
++  if (!event || typeof event !== 'object' || Array.isArray(event)) return false;
++  const relationship = event.event_type === 'relationship_action';
++  const includesMetadata = Object.hasOwn(event, 'metadata');
++  return (relationship || event.event_type === 'access_info_viewed') &&
++    typeof event.event_id === 'string' && uuid.test(event.event_id) &&
++    Object.keys(event).length === (relationship ? 3 : 2) + Number(includesMetadata) &&
++    (!includesMetadata || validTrialBehaviorMetadata(event.metadata)) &&
++    (relationship ? typeof event.character_id === 'string' && uuid.test(event.character_id) : !Object.hasOwn(event, 'character_id'));
++}
++
++async function trialBehavior(pool, accountId, { enabled, includeRelationshipActions, event, events } = {}) {
++  const client = await pool.connect();
++  const repository = new PostgresRepository(client);
++  try {
++    const batch = events ?? (event ? [event] : []);
++    const writing = enabled !== undefined || batch.length > 0;
++    await repository.beginAccountScope(accountId, undefined, { readOnly: !writing });
++    const account = await client.query(`SELECT trial_behavior_enabled, trial_relationship_processing_enabled FROM accounts
++      WHERE account_id = $1 AND account_status = 'OPEN' AND deleted_at IS NULL
++      ${writing ? 'FOR UPDATE' : ''}`, [accountId]);
++    const current = account.rows[0];
++    if (!current) throw Object.assign(new Error('账户当前不可用'), { status: 403, code: 'ACCOUNT_NOT_OPEN' });
++
++    let active = current.trial_behavior_enabled;
++    let processing = current.trial_relationship_processing_enabled;
++    let acceptedIds = [];
++    if (enabled !== undefined) {
++      const nextProcessing = enabled && (includeRelationshipActions === true || processing);
++      if (enabled !== active || nextProcessing !== processing) {
++        await client.query(`UPDATE accounts SET trial_behavior_enabled = $2, trial_relationship_processing_enabled = $3
++          WHERE account_id = $1`, [accountId, enabled, nextProcessing]);
++      }
++      active = enabled;
++      processing = nextProcessing;
++    }
++    if (batch.length && active) {
++      const insertion = await client.query(`INSERT INTO trial_behavior_events
++        (account_id, event_id, event_type, character_id, schema_version, entry_surface, client_build, client_observed_at)
++        SELECT $1, (item->>'event_id')::uuid, item->>'event_type', (item->>'character_id')::uuid,
++          CASE WHEN item ? 'metadata' THEN 2 ELSE 1 END,
++          item->'metadata'->>'entry_surface', item->'metadata'->>'client_build', (item->'metadata'->>'observed_at')::timestamptz
++        FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS batch(item, sequence)
++        WHERE (item->>'character_id' IS NULL OR EXISTS (
++          SELECT 1 FROM characters WHERE character_id = (item->>'character_id')::uuid AND account_id = $1
++            AND status = 'ACTIVE' AND deleted_at IS NULL
++        ))
++        AND NOT EXISTS (SELECT 1 FROM trial_behavior_events
++          WHERE account_id = $1 AND event_id = (item->>'event_id')::uuid)
++        ORDER BY sequence
++        LIMIT (SELECT GREATEST(0, 200 - COUNT(*)) FROM trial_behavior_events
++          WHERE account_id = $1 AND action_kind = 'VIEW'
++            AND received_at >= statement_timestamp() - INTERVAL '24 hours')
++        ON CONFLICT (account_id, event_id) DO NOTHING
++        RETURNING event_id`, [accountId, JSON.stringify(batch)]);
++      acceptedIds = insertion.rows.map(row => row.event_id);
++    }
++    await repository.commit();
++    if (event) return { accepted: acceptedIds.length === 1 };
++    if (events) return { accepted_event_ids: acceptedIds };
++    return { enabled: active, ...(processing ? { relationship_processing_enabled: true } : {}) };
++  } catch (error) {
++    await repository.rollback();
++    throw error;
++  } finally {
++    client.release();
++  }
++}
++
++module.exports = { trialBehavior, validTrialBehaviorEvent, validTrialBehaviorMetadata, trialBehaviorBatchLimit };
+--- a/apps/web/app.js
++++ b/apps/web/app.js
+@@ -190,6 +190,7 @@
+     response = await fetch(`${API_BASE}${path}`, {
+       method: options.method ?? "GET",
+       headers,
++      signal: options.signal,
+       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+     });
+   } catch {
+@@ -1607,6 +1608,7 @@
+     state.rawInteractionRetentionDays = payload?.raw_interaction_retention_days ?? null;
+     state.automaticMemoryEnabled = automaticMemory?.enabled === true;
+     state.route = "data";
++    if (isClosedTrial()) refreshTrialBehaviorPreference();
+   } catch (error) { setToast(serverMessage(error)); } finally { setBusy(false); }
+ }
+ 
+@@ -1618,6 +1620,158 @@
+     setToast(enabled ? '自动记忆已开启。你可以随时查看、修订或删除。' : '自动记忆已关闭；已保存的记忆可在回忆中管理。');
+   } catch (error) { setToast(serverMessage(error)); } finally { setBusy(false); }
+ }
++
++let trialBehaviorPreference = null;
++let trialBehaviorView = null;
++let trialBehaviorObserver = null;
++let trialBehaviorLastRoute = null;
++const trialBehaviorBuild = new URL(import.meta.url).searchParams.get('v') || 'unversioned';
++const trialBehaviorQueue = [];
++let trialBehaviorQueueToken = null;
++let trialBehaviorFlushTimer = null;
++let trialBehaviorInFlight = null;
++
++function discardTrialBehaviorQueue() {
++  trialBehaviorQueue.length = 0;
++  trialBehaviorQueueToken = null;
++  clearTimeout(trialBehaviorFlushTimer);
++  trialBehaviorFlushTimer = null;
++  trialBehaviorInFlight?.abort();
++}
++
++function scheduleTrialBehaviorFlush() {
++  if (trialBehaviorFlushTimer === null && !trialBehaviorInFlight && trialBehaviorQueue.length) {
++    trialBehaviorFlushTimer = setTimeout(flushTrialBehavior, 250);
++  }
++}
++
++function queueTrialBehavior(token, event) {
++  if (trialBehaviorQueueToken !== token) {
++    discardTrialBehaviorQueue();
++    trialBehaviorQueueToken = token;
++  }
++  if (trialBehaviorQueue.length >= 20) {
++    console.warn('栖语试用分析队列已满');
++    return;
++  }
++  trialBehaviorQueue.push(event);
++  scheduleTrialBehaviorFlush();
++}
++
++async function flushTrialBehavior() {
++  trialBehaviorFlushTimer = null;
++  const token = trialBehaviorQueueToken;
++  if (!token || token !== bearerToken() || !isClosedTrial() || !trialBehaviorEnabled()) {
++    discardTrialBehaviorQueue();
++    return;
++  }
++  const events = trialBehaviorQueue.splice(0, 10);
++  const controller = new AbortController();
++  trialBehaviorInFlight = controller;
++  try {
++    for (const delay of [0, 500]) {
++      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
++      if (controller.signal.aborted || token !== bearerToken() || !trialBehaviorEnabled()) return;
++      try {
++        await api('/trial-behavior-events', { method: 'POST', body: { events },
++          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(4000)]) });
++        return;
++      } catch (error) {
++        if (controller.signal.aborted) return;
++        if (delay || (error.status !== 0 && error.status < 500)) {
++          console.warn('栖语试用分析批次未完成', error.status ?? 0);
++          return;
++        }
++      }
++    }
++  } finally {
++    trialBehaviorInFlight = null;
++    scheduleTrialBehaviorFlush();
++  }
++}
++
++function trialBehaviorEnabled() {
++  const token = bearerToken();
++  return trialBehaviorPreference?.token === token ? trialBehaviorPreference.enabled : null;
++}
++
++async function refreshTrialBehaviorPreference() {
++  const token = bearerToken();
++  const previous = trialBehaviorPreference;
++  try {
++    const result = await api('/privacy/trial-behavior');
++    if (bearerToken() !== token || trialBehaviorPreference !== previous) return;
++    trialBehaviorPreference = { token, enabled: result.enabled === true, processing: result.relationship_processing_enabled === true };
++    if (state.route === 'data') render();
++  } catch (error) {
++    console.warn('栖语试用分析设置读取未完成', error.status ?? 0);
++  }
++}
++
++async function setTrialBehavior(enabled) {
++  const token = bearerToken();
++  if (!enabled) discardTrialBehaviorQueue();
++  setBusy(true);
++  try {
++    const result = await api('/privacy/trial-behavior', { method: 'POST', body: enabled ? { enabled, include_relationship_actions: true } : { enabled } });
++    if (bearerToken() === token) trialBehaviorPreference = { token, enabled: result.enabled === true, processing: result.relationship_processing_enabled === true };
++  } catch (error) {
++    if (bearerToken() === token) setToast(serverMessage(error));
++  } finally {
++    setBusy(false);
++  }
++}
++
++function observeTrialBehaviorView() {
++  trialBehaviorObserver?.disconnect();
++  const token = bearerToken();
++  if (trialBehaviorQueueToken && trialBehaviorQueueToken !== token) discardTrialBehaviorQueue();
++  const route = state.route;
++  const role = route === 'assets' ? characterId() : null;
++  const lastRoute = trialBehaviorLastRoute;
++  trialBehaviorLastRoute = route;
++  if (!isClosedTrial() || !token || state.booting || state.error ||
++      (route !== 'subscription' && (route !== 'assets' || !role))) {
++    trialBehaviorView = null;
++    return;
++  }
++  if (trialBehaviorView?.token !== token || trialBehaviorView?.route !== route || trialBehaviorView?.role !== role) {
++    const entry = ['home', 'chat', 'profile', 'data', 'assets', 'subscription'].includes(lastRoute) ? lastRoute : 'other';
++    trialBehaviorView = { token, route, role, entry, sent: false };
++  }
++  const view = trialBehaviorView;
++  if (view.sent || document.visibilityState !== 'visible' || trialBehaviorEnabled() === false) return;
++  const target = app.querySelector(route === 'assets' ? '.timeline-entry' : 'h1');
++  if (!target) return;
++  const current = () => trialBehaviorView === view && bearerToken() === token && state.route === route &&
++    (route !== 'assets' || characterId() === role) && document.visibilityState === 'visible';
++  const observer = new IntersectionObserver(async (entries) => {
++    if (!target.isConnected || !entries.some(entry => entry.isIntersecting) || !current() || view.sent) return;
++    const observedAt = new Date().toISOString();
++    view.sent = true;
++    observer.disconnect();
++    try {
++      if (trialBehaviorEnabled() === null) {
++        const result = await api('/privacy/trial-behavior');
++        if (!current()) return;
++        if (trialBehaviorEnabled() === null) trialBehaviorPreference = { token, enabled: result.enabled === true, processing: result.relationship_processing_enabled === true };
++      }
++      const eventId = globalThis.crypto?.randomUUID?.();
++      if (!current() || !trialBehaviorEnabled() || !eventId) return;
++      const body = route === 'assets'
++        ? { event_id: eventId, event_type: 'relationship_action', character_id: role }
++        : { event_id: eventId, event_type: 'access_info_viewed' };
++      body.metadata = { entry_surface: view.entry, client_build: trialBehaviorBuild, observed_at: observedAt };
++      queueTrialBehavior(token, body);
++    } catch (error) {
++      console.warn('栖语试用分析请求未完成', error.status ?? 0);
++    }
++  });
++  trialBehaviorObserver = observer;
++  observer.observe(target);
++}
++
++document.addEventListener('visibilitychange', observeTrialBehaviorView);
+ 
+ async function openSubscription() {
+   setBusy(true);
+@@ -2682,11 +2836,14 @@
+ }
+ 
+ function renderDataCenter() {
++  const analyticsEnabled = trialBehaviorEnabled();
++  const analyticsStatus = analyticsEnabled === true ? (trialBehaviorPreference?.processing ? '已开启' : '仅浏览') : analyticsEnabled === false ? '已关闭' : '可选';
+   const retention = state.rawInteractionRetentionDays;
+   const retentionText = retention === 30 || retention === 90 ? `${retention} 天` : "未取得服务端设置";
+   return apricotSettingsPage("数据与隐私", `
+   <section class="settings-panel"><h2>账户</h2><div class="list"><button class="list-row" data-action="open-subscription"><span class="list-ico">${prototypeIcon("spark", 24)}</span><span class="list-copy"><b>试用与可用能力</b></span></button></div></section>
+   <section class="settings-panel settings-rights"><span class="settings-symbol">${prototypeIcon("lock", 24)}</span><h2>数据权利独立于关系</h2><p>聊天记录、候选记忆和确认的关系资产分层保存；删除后是否完成以服务端回执为准。</p></section>
++  ${isClosedTrial() ? `<section class="settings-panel"><div class="settings-section-head"><h2>试用使用统计</h2><small>${analyticsStatus}</small></div><p>开启后记录回忆和试用权益页的浏览，以及确认或修订回忆的动作。统计不收集页面内容，关闭后会清除统计明细。</p><div class="segment" role="group" aria-label="试用使用统计"><button class="${analyticsStatus === '已开启' ? 'on' : ''}" data-action="enable-trial-behavior" ${state.busy ? 'disabled' : ''}>开启</button><button class="${analyticsEnabled === false ? 'on' : ''}" data-action="disable-trial-behavior" ${state.busy ? 'disabled' : ''}>关闭</button></div></section>` : ''}
+   <section class="settings-panel"><div class="settings-section-head"><h2>自动记忆</h2><small>${state.automaticMemoryEnabled ? '已开启' : '已关闭'}</small></div><p>开启后，系统可以从对话中记住部分偏好和近况。重要信息可能需要你确认。你可以在回忆中查看、修改或删除，关闭开关会停止新增自动记忆。</p><div class="segment" role="group" aria-label="自动记忆"><button class="${state.automaticMemoryEnabled === true ? 'on' : ''}" data-action="enable-automatic-memory" aria-pressed="${state.automaticMemoryEnabled === true}" ${state.busy ? 'disabled' : ''}>开启</button><button class="${state.automaticMemoryEnabled === false ? 'on' : ''}" data-action="disable-automatic-memory" aria-pressed="${state.automaticMemoryEnabled === false}" ${state.busy ? 'disabled' : ''}>关闭</button></div></section>
+   <section class="settings-panel"><div class="settings-section-head"><h2>聊天保留周期</h2><small>当前 ${escapeHtml(retentionText)}</small></div><div class="segment" role="group" aria-label="聊天保留周期"><button class="${retention === 30 ? "on" : ""}" data-action="set-retention-30" aria-pressed="${retention === 30}" ${state.busy ? "disabled" : ""}>30 天</button><button class="${retention === 90 ? "on" : ""}" data-action="set-retention-90" aria-pressed="${retention === 90}" ${state.busy ? "disabled" : ""}>90 天</button></div></section>
+   <section class="settings-panel"><div class="settings-section-head"><h2>关系资产</h2><small>${state.assets.length} 条有效资产</small></div><div class="list"><button class="list-row" data-action="download-relationship-profile"><span class="list-ico">${prototypeIcon("download", 24)}</span><span class="list-copy"><b>导出我的数据</b></span></button><button class="list-row" data-action="open-assets"><span class="list-ico">${prototypeIcon("archive", 24)}</span><span class="list-copy"><b>管理关系资产</b></span></button><button class="list-row" data-action="open-safety"><span class="list-ico">${prototypeIcon("shield", 24)}</span><span class="list-copy"><b>帮助与反馈</b></span></button></div></section>
+@@ -3201,6 +3358,7 @@
+   const hadFocusedMessageInput = document.activeElement?.getAttribute?.("name") === "message";
+   const memoryToolsOpen = state.route === "assets" && app.querySelector('[data-action="refresh-assets"]')?.closest("details")?.open;
+   updateCompanionView(view + renderContinuousReminder() + undoMemory + overlaySheet + (state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : ""));
++  observeTrialBehaviorView();
+   if (memoryToolsOpen) {
+     const memoryTools = app.querySelector('[data-action="refresh-assets"]')?.closest("details");
+     if (memoryTools) memoryTools.open = true;
+@@ -3542,6 +3700,8 @@
+   if (action === "reload-card") { state.cardCache.delete(button.dataset.artifactId); render(); }
+   if (action === "remove-emergency-contact") removeEmergencyContact();
+   if (action === "delete-account") deleteAccount();
++  if (action === "enable-trial-behavior") setTrialBehavior(true);
++  if (action === "disable-trial-behavior") setTrialBehavior(false);
+   if (action === "dismiss-reminder") { state.continuousReminder = null; render(); }
+   if (action === "back-chat") { if (state.route === "candidate") { state.selectedCandidate = null; state.confirmEdit = ""; state.eventDraft = null; } state.route = button.closest('.bottom-nav') ? "chat" : state.secondaryParents[state.route] ?? state.secondaryOrigin; render(); }
+   if (action === "start-call") startVoiceCall();
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -19,6 +19,6 @@
+       </div>
+     </main>
+     <noscript>此开发前端需要启用 JavaScript，才能读取 /api/v1 的服务端状态。</noscript>
+-    <script type="module" src="app.js?v=20261112-playback-v45"></script>
++    <script type="module" src="app.js?v=20261119-analytics"></script>
+   </body>
+ </html>
+--- a/apps/web/service-worker.js
++++ b/apps/web/service-worker.js
+@@ -1,7 +1,7 @@
+ 'use strict';
+-const SHELL = 'qiyu-shell-v45-stable';
++const SHELL = 'qiyu-shell-v45-analytics';
+ const ASSETS = ['/character-appearance.js', '/assets/portraits/male-01.png', '/assets/portraits/male-02.png', '/assets/portraits/male-03.png', '/assets/portraits/female-01.png', '/assets/portraits/female-02.png', '/assets/portraits/female-03.png', '/', '/app.js', '/call-client.js', '/realtime-call-client.js', '/encrypted-session.js', '/media-input.js', '/styles.css', '/prototype-restoration.css', '/tokens.css', '/favicon.svg', '/assets/player-play-filled.svg', '/assets/player-pause-filled.svg'];
+-ASSETS.push('/app.js?v=20261112-playback-v45', '/styles.css?v=20261112-playback-v45', '/realtime-call-client.js?v=20261112-playback-v45', '/apricot-ui.js?v=20261112-playback-v45', '/apricot.css?v=20261112-playback-v45', '/memory-panel.js?v=20261112-playback-v45', '/call-client.js?v=20261112-playback-v45', '/companion-cards.js', '/assets/apricot-reference.png?v=20261020-ui-v23');
++ASSETS.push('/app.js?v=20261119-analytics', '/styles.css?v=20261112-playback-v45', '/realtime-call-client.js?v=20261112-playback-v45', '/apricot-ui.js?v=20261112-playback-v45', '/apricot.css?v=20261112-playback-v45', '/memory-panel.js?v=20261112-playback-v45', '/call-client.js?v=20261112-playback-v45', '/companion-cards.js', '/assets/apricot-reference.png?v=20261020-ui-v23');
+ self.addEventListener('install', (event) => event.waitUntil(caches.open(SHELL).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())));
+ self.addEventListener('activate', (event) => event.waitUntil(caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== SHELL).map((key) => caches.delete(key)))).then(() => self.clients.claim())));
+ self.addEventListener('fetch', (event) => {
